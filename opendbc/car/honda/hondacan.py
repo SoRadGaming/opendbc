@@ -59,8 +59,8 @@ def create_brake_command(packer, CAN, apply_brake, pump_on, pcm_override, pcm_ca
     "CRUISE_FAULT_CMD": pcm_fault_cmd,
     "CRUISE_CANCEL_CMD": pcm_cancel_cmd,
     "COMPUTER_BRAKE_REQUEST": brake_rq,
-    "SET_ME_1": 0,
-    "BRAKE_LIGHTS": 0,
+    "SET_ME_1": 0, # Imperial Units, 0 = Metric, 1 = Imperial (HONDA_ACCORD_9G_AU)
+    "BRAKE_LIGHTS": 0, # Auto Enabled on HONDA_ACCORD_9G_AU
     "CHIME": stock_brake["CHIME"] if fcw else 0,  # send the chime for stock fcw
     "FCW": fcw << 1,  # TODO: Why are there two bits for fcw?
     "AEB_REQ_1": 0,
