@@ -110,6 +110,10 @@ class CarController(CarControllerBase):
     self.last_torque = 0.0
     self.last_pcm_speed = 0.0
 
+    # ACC_OVERRIDE_STOP (0x1FA bit 21): stock asserts it on the frame ACC_ON goes 1->0.
+    # Track enabled from the previous loop so we can fire on the CC.enabled falling edge.
+    self.enabled_prev = False
+
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
     hud_control = CC.hudControl
@@ -212,27 +216,38 @@ class CarController(CarControllerBase):
           pump_on, self.last_pump_ts = brake_pump_hysteresis(apply_brake, self.apply_brake_last, self.last_pump_ts, ts)
 
           # limit brake release to 32 units per frame to match factory
-          apply_brake = max(self.apply_brake_last - 32, apply_brake)
+          # apply_brake = max(self.apply_brake_last - 32, apply_brake)
 
           pcm_override = CC.longActive or CS.out.stockAeb
 
-          if apply_brake > 0: # prevent fault from concurrent gas + brake, accel at 198 while braking on stock camera
-            pcm_speed = 0.0
-            pcm_accel = 198
-          elif CS.out.gasPressed: # prevent fault from user gas with a pcm_gas of 198
-            pcm_accel = 198
-          if self.last_pcm_speed != 0.0: # wait for 0 pcm_speed to be sent on slower message
-            apply_brake = 0
+          # if apply_brake > 0: # prevent fault from concurrent gas + brake, accel at 198 while braking on stock camera
+          #   pcm_speed = 0.0
+          #   pcm_accel = 198
+          # elif CS.out.gasPressed: # prevent fault from user gas with a pcm_gas of 198
+          #   pcm_accel = 198
+          # if self.last_pcm_speed != 0.0: # wait for 0 pcm_speed to be sent on slower message
+          #   apply_brake = 0
 
+          # ACC_OVERRIDE_STOP: fire on the ACC_ON (CC.enabled) 1->0 frame when the driver braked.
+          # pcm_override is NOT needed here -- a brake-caused disengage was longActive the prior
+          # frame in 100% of logged cases, so (edge + brake) already implies cruise was overridden.
+          acc_on_falling = self.enabled_prev and not CC.enabled
           acc_override_stop = (self.CP.carFingerprint == CAR.HONDA_ACCORD_9G_AU
-                               and pcm_override
-                               and not CC.enabled
+                               and acc_on_falling
                                and CS.out.brakePressed)
+          self.enabled_prev = CC.enabled
           can_sends.append(hondacan.create_brake_command(self.packer, self.CAN, apply_brake, pump_on,
                                                          pcm_override, pcm_cancel_cmd, alert_fcw,
                                                          self.CP.carFingerprint, CS.stock_brake, acc_override_stop))
           self.apply_brake_last = apply_brake
           self.brake = apply_brake / self.params.NIDEC_BRAKE_MAX
+
+    # Stock ACC stand-down: re-send POWERTRAIN_DATA on the camera bus (bus 2) with ACC_STATUS
+    # cleared, so the stock Nidec radar sees cruise off and stops commanding the brake that trips
+    # TSA. The real 0x17C on the pt bus is untouched (its forward to bus 2 is blocked in safety),
+    # so the PCM still runs OP longitudinal; CMBS/AEB still fire at ACC_STATUS=0.
+    if self.CP.carFingerprint == CAR.HONDA_ACCORD_9G_AU and self.CP.openpilotLongitudinalControl:
+      can_sends.append(hondacan.create_pt_data_acc_off(self.packer, self.CAN.camera, CS.powertrain_data))
 
     # Send dashboard UI commands.
     if self.frame % 10 == 0:
@@ -267,4 +282,4 @@ class CarController(CarControllerBase):
     new_actuators.torqueOutputCan = apply_torque
 
     self.frame += 1
-    return new_actuators, can_sends
+    return new_actuat
