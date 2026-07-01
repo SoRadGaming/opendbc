@@ -215,20 +215,9 @@ class CarController(CarControllerBase):
           apply_brake = int(np.clip(apply_brake * self.params.NIDEC_BRAKE_MAX, 0, self.params.NIDEC_BRAKE_MAX - 1))
           pump_on, self.last_pump_ts = brake_pump_hysteresis(apply_brake, self.apply_brake_last, self.last_pump_ts, ts)
 
-          # limit brake release to 32 units per frame to match factory
-          # apply_brake = max(self.apply_brake_last - 32, apply_brake)
-
           pcm_override = CC.longActive or CS.out.stockAeb
 
-          # if apply_brake > 0: # prevent fault from concurrent gas + brake, accel at 198 while braking on stock camera
-          #   pcm_speed = 0.0
-          #   pcm_accel = 198
-          # elif CS.out.gasPressed: # prevent fault from user gas with a pcm_gas of 198
-          #   pcm_accel = 198
-          # if self.last_pcm_speed != 0.0: # wait for 0 pcm_speed to be sent on slower message
-          #   apply_brake = 0
-
-          # ACC_OVERRIDE_STOP: fire on the ACC_ON (CC.enabled) 1->0 frame when the driver braked.
+          # ACC_OVERRIDE_STOP: fire on the ACC_ON (CC.enabled) 1->0 frame when the driver braked. TODO - Not the fix?
           # pcm_override is NOT needed here -- a brake-caused disengage was longActive the prior
           # frame in 100% of logged cases, so (edge + brake) already implies cruise was overridden.
           acc_on_falling = self.enabled_prev and not CC.enabled
