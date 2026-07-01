@@ -1,6 +1,6 @@
 from opendbc.car import CanBusBase
 from opendbc.car.common.conversions import Conversions as CV
-from opendbc.car.honda.values import (HondaFlags, HONDA_BOSCH, HONDA_BOSCH_ALT_RADAR, HONDA_BOSCH_RADARLESS,
+from opendbc.car.honda.values import (CAR, HondaFlags, HONDA_BOSCH, HONDA_BOSCH_ALT_RADAR, HONDA_BOSCH_RADARLESS,
                                       HONDA_BOSCH_CANFD, CarControllerParams)
 
 # CAN bus layout with relay
@@ -50,6 +50,8 @@ def create_brake_command(packer, CAN, apply_brake, pump_on, pcm_override, pcm_ca
   # TODO: do we loose pressure if we keep pump off for long?
   brake_rq = apply_brake >= 4
   pcm_fault_cmd = False
+  # HONDA_ACCORD_9G_AU: SET_ME_1 is a metric/imperial flag here (0 = metric); the car auto-drives its own brake lights
+  accord_au = car_fingerprint == CAR.HONDA_ACCORD_9G_AU
 
   values = {
     "COMPUTER_BRAKE": apply_brake,
@@ -58,8 +60,8 @@ def create_brake_command(packer, CAN, apply_brake, pump_on, pcm_override, pcm_ca
     "CRUISE_FAULT_CMD": pcm_fault_cmd,
     "CRUISE_CANCEL_CMD": pcm_cancel_cmd,
     "COMPUTER_BRAKE_REQUEST": brake_rq,
-    "SET_ME_1": 0, # Imperial Units, 0 = Metric, 1 = Imperial (HONDA_ACCORD_9G_AU)
-    "BRAKE_LIGHTS": 0, # Auto Enabled on HONDA_ACCORD_9G_AU
+    "SET_ME_1": 0 if accord_au else 1,
+    "BRAKE_LIGHTS": 0 if accord_au else (apply_brake > 0),
     "CHIME": stock_brake["CHIME"] if fcw else 0,  # send the chime for stock fcw
     "FCW": fcw << 1,  # TODO: Why are there two bits for fcw?
     "AEB_REQ_1": 0,
