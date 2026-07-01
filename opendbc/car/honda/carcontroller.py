@@ -110,10 +110,6 @@ class CarController(CarControllerBase):
     self.last_torque = 0.0
     self.last_pcm_speed = 0.0
 
-    # ACC_OVERRIDE_STOP (0x1FA bit 21): stock asserts it on the frame ACC_ON goes 1->0.
-    # Track enabled from the previous loop so we can fire on the CC.enabled falling edge.
-    self.enabled_prev = False
-
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
     hud_control = CC.hudControl
@@ -216,18 +212,9 @@ class CarController(CarControllerBase):
           pump_on, self.last_pump_ts = brake_pump_hysteresis(apply_brake, self.apply_brake_last, self.last_pump_ts, ts)
 
           pcm_override = CC.longActive or CS.out.stockAeb
-
-          # ACC_OVERRIDE_STOP: fire on the ACC_ON (CC.enabled) 1->0 frame when the driver braked. TODO - Not the fix?
-          # pcm_override is NOT needed here -- a brake-caused disengage was longActive the prior
-          # frame in 100% of logged cases, so (edge + brake) already implies cruise was overridden.
-          acc_on_falling = self.enabled_prev and not CC.enabled
-          acc_override_stop = (self.CP.carFingerprint == CAR.HONDA_ACCORD_9G_AU
-                               and acc_on_falling
-                               and CS.out.brakePressed)
-          self.enabled_prev = CC.enabled
           can_sends.append(hondacan.create_brake_command(self.packer, self.CAN, apply_brake, pump_on,
                                                          pcm_override, pcm_cancel_cmd, alert_fcw,
-                                                         self.CP.carFingerprint, CS.stock_brake, acc_override_stop))
+                                                         self.CP.carFingerprint, CS.stock_brake))
           self.apply_brake_last = apply_brake
           self.brake = apply_brake / self.params.NIDEC_BRAKE_MAX
 
