@@ -32,6 +32,7 @@ static bool honda_fwd_brake = false;
 static bool honda_bosch_long = false;
 static bool honda_bosch_radarless = false;
 static bool honda_bosch_canfd = false;
+static bool honda_nidec_scm_standdown = false;
 typedef enum {HONDA_NIDEC, HONDA_BOSCH} HondaHw;
 static HondaHw honda_hw = HONDA_NIDEC;
 
@@ -279,10 +280,14 @@ static safety_config honda_nidec_init(uint16_t param) {
   // 0xE4 is steering on all cars except CRV and RDX, 0x194 for CRV and RDX,
   // 0x1FA is brake control, 0x30C is acc hud, 0x33D is lkas hud
   static CanMsg HONDA_N_TX_MSGS[] = {{0xE4, 0, 5, .check_relay = true}, {0x194, 0, 4, .check_relay = true}, {0x1FA, 0, 8, .check_relay = false},
+                                     {0x30C, 0, 8, .check_relay = true}, {0x33D, 0, 4, .check_relay = false}};
+  // HONDA_ACCORD_9G_AU stock-ACC stand-down: same TX list plus SCM_BUTTONS on bus 2 (CRUISE_BUTTONS=0). Keep in sync with HONDA_N_TX_MSGS above.
+  static CanMsg HONDA_N_SCM_STANDDOWN_TX_MSGS[] = {{0xE4, 0, 5, .check_relay = true}, {0x194, 0, 4, .check_relay = true}, {0x1FA, 0, 8, .check_relay = false},
                                      {0x30C, 0, 8, .check_relay = true}, {0x33D, 0, 4, .check_relay = false},
-                                     {0x1A6, 2, 8, .check_relay = false}};  // OP re-sends SCM_BUTTONS on bus 2 w/ CRUISE_BUTTONS=0 (stock ACC stand-down)
+                                     {0x1A6, 2, 8, .check_relay = false}};
 
   const uint16_t HONDA_PARAM_NIDEC_ALT = 4;
+  const uint16_t HONDA_PARAM_NIDEC_SCM_STANDDOWN = 32;
 
   honda_hw = HONDA_NIDEC;
   honda_brake = 0;
@@ -296,6 +301,7 @@ static safety_config honda_nidec_init(uint16_t param) {
   safety_config ret;
 
   bool enable_nidec_alt = GET_FLAG(param, HONDA_PARAM_NIDEC_ALT);
+  honda_nidec_scm_standdown = GET_FLAG(param, HONDA_PARAM_NIDEC_SCM_STANDDOWN);
 
   if (enable_nidec_alt) {
     // For Nidecs with main on signal on an alternate msg (missing 0x326)
@@ -315,7 +321,11 @@ static safety_config honda_nidec_init(uint16_t param) {
     SET_RX_CHECKS(honda_nidec_common_rx_checks, ret);
   }
 
-  SET_TX_MSGS(HONDA_N_TX_MSGS, ret);
+  if (honda_nidec_scm_standdown) {
+    SET_TX_MSGS(HONDA_N_SCM_STANDDOWN_TX_MSGS, ret);
+  } else {
+    SET_TX_MSGS(HONDA_N_TX_MSGS, ret);
+  }
 
   return ret;
 }
@@ -418,7 +428,7 @@ static bool honda_nidec_fwd_hook(int bus_num, int addr) {
 
   // block stock SCM_BUTTONS to the ACC radar; OP re-sends it on bus 2 with CRUISE_BUTTONS=0 so the
   // radar never sees an engage press and stays in standby (stops the blocked ACC brake / TSA)
-  if ((bus_num == 0) && (addr == 0x1A6)) {
+  if (honda_nidec_scm_standdown && (bus_num == 0) && (addr == 0x1A6)) {
     block_msg = true;
   }
 

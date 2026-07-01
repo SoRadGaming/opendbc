@@ -219,6 +219,8 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.RADARLESS.value
     if candidate in HONDA_BOSCH_CANFD:
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.BOSCH_CANFD.value
+    if candidate == CAR.HONDA_ACCORD_9G_AU and ret.openpilotLongitudinalControl:
+      ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.NIDEC_SCM_STANDDOWN.value
 
     # min speed to enable ACC. if car can do stop and go, then set enabling speed
     # to a negative value, so it won't matter. Otherwise, add 0.5 mph margin to not

@@ -8,7 +8,7 @@ import opendbc.safety.tests.common as common
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.common import CANPackerSafety, MAX_WRONG_COUNTERS
 
-HONDA_N_COMMON_TX_MSGS = [[0xE4, 0], [0x194, 0], [0x1FA, 0], [0x30C, 0], [0x33D, 0], [0x1A6, 2]]
+HONDA_N_COMMON_TX_MSGS = [[0xE4, 0], [0x194, 0], [0x1FA, 0], [0x30C, 0], [0x33D, 0]]
 
 
 class Btn:
@@ -243,7 +243,7 @@ class HondaBase(common.CarSafetyTest):
 
 class TestHondaNidecSafetyBase(HondaBase):
   TX_MSGS = HONDA_N_COMMON_TX_MSGS
-  FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
+  FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C]}
   RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x194, 0x30C)}
 
   PT_BUS = 0
@@ -285,7 +285,7 @@ class TestHondaNidecSafetyBase(HondaBase):
     super().test_fwd_hook()
 
     # forwarding AEB brake signal
-    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C]}
     self.safety.set_honda_fwd_brake(True)
     super().test_fwd_hook()
 
@@ -358,6 +358,30 @@ class TestHondaNidecPcmAltSafety(TestHondaNidecPcmSafety):
     values = {"CRUISE_BUTTONS": buttons, "MAIN_ON": main_on, "COUNTER": self.cnt_button % 4}
     self.__class__.cnt_button += 1
     return self.packer.make_can_msg_safety("SCM_BUTTONS", bus, values)
+
+
+class TestHondaNidecScmStanddownSafety(TestHondaNidecPcmAltSafety):
+  """
+    HONDA_ACCORD_9G_AU stock-ACC stand-down (NIDEC_SCM_STANDDOWN): OP re-sends SCM_BUTTONS
+    (0x1A6) on bus 2 with CRUISE_BUTTONS=0 and the stock 0x1A6 is blocked bus 0 -> 2.
+  """
+  TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x1A6, 2]]
+  FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
+
+  def setUp(self):
+    self.packer = CANPackerSafety("acura_ilx_2016_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.NIDEC_SCM_STANDDOWN)
+    self.safety.init_tests()
+
+  def test_fwd_hook(self):
+    # 0x1A6 (SCM_BUTTONS) is additionally blocked bus 0 -> 2 under stand-down
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C, 0x1FA], 0: [0x1A6]}
+    self.safety.set_honda_fwd_brake(False)
+    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
+    self.safety.set_honda_fwd_brake(True)
+    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
 
 
 # ********************* Honda Bosch **********************
