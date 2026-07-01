@@ -282,4 +282,4 @@ class CarController(CarControllerBase):
     new_actuators.torqueOutputCan = apply_torque
 
     self.frame += 1
-    return new_actuat
+    return new_actuators, can_sends
