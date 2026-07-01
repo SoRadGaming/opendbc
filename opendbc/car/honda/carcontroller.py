@@ -231,12 +231,12 @@ class CarController(CarControllerBase):
           self.apply_brake_last = apply_brake
           self.brake = apply_brake / self.params.NIDEC_BRAKE_MAX
 
-    # Stock ACC stand-down: re-send POWERTRAIN_DATA on the camera bus (bus 2) with ACC_STATUS
-    # cleared, so the stock Nidec radar sees cruise off and stops commanding the brake that trips
-    # TSA. The real 0x17C on the pt bus is untouched (its forward to bus 2 is blocked in safety),
-    # so the PCM still runs OP longitudinal; CMBS/AEB still fire at ACC_STATUS=0.
-    if self.CP.carFingerprint == CAR.HONDA_ACCORD_9G_AU and self.CP.openpilotLongitudinalControl:
-      can_sends.append(hondacan.create_pt_data_acc_off(self.packer, self.CAN.camera, CS.powertrain_data))
+    # Stock ACC stand-down: the Nidec radar engages off SCM_BUTTONS (it ignores ACC_STATUS), so we
+    # re-send SCM_BUTTONS to it (bus 2) with CRUISE_BUTTONS cleared -> it never sees an engage press
+    # and stays in standby, stopping the blocked ACC brake that trips TSA. The PCM on the pt bus
+    # still gets the real buttons (OP engages normally); CMBS/FCW unaffected. ~25 Hz like stock.
+    if self.CP.carFingerprint == CAR.HONDA_ACCORD_9G_AU and self.CP.openpilotLongitudinalControl and self.frame % 4 == 0:
+      can_sends.append(hondacan.create_scm_buttons_no_cruise(self.packer, self.CAN.camera, CS.scm_buttons))
 
     # Send dashboard UI commands.
     if self.frame % 10 == 0:

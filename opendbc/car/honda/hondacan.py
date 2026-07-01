@@ -166,12 +166,12 @@ def create_acc_hud(packer, bus, CP, enabled, pcm_speed, pcm_accel, hud_control, 
   return packer.make_can_msg("ACC_HUD", bus, acc_hud_values)
 
 
-def create_pt_data_acc_off(packer, bus, powertrain_data):
-  # Re-send POWERTRAIN_DATA with ACC_STATUS cleared so the stock Nidec ACC sees cruise off.
-  # Copy every signal verbatim except CHECKSUM/COUNTER (packer recomputes those).
-  values = {s: powertrain_data[s] for s in powertrain_data if s not in ("CHECKSUM", "COUNTER")}
-  values["ACC_STATUS"] = 0
-  return packer.make_can_msg("POWERTRAIN_DATA", bus, values)
+def create_scm_buttons_no_cruise(packer, bus, scm_buttons):
+  # Re-send SCM_BUTTONS with CRUISE_BUTTONS cleared so the stock Nidec ACC never sees an engage
+  # press and stays in standby. Copy every signal verbatim except CHECKSUM/COUNTER (packer redoes).
+  values = {s: scm_buttons[s] for s in scm_buttons if s not in ("CHECKSUM", "COUNTER")}
+  values["CRUISE_BUTTONS"] = 0
+  return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
 
 def create_lkas_hud(packer, bus, CP, hud_control, lat_active, steering_available, reduced_steering, alert_steer_required, lkas_hud):
