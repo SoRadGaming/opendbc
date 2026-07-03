@@ -167,11 +167,12 @@ def create_acc_hud(packer, bus, CP, enabled, pcm_speed, pcm_accel, hud_control, 
 
 
 def create_scm_buttons_no_cruise(packer, bus, scm_buttons):
-  # Re-send SCM_BUTTONS to the radar with CRUISE_BUTTONS = CANCEL, continuously, so the stock Nidec
-  # ACC keeps getting an active disengage command and can't run its own ACC (which OP replaces).
-  # The PCM on the pt bus still gets the driver's real buttons, so OP engages normally.
-  # Copy every signal verbatim except CHECKSUM/COUNTER (packer redoes them).
+  # Re-send SCM_BUTTONS to the radar with the ACC main switch forced OFF (MAIN_ON=0) plus a CANCEL,
+  # continuously, so the stock Nidec ACC can't run its own ACC (which OP replaces). CMBS is
+  # independent of MAIN and keeps working. The PCM on the pt bus still gets the driver's real
+  # buttons/MAIN, so OP engages normally. Copy every signal except CHECKSUM/COUNTER (packer redoes).
   values = {s: scm_buttons[s] for s in scm_buttons if s not in ("CHECKSUM", "COUNTER")}
+  values["MAIN_ON"] = 0        # master ACC switch off (CMBS unaffected)
   values["CRUISE_BUTTONS"] = 2  # 2 = cancel
   return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
