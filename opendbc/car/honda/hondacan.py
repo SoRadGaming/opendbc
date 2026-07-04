@@ -162,6 +162,7 @@ def create_acc_hud(packer, bus, CP, enabled, pcm_speed, pcm_accel, hud_control, 
     acc_hud_values['FCM_OFF_2'] = acc_hud['FCM_OFF_2']
     acc_hud_values['FCM_PROBLEM'] = acc_hud['FCM_PROBLEM']
     acc_hud_values['ICONS'] = acc_hud['ICONS']
+    acc_hud_values['CHIME'] = acc_hud['CHIME']  # pass stock chime through (e.g. CMBS toggle beep)
 
   return packer.make_can_msg("ACC_HUD", bus, acc_hud_values)
 
@@ -172,8 +173,8 @@ def create_scm_buttons_no_cruise(packer, bus, scm_buttons):
   # independent of MAIN and keeps working. The PCM on the pt bus still gets the driver's real
   # buttons/MAIN, so OP engages normally. Copy every signal except CHECKSUM/COUNTER (packer redoes).
   values = {s: scm_buttons[s] for s in scm_buttons if s not in ("CHECKSUM", "COUNTER")}
-  values["MAIN_ON"] = 0        # master ACC switch off (CMBS unaffected)
-  values["CRUISE_BUTTONS"] = 2  # 2 = cancel
+  values["MAIN_ON"] = 0        # master ACC switch off (isolation test: main-only, no cancel)
+  values["CRUISE_BUTTONS"] = 0
   return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
 
