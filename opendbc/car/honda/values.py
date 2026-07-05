@@ -56,7 +56,7 @@ class HondaSafetyFlags(IntFlag):
   NIDEC_ALT = 4
   RADARLESS = 8
   BOSCH_CANFD = 16
-  NIDEC_SCM_STANDDOWN = 32
+  NIDEC_SCM_STANDDOWN = 32  # HONDA_ACCORD_9G_AU: block + re-send SCM_BUTTONS (MAIN_ON=0) to stand stock ACC down
 
 
 class HondaFlags(IntFlag):

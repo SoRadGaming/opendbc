@@ -219,6 +219,8 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.RADARLESS.value
     if candidate in HONDA_BOSCH_CANFD:
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.BOSCH_CANFD.value
+    # HONDA_ACCORD_9G_AU: stand the stock Nidec ACC down (block + re-send SCM_BUTTONS with MAIN_ON=0)
+    # so its blocked ACC brake demands can't trip the VSA TSA fault that disables EPS. Long-control only.
     if candidate == CAR.HONDA_ACCORD_9G_AU and ret.openpilotLongitudinalControl:
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.NIDEC_SCM_STANDDOWN.value
 

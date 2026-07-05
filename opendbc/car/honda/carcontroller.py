@@ -218,10 +218,11 @@ class CarController(CarControllerBase):
           self.apply_brake_last = apply_brake
           self.brake = apply_brake / self.params.NIDEC_BRAKE_MAX
 
-    # Stock ACC stand-down: the Nidec radar engages off SCM_BUTTONS (it ignores ACC_STATUS), so we
-    # re-send SCM_BUTTONS to it (bus 2) with CRUISE_BUTTONS cleared -> it never sees an engage press
-    # and stays in standby, stopping the blocked ACC brake that trips TSA. The PCM on the pt bus
-    # still gets the real buttons (OP engages normally); CMBS/FCW unaffected. ~25 Hz like stock.
+    # Stock ACC stand-down: the Nidec radar keeps its own ACC armed off the PCM cruise mirror, so
+    # clearing cruise buttons never disengaged it. It does read the master ACC on/off (MAIN) switch
+    # from SCM_BUTTONS, so we re-send SCM_BUTTONS to it (bus 2) with MAIN_ON=0 -> the stock ACC stands
+    # down, stopping the blocked ACC brake that trips the VSA TSA fault. The PCM on the pt bus still
+    # gets the driver's real MAIN/buttons (OP engages normally); CMBS/FCW are independent of MAIN. ~25 Hz.
     if self.CP.carFingerprint == CAR.HONDA_ACCORD_9G_AU and self.CP.openpilotLongitudinalControl and self.frame % 4 == 0:
       can_sends.append(hondacan.create_scm_buttons_no_cruise(self.packer, self.CAN.camera, CS.scm_buttons))
 

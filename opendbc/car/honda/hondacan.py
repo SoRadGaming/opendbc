@@ -162,19 +162,19 @@ def create_acc_hud(packer, bus, CP, enabled, pcm_speed, pcm_accel, hud_control, 
     acc_hud_values['FCM_OFF_2'] = acc_hud['FCM_OFF_2']
     acc_hud_values['FCM_PROBLEM'] = acc_hud['FCM_PROBLEM']
     acc_hud_values['ICONS'] = acc_hud['ICONS']
-    acc_hud_values['CHIME'] = acc_hud['CHIME']  # pass stock chime through (e.g. CMBS toggle beep)
+    acc_hud_values['CHIME'] = acc_hud['CHIME']  # pass stock ACC/FCM chimes through instead of muting them
 
   return packer.make_can_msg("ACC_HUD", bus, acc_hud_values)
 
 
 def create_scm_buttons_no_cruise(packer, bus, scm_buttons):
-  # Re-send SCM_BUTTONS to the radar with the ACC main switch forced OFF (MAIN_ON=0) plus a CANCEL,
-  # continuously, so the stock Nidec ACC can't run its own ACC (which OP replaces). CMBS is
-  # independent of MAIN and keeps working. The PCM on the pt bus still gets the driver's real
+  # Re-send SCM_BUTTONS to the radar with the master ACC switch forced OFF (MAIN_ON=0), continuously,
+  # so the stock Nidec ACC stands down (OP replaces it). The radar reads MAIN from this message; CMBS
+  # is independent of MAIN and keeps working. The PCM on the pt bus still gets the driver's real
   # buttons/MAIN, so OP engages normally. Copy every signal except CHECKSUM/COUNTER (packer redoes).
   values = {s: scm_buttons[s] for s in scm_buttons if s not in ("CHECKSUM", "COUNTER")}
-  values["MAIN_ON"] = 0        # master ACC switch off (isolation test: main-only, no cancel)
-  values["CRUISE_BUTTONS"] = 0
+  values["MAIN_ON"] = 0        # master ACC switch off -> stock ACC stands down
+  values["CRUISE_BUTTONS"] = 0  # neutralize any in-flight cruise button
   return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
 
