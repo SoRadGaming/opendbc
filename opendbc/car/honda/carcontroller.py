@@ -405,9 +405,13 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
                                                   steering_available, alert_steer_required, CS.lkas_hud, self.dashed_lanes))
       else:
         # The stock camera keeps 0x33D. This is the side channel an in-line module reads to
-        # merge openpilot's alerts into that frame -- see _sunnypilot_hud.dbc for why it is
-        # done this way round rather than by taking 0x33D over.
-        can_sends.append(hondacan.create_sp_hud_status(self.packer, self.CAN.camera, CC, CC_SP, hud_control,
+        # merge openpilot's alerts into that frame -- see _sunnypilot_linbus_gw.dbc for why it
+        # is done this way round rather than by taking 0x33D over.
+        # Bus 0 (pt), NOT CAN.camera: on this car the comma harness splits the Elesys radar off,
+        # so bus 2 is the radar branch and the LIN-bus gateway board sits on bus 0 with the
+        # camera. Route 000000b9 shows 0x500 only ever left on bus 2 (src 130), where the board
+        # could never see it.
+        can_sends.append(hondacan.create_sp_hud_status(self.packer, self.CAN.pt, CC, CC_SP, hud_control,
                                                        alert_steer_required, alert_fcw))
 
       if self.CP.openpilotLongitudinalControl:

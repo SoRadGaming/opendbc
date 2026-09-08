@@ -454,7 +454,9 @@ class TestHondaElesysScmStanddownSafety(TestHondaNidecPcmAltSafety):
     (0x1A6) on bus 2 with MAIN_ON=0 and the stock 0x1A6 is blocked bus 0 -> 2.
     0x33D (4-byte LKAS_HUD) is forwarded from the stock camera, not sent by OP.
   """
-  TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x1A6, 2]]
+  # 0x500 is SP_HUD_STATUS for the LIN-bus gateway, on bus 0 (the module sits on the camera's bus;
+  # bus 2 is the Elesys radar branch on this harness)
+  TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x1A6, 2], [0x500, 0]]
   FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
   RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x194, 0x30C)}
 
@@ -495,7 +497,7 @@ class TestHondaElesysStanddownGasInterceptorSafety(TestHondaNidecAltGasIntercept
     OP may send GAS_COMMAND (0x200) and the bus-2 SCM_BUTTONS re-send (0x1A6);
     0x33D (4-byte LKAS_HUD) is forwarded from the stock camera, not sent.
   """
-  TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x200, 0], [0x1A6, 2]]
+  TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x200, 0], [0x1A6, 2], [0x500, 0]]
   FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
   RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x194, 0x30C)}
 

@@ -33,8 +33,12 @@ opendbc's packer fills them automatically -- see get_checksum_state() in opendbc
 which keys off the honda_ DBC name prefix. A receiver validates them the same way it would
 any Honda frame.
 
-PROTOCOL_VERSION is 1. Bump it if the meaning of any existing bit changes; adding a signal
-in a RESERVED byte does not need a bump, since a v1 receiver ignores those bytes anyway.";
+Sent on bus 0, the camera's bus, where the module sits. NOT bus 2: on this harness bus 2 is
+the Elesys radar branch, and nothing on it is the module.
+
+PROTOCOL_VERSION is 2 (v2 added INTEGRATOR, OP_SATURATED and INTEGRATOR_FROZEN in bytes 3-4).
+Bump it if the meaning of any existing bit changes; adding a signal in a RESERVED byte does
+not need a bump, since an older receiver ignores those bytes anyway.";
 
 CM_ SG_ 1280 STEERING_REQUIRED "openpilot wants hands on the wheel. This is openpilot's own
 driver-monitoring nag, NOT the stock camera's -- merge it into LKAS_HUD's STEERING_REQUIRED
