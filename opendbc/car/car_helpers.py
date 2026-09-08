@@ -85,13 +85,18 @@ def can_fingerprint(can_recv: CanRecvCallable) -> tuple[str | None, dict[int, di
 # **** for use live only ****
 def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback,
                 cached_params: CarParamsT | None,
-                fixed_fingerprint: str | None) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
+                fixed_fingerprint: str | None,
+                skip_fw_query: bool = False) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
   fixed_fingerprint = fixed_fingerprint or os.environ.get('FINGERPRINT', "")
-  skip_fw_query = os.environ.get('SKIP_FW_QUERY', False)
+  # The env var is the test/replay switch; the argument is how the caller opts out on a
+  # car where the query itself does harm (see get_car).
+  skip_fw_query = bool(os.environ.get('SKIP_FW_QUERY', False)) or skip_fw_query
   disable_fw_cache = os.environ.get('DISABLE_FW_CACHE', False)
   ecu_rx_addrs = set()
 
   start_time = time.monotonic()
+  if skip_fw_query and fixed_fingerprint:
+    carlog.warning("Fixed fingerprint %s: skipping the VIN/FW query, no OBD multiplexing", fixed_fingerprint)
   if not skip_fw_query:
     if cached_params is not None and cached_params.brand != "mock" and len(cached_params.carFw) > 0 and \
        cached_params.carVin is not VIN_UNKNOWN and not disable_fw_cache:
@@ -153,9 +158,18 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
 
 def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback, alpha_long_allowed: bool,
             is_release: bool, cached_params: CarParamsT | None = None,
-            fixed_fingerprint: str | None = None, init_params_list_sp: list[dict[str, str]] | None = None, is_release_sp: bool = False):
+            fixed_fingerprint: str | None = None, init_params_list_sp: list[dict[str, str]] | None = None, is_release_sp: bool = False,
+            skip_fw_query: bool = False):
+  # skip_fw_query: with a fixed fingerprint the query's answer is discarded anyway -- the fixed
+  # platform overrides it -- so the only thing it can still do is disturb the car. The VIN and
+  # FW requests go out through OBD multiplexing, which reroutes panda bus 1 to the OBD port for
+  # the duration; on HONDA_ACCORD_9G_AU the Elesys radar lives on that bus, loses the car for
+  # ~1.5 s and latches ACC + CMBS faults until the next ignition. It only bit on the first
+  # ignition after an update, because CarParamsCache is cleared on manager start and the cached
+  # path skips the query. The caller decides; card passes it when the platform comes from the
+  # user's bundle. The FINGERPRINT env path used by tests and replays is unaffected.
   candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(can_recv, can_send, set_obd_multiplexing, cached_params,
-                                                                          fixed_fingerprint)
+                                                                          fixed_fingerprint, skip_fw_query=skip_fw_query)
 
   if candidate is None:
     carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})
