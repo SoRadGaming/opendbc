@@ -252,10 +252,10 @@ def spam_buttons_command(packer, CAN, button_val, car_fingerprint):
   return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
 
-SP_HUD_PROTOCOL_VERSION = 1
+SP_HUD_PROTOCOL_VERSION = 2
 
 
-def create_sp_hud_status(packer, bus, CC, hud_control, alert_steer_required, alert_fcw):
+def create_sp_hud_status(packer, bus, CC, CC_SP, hud_control, alert_steer_required, alert_fcw):
   """openpilot's alert state, for an aftermarket module sitting in line with the LKAS camera.
 
   This is NOT a stock Honda message and nothing in the car reads it. It exists so a module
@@ -299,6 +299,15 @@ def create_sp_hud_status(packer, bus, CC, hud_control, alert_steer_required, ale
     # 0 means "no set speed available"; the value saturates rather than wrapping, so a
     # receiver never sees a plausible-but-wrong low speed.
     'SET_SPEED': max(0, min(255, int(hud_control.setSpeed * CV.MS_TO_KPH))) if hud_control.speedVisible else 0,
+    # v2: the lateral integrator, so the gateway can refuse its first engagement while
+    # |i| is large (it cannot see i from STEERING_CONTROL, and cannot infer it from
+    # saturation -- openpilot was NOT saturated in the curve where i sat at +0.65).
+    # int8, x100, clipped: +-1.27 covers the PID's whole range on this car.
+    'INTEGRATOR': max(-127, min(127, int(round(CC_SP.lateralControl.integrator * 100)))),
+    'OP_SATURATED': CC_SP.lateralControl.saturated,
+    # the acknowledgement: 1 while the gateway hold on the integrator is active. If the
+    # board sees this low while it is not engaged, sunnypilot is not running the protocol.
+    'INTEGRATOR_FROZEN': CC_SP.lateralControl.integratorFrozen,
   }
   return packer.make_can_msg("SP_HUD_STATUS", bus, values)
 

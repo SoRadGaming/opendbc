@@ -308,13 +308,23 @@ class CarState(CarStateBase, CarStateExt):
       *create_button_events(self.cruise_setting, prev_cruise_setting, SETTINGS_BUTTONS_DICT),
     ]
 
-    CarStateExt.update(self, ret, can_parsers)
+    CarStateExt.update(self, ret, ret_sp, can_parsers)
 
     return ret, ret_sp
 
   def get_can_parsers(self, CP, CP_SP):
+    # FORK(HONDA_ELESYS): GW_ACTIVE (0x704) from the aftermarket LIN-bus gateway. Registered
+    # HERE and with freq=nan, for two reasons that both matter:
+    #   1. nan sets ignore_alive, so the frame never takes part in can_valid. Every lazily
+    #      registered message does, and this one is allowed to be absent -- board unplugged,
+    #      or its low-priority frame dropping for a second -- without openpilot losing CAN
+    #      and refusing to engage.
+    #   2. Registering before the first update() means the first frame is not dropped.
+    #      VLDict only registers a message on first access, which for a message read from
+    #      CarStateExt is after that frame's packets have already been parsed.
+    pt_msgs = [("GW_ACTIVE", float("nan"))] if CP.carFingerprint in HONDA_ELESYS else []
     parsers = {
-      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).pt),
+      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_msgs, CanBus(CP).pt),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),
     }
     if CP.enableBsm:

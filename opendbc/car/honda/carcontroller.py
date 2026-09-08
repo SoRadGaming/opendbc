@@ -407,7 +407,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         # The stock camera keeps 0x33D. This is the side channel an in-line module reads to
         # merge openpilot's alerts into that frame -- see _sunnypilot_hud.dbc for why it is
         # done this way round rather than by taking 0x33D over.
-        can_sends.append(hondacan.create_sp_hud_status(self.packer, self.CAN.camera, CC, hud_control,
+        can_sends.append(hondacan.create_sp_hud_status(self.packer, self.CAN.camera, CC, CC_SP, hud_control,
                                                        alert_steer_required, alert_fcw))
 
       if self.CP.openpilotLongitudinalControl:

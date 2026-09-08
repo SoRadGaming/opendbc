@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from opendbc.car import structs
+from opendbc.car import Bus, structs
 from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.hondacan import honda_checksum
@@ -299,11 +299,101 @@ if sp_frames:
     check("on bus 2, 8 bytes", bus == 2 and len(dat) == 8, f"bus={bus} dlc={len(dat)}")
     bad = [d for _, d in sp_frames if (d[7] & 0x0F) != honda_checksum(0x500, None, bytearray(d))]
     check("every frame carries a valid Honda checksum", not bad, f"{len(bad)} bad")
-    check("protocol version is 1", (dat[0] >> 4) & 0x0F == 1, f"{(dat[0] >> 4) & 0x0F}")
+    check("protocol version is 2", (dat[0] >> 4) & 0x0F == 2, f"{(dat[0] >> 4) & 0x0F}")
     # set speed is km/h on the wire regardless of cluster units: 30 m/s -> 108
     check("SET_SPEED is km/h, not the cluster's display units", dat[2] == 108, f"{dat[2]}")
     counters = [(d[7] >> 4) & 0x03 for _, d in sp_frames]
     check("COUNTER advances", len(set(counters)) > 1, f"{sorted(set(counters))}")
+
+    # v2: the lateral integrator and its flags come from CarControlSP.lateralControl
+    def sp_frame(cc_sp, start):
+      out = None
+      for j in range(start, start + 20):
+        _, s = cc_obj.update(make_cc(0.5), cc_sp, cs, j * int(1e7))
+        for m in s:
+          if (m[0] if isinstance(m, tuple) else m.address) == 0x500:
+            out = bytes(m[1] if isinstance(m, tuple) else m.dat)
+      return out
+    cc_sp_v2 = structs.CarControlSP()
+    cc_sp_v2.lateralControl.integrator = 0.65
+    cc_sp_v2.lateralControl.saturated = True
+    cc_sp_v2.lateralControl.integratorFrozen = True
+    f = sp_frame(cc_sp_v2, 100)
+    check("v2 INTEGRATOR is i*100 as int8 (+0.65 -> 65)",
+          f is not None and int.from_bytes(f[3:4], "big", signed=True) == 65, f"{f and f[3]}")
+    check("v2 OP_SATURATED (b4.0) and INTEGRATOR_FROZEN (b4.1) set", f is not None and (f[4] & 0x03) == 0x03, f"{f and f[4]:#04x}")
+    cc_sp_v2.lateralControl.integrator = -0.42
+    cc_sp_v2.lateralControl.saturated = False
+    cc_sp_v2.lateralControl.integratorFrozen = False
+    f = sp_frame(cc_sp_v2, 200)
+    check("v2 INTEGRATOR negative (-0.42 -> -42)",
+          f is not None and int.from_bytes(f[3:4], "big", signed=True) == -42, f"{f and f[3]}")
+    check("v2 flags clear", f is not None and (f[4] & 0x03) == 0, f"{f and f[4]:#04x}")
+    cc_sp_v2.lateralControl.integrator = 9.9
+    f = sp_frame(cc_sp_v2, 300)
+    check("v2 INTEGRATOR clips at +127 rather than wrapping",
+          f is not None and int.from_bytes(f[3:4], "big", signed=True) == 127, f"{f and f[3]}")
+    check("v2 frames still carry a valid checksum",
+          f is not None and (f[7] & 0x0F) == honda_checksum(0x500, None, bytearray(f)))
+
+
+# --- 8. GW_ACTIVE reaches CarStateSP.linbusGateway ------------------------------
+#
+# The other direction of the protocol. The LIN-bus gateway reports whether it is
+# actually actuating; carstate has to turn that into the one flag the lateral
+# controller keys off, and a gateway that goes quiet has to read as NOT actuating,
+# or the integrator winds up against a car that stopped listening.
+
+print("\n[8] GW_ACTIVE -> CarStateSP.linbusGateway")
+CP8 = CarInterface.get_non_essential_params(PLATFORM)
+CP8_SP = CarInterface.get_non_essential_params_sp(CP8, PLATFORM)
+CI8 = CarInterface(CP8, CP8_SP)
+
+
+def gw_frame(engaged, dry_run):
+  d = bytearray(8)
+  if dry_run:
+    d[5] |= 0x80      # DRY_RUN: byte 5 bit 7
+  if engaged:
+    d[6] |= 0x01      # ENGAGED: byte 6 bit 0
+  return (0x704, bytes(d), 0)
+
+
+def gw_step(i, frames):
+  # +1: a packet timestamp of exactly 0 is the parser's "never received" sentinel, which
+  # carstate deliberately reads as stale. Real timestamps are monotonic nanos, never 0.
+  _, cs_sp = CI8.update([((i + 1) * int(1e7), frames)])
+  return cs_sp.linbusGateway
+
+
+g = gw_step(0, [gw_frame(0, 0)])
+check("present is set on this platform", g.present)
+check("a frame arrived -> valid", g.valid)
+check("not engaged -> not actuating", not g.actuating)
+g = gw_step(1, [gw_frame(1, 1)])
+check("engaged in a DRY RUN is NOT actuating", g.engaged and g.dryRun and not g.actuating)
+g = gw_step(2, [gw_frame(1, 0)])
+check("engaged and not dry-run IS actuating", g.actuating)
+# the board goes quiet: must read as not actuating within the 500 ms window
+for i in range(3, 3 + 49):
+  g = gw_step(i, [])
+check("still actuating one frame inside the window", g.valid and g.actuating)
+g = gw_step(52, [])
+check("stale after 50 frames with no GW_ACTIVE -> not actuating", not g.valid and not g.actuating)
+g = gw_step(53, [gw_frame(1, 0)])
+check("recovers the frame the board speaks again", g.valid and g.actuating)
+
+# An absent board must NOT cost openpilot its CAN. GW_ACTIVE is registered liveness-exempt:
+# with no frame ever received, its MessageState still reports valid, so it can never be the
+# reason can_valid goes false and engagement is refused.
+st = CI8.can_parsers[Bus.pt].message_states[0x704]
+check("GW_ACTIVE is registered before the first update", 0x704 in CI8.can_parsers[Bus.pt].addresses)
+check("GW_ACTIVE is liveness-exempt (ignore_alive)", st.ignore_alive)
+fresh_ci = CarInterface(CP8, CP8_SP)
+fresh_ci.update([(int(1e7), [])])
+fresh_st = fresh_ci.can_parsers[Bus.pt].message_states[0x704]
+check("a board that never speaks still reads as a valid message, not a CAN timeout",
+      fresh_st.valid(int(5e9), False) and not fresh_st.timestamps)
 
 
 print("\n" + "=" * 60)

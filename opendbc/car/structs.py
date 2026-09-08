@@ -148,6 +148,13 @@ class CarControlSP:
   leadOne: 'LeadData' = field(default_factory=lambda: LeadData())
   leadTwo: 'LeadData' = field(default_factory=lambda: LeadData())
   intelligentCruiseButtonManagement: 'IntelligentCruiseButtonManagement' = field(default_factory=lambda: IntelligentCruiseButtonManagement())
+  lateralControl: 'CarControlSP.LateralControl' = field(default_factory=lambda: CarControlSP.LateralControl())
+
+  @auto_dataclass
+  class LateralControl:
+    integrator: float = auto_field()
+    saturated: bool = auto_field()
+    integratorFrozen: bool = auto_field()
 
   @auto_dataclass
   class Param:
@@ -170,3 +177,12 @@ class CarControlSP:
 @auto_dataclass
 class CarStateSP:
   speedLimit: float = auto_field()
+  linbusGateway: 'CarStateSP.LinbusGateway' = field(default_factory=lambda: CarStateSP.LinbusGateway())
+
+  @auto_dataclass
+  class LinbusGateway:
+    engaged: bool = auto_field()
+    dryRun: bool = auto_field()
+    valid: bool = auto_field()
+    actuating: bool = auto_field()
+    present: bool = auto_field()
