@@ -21,7 +21,8 @@ from opendbc.car import Bus, structs
 from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.hondacan import honda_checksum
-from opendbc.car.honda.values import CAR, CarControllerParams
+from opendbc.car.honda.values import CAR, DBC, CarControllerParams
+from opendbc.can.packer import CANPacker
 from opendbc.sunnypilot.car.honda import dynamic_tuning as dt
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -296,7 +297,9 @@ check("openpilot still does NOT send LKAS_HUD on this car", not lkas_frames,
       f"{len(lkas_frames)} frames of 0x33D")
 if sp_frames:
     bus, dat = sp_frames[0]
-    check("on bus 2, 8 bytes", bus == 2 and len(dat) == 8, f"bus={bus} dlc={len(dat)}")
+    # bus 0, not 2: bus 2 is the Elesys radar branch on this harness and the gateway board
+    # never sees it (route 000000b9: 0x500 only ever on src 130)
+    check("on bus 0, 8 bytes", bus == 0 and len(dat) == 8, f"bus={bus} dlc={len(dat)}")
     bad = [d for _, d in sp_frames if (d[7] & 0x0F) != honda_checksum(0x500, None, bytearray(d))]
     check("every frame carries a valid Honda checksum", not bad, f"{len(bad)} bad")
     check("protocol version is 2", (dat[0] >> 4) & 0x0F == 2, f"{(dat[0] >> 4) & 0x0F}")
@@ -394,6 +397,51 @@ fresh_ci.update([(int(1e7), [])])
 fresh_st = fresh_ci.can_parsers[Bus.pt].message_states[0x704]
 check("a board that never speaks still reads as a valid message, not a CAN timeout",
       fresh_st.valid(int(5e9), False) and not fresh_st.timestamps)
+
+
+# --- 9. Fuel level and odometer reach CarState -----------------------------------
+#
+# Reverse-engineered from 38 routes (see _nidec_scm_group_a_elesys.dbc). This checks the
+# DBC layout and the carstate clip, using the real packer so the checksum and counter are
+# what the parser expects.
+
+print("\n[9] SCM_BUTTONS.FUEL_LEVEL -> CarState.fuelGauge, SCM_FEEDBACK.ODOMETER_KM")
+CP9 = CarInterface.get_non_essential_params(PLATFORM)
+CP9_SP = CarInterface.get_non_essential_params_sp(CP9, PLATFORM)
+CI9 = CarInterface(CP9, CP9_SP)
+packer9 = CANPacker(DBC[PLATFORM][Bus.pt])
+
+
+def as_tuple(m):
+  return m if isinstance(m, tuple) else (m.address, bytes(m.dat), m.src)
+
+
+def fuel_step(i, level, sender=0, odo=164964):
+  frames = [as_tuple(packer9.make_can_msg("SCM_BUTTONS", 0, {"FUEL_LEVEL": level, "FUEL_SENDER": sender, "MAIN_ON": 1})),
+            as_tuple(packer9.make_can_msg("SCM_FEEDBACK", 0, {"ODOMETER_KM": odo}))]
+  cs9, _ = CI9.update([((i + 1) * int(1e7), frames)])
+  return cs9
+
+
+vl9 = CI9.can_parsers[Bus.pt].vl
+# The parser registers a message the first time carstate reads it (lazy VLDict), which is
+# after the first cp.update() -- so the very first frame of any message is dropped, on the car
+# (40 ms at 25 Hz) exactly as here. One warm-up step, then the real checks.
+fuel_step(0, 0)
+cs9 = fuel_step(1, 19, 177)
+check("FUEL_LEVEL 19 -> fuelGauge 19/105", abs(cs9.fuelGauge - 19 / 105) < 1e-6, f"{cs9.fuelGauge:.4f}")
+check("the packed frame round-trips FUEL_LEVEL (byte 3) and FUEL_SENDER (byte 4)",
+      vl9["SCM_BUTTONS"]["FUEL_LEVEL"] == 19 and vl9["SCM_BUTTONS"]["FUEL_SENDER"] == 177)
+check("FUEL_LEVEL does not disturb the button decode that shares the frame",
+      vl9["SCM_BUTTONS"]["MAIN_ON"] == 1 and vl9["SCM_BUTTONS"]["CRUISE_BUTTONS"] == 0)
+cs9 = fuel_step(2, 105, 46)
+check("the meter's clamp value 105 reads as a full gauge", abs(cs9.fuelGauge - 1.0) < 1e-6, f"{cs9.fuelGauge:.4f}")
+cs9 = fuel_step(3, 130, 22)
+check("above the clamp is clipped to 1.0, never >1", cs9.fuelGauge == 1.0, f"{cs9.fuelGauge:.4f}")
+check("ODOMETER_KM is the 24-bit field at bytes 3-5", vl9["SCM_FEEDBACK"]["ODOMETER_KM"] == 164964,
+      f"{vl9['SCM_FEEDBACK']['ODOMETER_KM']}")
+raw9 = bytes(as_tuple(packer9.make_can_msg("SCM_FEEDBACK", 0, {"ODOMETER_KM": 164964}))[1])
+check("...and byte 3 carries the top byte (2), matching the car", raw9[3] == 2 and raw9[4] == 0x84 and raw9[5] == 0x64, raw9.hex())
 
 
 print("\n" + "=" * 60)

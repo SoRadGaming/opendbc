@@ -1,0 +1,46 @@
+CM_ "Nidec SCM group A (copy of _nidec_scm_group_a.dbc) plus the fuel and odometer signals reverse-engineered on HONDA_ACCORD_9G_AU. Kept as a separate fragment because those three signals have only been verified on this car; the shared file stays exactly what every other Nidec car has been driven on.";
+
+BO_ 660 SCM_FEEDBACK: 8 SCM
+ SG_ RIGHT_BLINKER : 6|1@0+ (1,0) [0|1] "" EON
+ SG_ LEFT_BLINKER : 5|1@0+ (1,0) [0|1] "" EON
+ SG_ WIPERS_SPEED : 4|2@0+ (1,0) [0|3] "" EON
+ SG_ ODOMETER_KM : 31|24@0+ (1,0) [0|16777215] "km" EON
+ SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
+ SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
+
+BO_ 422 SCM_BUTTONS: 8 SCM
+ SG_ CRUISE_BUTTONS : 7|3@0+ (1,0) [0|7] "" EON
+ SG_ LIGHTS_SETTING : 1|2@0+ (1,0) [0|3] "" EON
+ SG_ PARKING_BRAKE_ON : 2|1@0+ (1,0) [0|1] "" EON
+ SG_ REVERSE_LIGHT : 18|1@0+ (1,0) [0|1] "" XXX
+ SG_ FUEL_LEVEL : 31|8@0+ (1,0) [0|105] "" EON
+ SG_ FUEL_SENDER : 39|8@0+ (1,0) [0|255] "" EON
+ SG_ MAIN_ON : 47|1@0+ (1,0) [0|1] "" EON
+ SG_ CRUISE_SETTING : 43|2@0+ (1,0) [0|3] "" EON
+ SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
+ SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
+ SG_ DRIVERS_DOOR_OPEN : 63|1@0+ (1,0) [0|1] "" EON
+ SG_ CMBS_BUTTON : 11|2@0+ (1,0) [0|3] "" EON
+
+VAL_ 422 CRUISE_BUTTONS 7 "tbd" 6 "tbd" 5 "tbd" 4 "accel_res" 3 "decel_set" 2 "cancel" 1 "main" 0 "none" ;
+VAL_ 422 LIGHTS_SETTING 3 "high_beam" 2 "low_beam" 1 "position" 0 "no_lights" ;
+VAL_ 422 CRUISE_SETTING 3 "distance_adj" 2 "tbd" 1 "lkas_button" 0 "none" ;
+VAL_ 422 CMBS_BUTTON 3 "button_press" 2 "far_distance" 1 "near_distance" 0 "normal" ;
+CM_ SG_ 422 CMBS_BUTTON "FCW/CMBS proximity-warning distance selector: 0 normal, 1 near, 2 far; 3 = physical button press";
+
+CM_ SG_ 422 FUEL_LEVEL "Fuel remaining, as the meter has already filtered it. Found from 38 routes over two months
+(Jul-Sep 2026): the per-route median falls monotonically between refuels and jumps at each refuel, at about
+19 counts per 100 km against ODOMETER_KM. Best-fit unit is 0.5 L per count: that gives 9.5 L/100 km on this
+car, a low-fuel lamp near 20 (~10 L, Honda's stated threshold) and a brim-full tank of ~120 (60 L).
+The meter CLAMPS it at 105 -- it reads 105 from a fill-up until ~8 L have been used -- so it is not a tank
+fraction; carstate clips it at 105 for fuelGauge. Slow to settle after ignition (starts low, converges over
+the first minute) and sloshes by +-10 when the tank is nearly empty. Bit 31 has never been seen set. There
+is NO separate low-fuel lamp bit anywhere on this bus; derive it from this value.";
+CM_ SG_ 422 FUEL_SENDER "The same quantity before the clamp, on an inverted scale: FUEL_SENDER = 207 - 1.53 * FUEL_LEVEL
+(RMS error 0.5 counts across all 38 routes), 22 at brim full and ~207 at empty. Range and direction match a
+Honda fuel sender in ohms, but that is a guess from the numbers alone. Its only use over FUEL_LEVEL is that it
+keeps moving above FUEL_LEVEL's clamp. Bit 39 is NOT a warning lamp: it is this value crossing 128, i.e.
+FUEL_LEVEL falling through ~52.";
+CM_ SG_ 660 ODOMETER_KM "Total odometer in km. Checked against distance integrated from vEgo on four routes
+(a 42.05 km route advanced it by 42; 6.20 km by 6). 164,964 km on this car in Sep 2026. Byte 3 (the top
+byte) has sat at 2 throughout, so the field is at least 3 bytes wide; nothing above it has ever moved.";

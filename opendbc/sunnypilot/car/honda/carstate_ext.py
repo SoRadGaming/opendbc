@@ -16,6 +16,10 @@ from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
 # at 100 Hz, so that is 50 frames.
 LINBUS_GW_STALE_FRAMES = 50
 
+# SCM_BUTTONS.FUEL_LEVEL is clamped by the meter at 105 (~52 L of a ~60 L tank), so this is
+# "fraction of the gauge", not fraction of the tank. See _nidec_scm_group_a_elesys.dbc.
+FUEL_LEVEL_FULL = 105.0
+
 
 class CarStateExt:
   def __init__(self, CP, CP_SP):
@@ -31,6 +35,7 @@ class CarStateExt:
 
     if self.CP.carFingerprint in HONDA_ELESYS:
       self._update_linbus_gateway(ret_sp, cp)
+      ret.fuelGauge = min(cp.vl["SCM_BUTTONS"]["FUEL_LEVEL"] / FUEL_LEVEL_FULL, 1.0)
 
     if self.CP_SP.flags & HondaFlagsSP.NIDEC_HYBRID:
       ret.accFaulted = bool(cp.vl["HYBRID_BRAKE_ERROR"]["BRAKE_ERROR_1"] or cp.vl["HYBRID_BRAKE_ERROR"]["BRAKE_ERROR_2"])
