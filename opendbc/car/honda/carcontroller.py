@@ -210,6 +210,31 @@ def process_hud_alert(hud_alert):
   return alert_fcw, alert_steer_required
 
 
+# FORK(HONDA_ELESYS): release lateral on the brake, the way the stock LKAS camera does.
+#
+# Measured on the two lossless stock serial routes (000000c8/c9, S:\Software\EPS-LKAS
+# docs/SP-PROTOCOL-V3.md section 0): the stock camera drops LKAS_ON within about 20 frames
+# (0.2 s) of a brake press, three times on c8. This is IMITATION OF STOCK, not fault
+# avoidance -- the same logs show the EPS tolerating brake plus a non-zero torque request on
+# 63 frames with error state 0 throughout, so the old "braking while requesting torque
+# latches an EPS fault" claim is NOT reproduced and is not why this exists.
+#
+# Shape: a ceiling on |torque| that walks 1.0 -> 0.0 over BRAKE_RELEASE_FRAMES and snaps back
+# to 1.0 the frame the brake lifts. Two properties are load-bearing:
+#   * it can only ever SHRINK the magnitude of the command, never grow it, because it is
+#     applied as clip(x, -c, c) with c in [0, 1];
+#   * it cannot latch. There is no state but the frame count, and the count is cleared, not
+#     decayed, when brakePressed goes false.
+# The clipped value is what gets stored as last_torque, so the ramp back up after the brake
+# lifts is governed by the ordinary STEER_DELTA_UP rate limit rather than stepping.
+BRAKE_RELEASE_FRAMES = 20        # 100 Hz control step -> 0.20 s to zero
+
+
+def brake_release_scale(brake_pressed: bool, frames: int) -> tuple[float, int]:
+  frames = min(frames + 1, BRAKE_RELEASE_FRAMES) if brake_pressed else 0
+  return 1.0 - frames / BRAKE_RELEASE_FRAMES, frames
+
+
 class CarController(CarControllerBase, MadsCarController, GasInterceptorCarController, IntelligentCruiseButtonManagementInterface):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
@@ -236,6 +261,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.gas = 0.0
     self.brake = 0.0
     self.last_torque = 0.0
+    self.brake_release_frames = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     MadsCarController.update(self, self.CP, CC, CC_SP)
@@ -261,6 +287,21 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # *** rate limit steer ***
     limited_torque = rate_limit(actuators.torque, self.last_torque, -self.params.STEER_DELTA_DOWN * DT_CTRL,
                                 self.params.STEER_DELTA_UP * DT_CTRL)
+
+    # *** release on the brake within 200 ms, as the stock camera does (ELESYS only) ***
+    # Applied as a CEILING on the magnitude, not as a gain. A gain would compound with the
+    # rate limiter above -- which keeps pulling back toward the full request -- and make the
+    # first steps of the withdrawal bigger than the last. A ceiling that walks down linearly
+    # makes the withdrawal linear too: 1/20 of full scale per frame, which at the board's
+    # authority of 80 is 4 serial counts per frame, just under the stock camera's p99 of 5
+    # and well inside the 10 that SP-PROTOCOL-V3 section 3 allows.
+    # It can only ever REDUCE the command: clip(x, -c, c) with c in [0, 1] never grows |x|.
+    # Skipped entirely at c == 1.0 so a non-braking frame is bit-identical to before.
+    if self.CP.carFingerprint in HONDA_ELESYS:
+      brake_release, self.brake_release_frames = brake_release_scale(CS.out.brakePressed, self.brake_release_frames)
+      if brake_release < 1.0:
+        limited_torque = float(np.clip(limited_torque, -brake_release, brake_release))
+
     self.last_torque = limited_torque
 
     # *** apply brake hysteresis ***
@@ -291,7 +332,14 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         can_sends.append(make_tester_present_msg(0x18DAB0F1, 1, suppress_response=True))
 
     # Send steering command.
-    can_sends.append(hondacan.create_steering_control(self.packer, self.CAN, apply_torque, CC.latActive, self.tja_control))
+    # HONDA_ELESYS: byte 2 bits 5:4 carry the lane-departure warning through to the LIN-bus
+    # gateway, which copies them into the camera's serial frame. No other Honda has those
+    # signals in its DBC, so the flag gates the keys, not just the values.
+    serial_gateway = self.CP.carFingerprint in HONDA_ELESYS
+    can_sends.append(hondacan.create_steering_control(self.packer, self.CAN, apply_torque, CC.latActive, self.tja_control,
+                                                      serial_gateway=serial_gateway,
+                                                      ldw_left=hud_control.leftLaneDepart,
+                                                      ldw_right=hud_control.rightLaneDepart))
 
     # wind brake from air resistance decel at high speed
     wind_brake = np.interp(CS.out.vEgo, [0.0, 2.3, 35.0], [0.001, 0.002, 0.15])
@@ -411,8 +459,32 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         # so bus 2 is the radar branch and the LIN-bus gateway board sits on bus 0 with the
         # camera. Route 000000b9 shows 0x500 only ever left on bus 2 (src 130), where the board
         # could never see it.
+        #
+        # v3 bytes 5-6: what openpilot INTENDS. Read SP-PROTOCOL-V3 section 1.2 before
+        # changing any of it -- the board acts on OP_STATE and the release bits when it
+        # decides what to put in 0x70B REASON.
+        # RELEASE_* are only meaningful while openpilot is asking for lateral; asserting
+        # them at a red light with lateral off would tell the board it is withdrawing from
+        # something it was never doing.
+        release_brake = CC.latActive and CS.out.brakePressed
+        release_driver = CC.latActive and CS.out.steeringPressed
+        # "would steer if the board allowed it". latActive is ORed in so this can never read
+        # false while openpilot is actually asking.
+        lat_ready = steering_available or CC.latActive
+        if CS.out.steerFaultTemporary or CS.out.steerFaultPermanent:
+          op_state = hondacan.SP_OP_STATE_FAULTED
+        elif not CC.latActive:
+          op_state = hondacan.SP_OP_STATE_READY if (CC.enabled or lat_ready) else hondacan.SP_OP_STATE_OFF
+        elif release_brake or release_driver:
+          op_state = hondacan.SP_OP_STATE_WITHDRAWING
+        elif apply_torque != 0:
+          op_state = hondacan.SP_OP_STATE_ACTIVE
+        else:
+          op_state = hondacan.SP_OP_STATE_REQUESTING
+
         can_sends.append(hondacan.create_sp_hud_status(self.packer, self.CAN.pt, CC, CC_SP, hud_control,
-                                                       alert_steer_required, alert_fcw))
+                                                       alert_steer_required, alert_fcw,
+                                                       lat_ready, op_state, release_brake, release_driver))
 
       if self.CP.openpilotLongitudinalControl:
         # TODO: combining with create_acc_hud block above will change message order and will need replay logs regenerated

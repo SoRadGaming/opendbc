@@ -186,3 +186,20 @@ class CarStateSP:
     valid: bool = auto_field()
     actuating: bool = auto_field()
     present: bool = auto_field()
+    # GW_STEER_GRANT (0x70B). Field names and order must stay in lockstep with
+    # cereal/custom.capnp CarStateSP.LinbusGateway: card publishes this dataclass through
+    # convert_to_capnp(), which splats it into custom.CarStateSP.new_message(**dict).
+    grantValid: bool = auto_field()
+    grantState: int = auto_field()
+    grantReason: int = auto_field()
+    granted: bool = auto_field()
+    authority: int = auto_field()
+    epsAck: bool = auto_field()
+    epsLatched: bool = auto_field()
+    epsErrorState: int = auto_field()
+    epsFresh: bool = auto_field()
+    camLkasOn: bool = auto_field()
+    applied: int = auto_field()
+    motorTorque: int = auto_field()
+    retryIn: int = auto_field()
+    latchedUntilKeyOff: bool = auto_field()

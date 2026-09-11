@@ -313,16 +313,25 @@ class CarState(CarStateBase, CarStateExt):
     return ret, ret_sp
 
   def get_can_parsers(self, CP, CP_SP):
-    # FORK(HONDA_ELESYS): GW_ACTIVE (0x704) from the aftermarket LIN-bus gateway. Registered
-    # HERE and with freq=nan, for two reasons that both matter:
-    #   1. nan sets ignore_alive, so the frame never takes part in can_valid. Every lazily
-    #      registered message does, and this one is allowed to be absent -- board unplugged,
-    #      or its low-priority frame dropping for a second -- without openpilot losing CAN
-    #      and refusing to engage.
+    # FORK(HONDA_ELESYS): GW_ACTIVE (0x704) and GW_STEER_GRANT (0x70B) from the aftermarket
+    # LIN-bus gateway. Registered HERE and with freq=nan, for two reasons that both matter:
+    #   1. nan sets ignore_alive (CANParser._add_message, opendbc/can/parser.py:179), and
+    #      MessageState.valid() returns True immediately for such a message (parser.py:107-109)
+    #      so it can never be the one that makes can_valid false (parser.py:200-211). Every
+    #      LAZILY registered message -- one first reached through cp.vl["..."], which VLDict
+    #      registers on first access (parser.py:117-125) -- instead gets freq=None, learns its
+    #      own rate after three frames and takes a 10x-period timeout (parser.py:92-96, :181-186).
+    #      A gap longer than that marks the parser invalid, which feeds canValid and makes
+    #      openpilot refuse to engage. These frames are ALLOWED to be absent: the board can be
+    #      unplugged, its low-priority telemetry has been observed blacked out for up to
+    #      94.5 s, and 0x70B only exists from board firmware 75aa91ee onward.
     #   2. Registering before the first update() means the first frame is not dropped.
     #      VLDict only registers a message on first access, which for a message read from
     #      CarStateExt is after that frame's packets have already been parsed.
-    pt_msgs = [("GW_ACTIVE", float("nan"))] if CP.carFingerprint in HONDA_ELESYS else []
+    # Neither frame may carry a signal named COUNTER or CHECKSUM: in a honda_ DBC those names
+    # make the parser enforce Honda counter continuity and a Honda checksum the board does not
+    # compute, and every frame would be dropped (opendbc/can/dbc.py:218-227, parser.py:66-73).
+    pt_msgs = [("GW_ACTIVE", float("nan")), ("GW_STEER_GRANT", float("nan"))] if CP.carFingerprint in HONDA_ELESYS else []
     parsers = {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_msgs, CanBus(CP).pt),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),

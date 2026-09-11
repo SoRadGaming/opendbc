@@ -15,8 +15,13 @@ BO_ 1280 SP_HUD_STATUS: 8 ADAS
  SG_ INTEGRATOR : 31|8@0- (1,0) [-127|127] "" STM
  SG_ INTEGRATOR_FROZEN : 33|1@0+ (1,0) [0|1] "" STM
  SG_ OP_SATURATED : 32|1@0+ (1,0) [0|1] "" STM
- SG_ RESERVED_5 : 47|8@0+ (1,0) [0|255] "" STM
- SG_ RESERVED_6 : 55|8@0+ (1,0) [0|255] "" STM
+ SG_ WANT_CONTROL : 40|1@0+ (1,0) [0|1] "" STM
+ SG_ LAT_READY : 41|1@0+ (1,0) [0|1] "" STM
+ SG_ OP_STATE : 44|3@0+ (1,0) [0|7] "" STM
+ SG_ RELEASE_BRAKE : 45|1@0+ (1,0) [0|1] "" STM
+ SG_ RELEASE_DRIVER : 46|1@0+ (1,0) [0|1] "" STM
+ SG_ LDW_ACTIVE : 47|1@0+ (1,0) [0|1] "" STM
+ SG_ MAX_TORQUE : 55|8@0+ (1,0) [0|255] "counts" STM
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" STM
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" STM
 
@@ -36,9 +41,14 @@ any Honda frame.
 Sent on bus 0, the camera's bus, where the module sits. NOT bus 2: on this harness bus 2 is
 the Elesys radar branch, and nothing on it is the module.
 
-PROTOCOL_VERSION is 2 (v2 added INTEGRATOR, OP_SATURATED and INTEGRATOR_FROZEN in bytes 3-4).
-Bump it if the meaning of any existing bit changes; adding a signal in a RESERVED byte does
-not need a bump, since an older receiver ignores those bytes anyway.";
+PROTOCOL_VERSION is 3. v2 added INTEGRATOR, OP_SATURATED and INTEGRATOR_FROZEN in bytes 3-4;
+v3 fills bytes 5-6 with the control request of SP-PROTOCOL-V3 section 1.2. Bytes 0-4 and 7 are
+byte-identical to v2, so v3 is a strict superset and the board accepts 1, 2 and 3.
+
+THE VERSION IS A HARD GATE ON THE RECEIVER. The board REJECTS a frame whose version is above
+the one it knows (sp_hud.c sp_hud_rx, SP_HUD_VERSION_MAX), and rejecting 0x500 silently takes
+the HUD merge and the board's integrator guard down with it. Board firmware 75aa91ee is the
+first that accepts 3. Never raise this number ahead of the flashed image.";
 
 CM_ SG_ 1280 STEERING_REQUIRED "openpilot wants hands on the wheel. This is openpilot's own
 driver-monitoring nag, NOT the stock camera's -- merge it into LKAS_HUD's STEERING_REQUIRED
@@ -50,6 +60,20 @@ CM_ SG_ 1280 LDW_LEFT "Lane departure to the left. Distinct from the stock camer
 which stays on 0x33D and is untouched by openpilot.";
 
 VAL_ 1280 ALERT_LEVEL 3 "critical" 2 "warning" 1 "info" 0 "none" ;
+
+CM_ SG_ 1280 WANT_CONTROL "openpilot intends to steer and is asking. The redundant statement of
+the 0x0E4 STEER_TORQUE_REQUEST bit, which remains the thing that actually asks.";
+CM_ SG_ 1280 LAT_READY "openpilot would steer if the board allowed it.";
+CM_ SG_ 1280 OP_STATE "openpilot's own lateral state machine, NOT the board's. See
+GW_STEER_GRANT.STATE for the board's.";
+CM_ SG_ 1280 MAX_TORQUE "The ceiling openpilot is willing to use, in SERIAL counts. NEGOTIATES
+DOWNWARD ONLY: the board applies min(this, its own authority), so a stale or absent 0x500 can
+never raise the limit. 0 means 'use the board's own authority', which is what openpilot sends
+while the authority ladder is still moving -- sending the number here as well would mean two
+places to change it.";
+
+VAL_ 1280 OP_STATE 5 "faulted" 4 "withdrawing" 3 "active" 2 "requesting" 1 "ready" 0 "off" ;
+
 BO_ 1796 GW_ACTIVE: 8 STM
  SG_ DRY_RUN : 47|1@0+ (1,0) [0|1] "" ADAS
  SG_ ENGAGED : 48|1@0+ (1,0) [0|1] "" ADAS
@@ -67,3 +91,51 @@ CM_ SG_ 1796 ENGAGED "The board is commanding non-zero torque on the LIN line.";
 CM_ SG_ 1796 DRY_RUN "The board is NOT actuating anything -- it reports what it WOULD do.
 ENGAGED is still set in a dry run, so ENGAGED alone means 'the board has an opinion', not
 'the loop is closed'. Every consumer must read ENGAGED AND NOT DRY_RUN.";
+
+BO_ 1803 GW_STEER_GRANT: 8 STM
+ SG_ STATE : 7|8@0+ (1,0) [0|7] "" ADAS
+ SG_ REASON : 15|8@0+ (1,0) [0|15] "" ADAS
+ SG_ AUTHORITY : 23|8@0+ (1,0) [0|255] "counts" ADAS
+ SG_ EPS_ACK : 24|1@0+ (1,0) [0|1] "" ADAS
+ SG_ EPS_LATCHED : 25|1@0+ (1,0) [0|1] "" ADAS
+ SG_ EPS_ERROR_STATE : 29|4@0+ (1,0) [0|15] "" ADAS
+ SG_ EPS_FRESH : 30|1@0+ (1,0) [0|1] "" ADAS
+ SG_ CAM_LKAS_ON : 31|1@0+ (1,0) [0|1] "" ADAS
+ SG_ APPLIED : 39|8@0- (2,0) [-256|254] "counts" ADAS
+ SG_ MOTOR_TORQUE : 47|8@0- (4,0) [-512|508] "" ADAS
+ SG_ RETRY_IN : 55|8@0+ (1,0) [0|255] "s" ADAS
+ SG_ GRANT_COUNTER : 63|8@0+ (1,0) [0|255] "" ADAS
+
+CM_ BO_ 1803 "LIN-bus gateway -> sunnypilot, 10 Hz on the car bus. NOT a stock Honda message.
+New in SP-PROTOCOL v3; board firmware 75aa91ee is the first that sends it, so IT MAY BE ABSENT
+and absence must read as NOT GRANTED. It is registered liveness-exempt in carstate's
+get_can_parsers() for exactly that reason -- see the note on GW_ACTIVE below.
+
+Why it exists: 0x704 GW_ACTIVE says whether the board is actuating, and has no room left to
+say WHY it is not. This frame carries the reason, in openpilot's own terms, so the driver can
+be told something better than 'it is not steering'.
+
+The counter is GRANT_COUNTER, NOT COUNTER, and there is no CHECKSUM signal. Both names are
+load-bearing in a honda_ DBC: opendbc's parser keys off them (get_checksum_state() /
+set_signal_type() in opendbc/can/dbc.py) and would enforce Honda counter continuity and a
+Honda checksum on a frame the board computes neither for -- dropping every frame.
+
+Bit layout is transcribed from the board's own dbc/eps-lkas-gw.dbc, which is written
+little-endian; the start bits here are the big-endian (Motorola) spelling of the same physical
+bits, matching the rest of this file.";
+
+CM_ SG_ 1803 STATE "The board's steering state machine. Only INTRO, ACTIVE and LIMITED mean it
+is or is about to be putting torque on the serial line.";
+CM_ SG_ 1803 REASON "Why the board is not steering. 0 while it is.";
+CM_ SG_ 1803 AUTHORITY "The board's current ceiling in SERIAL counts, after the SP_HUD_STATUS
+MAX_TORQUE negotiation. Informational: openpilot stays in the 2560 CAN domain and the board
+scales by AUTHORITY/2560, so openpilot's full scale IS this number whatever it is.";
+CM_ SG_ 1803 EPS_ERROR_STATE "Serial B2 bits 2:0 with B0 bit 4 as its top bit. 4 is the code
+this EPS returns when it refuses a torque request, and it latches for the key cycle.";
+CM_ SG_ 1803 RETRY_IN "Seconds until a new request will be considered. 0 = now. 255 = NOT THIS
+KEY CYCLE: the EPS has latched and only an ignition cycle clears it, so say so to the driver
+rather than retrying into a dead EPS for the rest of the drive.";
+CM_ SG_ 1803 APPLIED "Serial counts actually put on the wire, scale 2.";
+
+VAL_ 1803 STATE 7 "board_fault" 6 "refused" 5 "limited" 4 "active" 3 "intro" 2 "requested" 1 "ready" 0 "idle" ;
+VAL_ 1803 REASON 15 "soft_start" 14 "dry_run" 13 "board_fault" 12 "camera_fault" 11 "integrator_too_large" 10 "serial_checksum" 9 "eps_no_ack" 8 "eps_refused_latched" 7 "standstill" 6 "brake" 5 "blinker" 4 "driver_override" 3 "speed_too_low" 2 "op_stale" 1 "no_request" 0 "none" ;

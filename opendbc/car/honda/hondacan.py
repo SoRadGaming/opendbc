@@ -127,7 +127,8 @@ def create_acc_commands(packer, CAN, enabled, active, accel, gas, stopping_count
   return commands
 
 
-def create_steering_control(packer, CAN, apply_torque, lkas_active, tja_control):
+def create_steering_control(packer, CAN, apply_torque, lkas_active, tja_control,
+                            serial_gateway=False, ldw_left=False, ldw_right=False):
   values = {
     "STEER_TORQUE": apply_torque if lkas_active else 0,
     "STEER_TORQUE_REQUEST": lkas_active,
@@ -135,6 +136,21 @@ def create_steering_control(packer, CAN, apply_torque, lkas_active, tja_control)
 
   if tja_control:
     values["STEER_DOWN_TO_ZERO"] = lkas_active
+
+  # FORK(HONDA_ELESYS): nothing in this car reads 0x0E4 -- the EPS has no CAN steering input
+  # and the in-line LIN-bus gateway board consumes the frame and re-emits it on the camera's
+  # serial line. The board copies byte 2 bits 5:4 straight into serial camera-to-EPS byte 2
+  # bits 5:4, which is where the stock camera puts its lane-departure warning.
+  #
+  # Only these two bits are filled. Byte 2 bit 2 is the board's SERIAL_DOMAIN declaration and
+  # MUST stay clear while openpilot is in the 2560 CAN domain: setting it tells the board to
+  # take STEER_TORQUE as serial counts at unity gain, which pins it at full authority from the
+  # first frame. It is held at zero by SET_ME_X00_3 in the DBC, along with bits 3, 1 and 0.
+  # The signals exist only in honda_accord_au_2015_can; guard, or the packer logs an unknown
+  # signal on every other Honda.
+  if serial_gateway:
+    values["LDW_RIGHT"] = ldw_right
+    values["LDW_LEFT"] = ldw_left
 
   return packer.make_can_msg("STEERING_CONTROL", CAN.lkas, values)
 
@@ -252,10 +268,28 @@ def spam_buttons_command(packer, CAN, button_val, car_fingerprint):
   return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
 
-SP_HUD_PROTOCOL_VERSION = 2
+SP_HUD_PROTOCOL_VERSION = 3
+
+# v3 byte 5 OP_STATE. openpilot's OWN lateral state, not the board's -- the board reports its
+# state on GW_STEER_GRANT (0x70B) STATE.
+SP_OP_STATE_OFF = 0
+SP_OP_STATE_READY = 1
+SP_OP_STATE_REQUESTING = 2
+SP_OP_STATE_ACTIVE = 3
+SP_OP_STATE_WITHDRAWING = 4
+SP_OP_STATE_FAULTED = 5
+
+# v3 byte 6 MAX_TORQUE, in SERIAL counts. 0 means "use your own authority", and that is what
+# this sends on purpose: the board scales openpilot's 2560-count full scale by
+# authority/2560, so openpilot's full scale already IS the board's authority whatever the
+# authority is. Sending the number here as well would put the authority ladder
+# (40 -> 80 -> 120 -> 160) in two places that could disagree. The negotiation is
+# min(MAX_TORQUE, the board's own authority), so 0 can never raise the ceiling.
+SP_HUD_MAX_TORQUE = 0
 
 
-def create_sp_hud_status(packer, bus, CC, CC_SP, hud_control, alert_steer_required, alert_fcw):
+def create_sp_hud_status(packer, bus, CC, CC_SP, hud_control, alert_steer_required, alert_fcw,
+                         lat_ready, op_state, release_brake, release_driver):
   """openpilot's alert state, for an aftermarket module sitting in line with the LKAS camera.
 
   This is NOT a stock Honda message and nothing in the car reads it. It exists so a module
@@ -266,7 +300,20 @@ def create_sp_hud_status(packer, bus, CC, CC_SP, hud_control, alert_steer_requir
   0x33D off bus 0, so openpilot would end up reading back its own frame.
 
   CHECKSUM and COUNTER are filled by the packer, because they are named exactly that in a
-  honda_ DBC. See _sunnypilot_hud.dbc.
+  honda_ DBC. See _sunnypilot_linbus_gw.dbc.
+
+  THE VERSION NUMBER IS A HARD GATE ON THE RECEIVER. The board rejects a 0x500 whose version
+  is above the maximum it knows (sp_hud.c sp_hud_rx / SP_HUD_VERSION_MAX), and rejecting the
+  frame silently takes the HUD merge and the board's integrator guard down with it. Board
+  firmware 75aa91ee is the first that accepts 3. Never raise SP_HUD_PROTOCOL_VERSION ahead of
+  the flashed image. The board also drops the frame on a bad Honda checksum or on a COUNTER
+  that has stopped moving, so neither may be hand-filled here.
+
+  CC_SP.lateralControl is a DATACLASS, not a dict: convert_carControlSP() in
+  selfdrive/car/helpers.py rebuilds every nested struct by hand. It did not rebuild
+  lateralControl when that was added, so this function raised AttributeError on every control
+  step and took card down with it (routes 000000b5-b8). Attribute access below is correct
+  BECAUSE of that rebuild; test_car_control_sp_seam.py guards the seam.
   """
   # 3 critical, 2 warning, 1 info, 0 none. A severity hint only -- which alert it is lives
   # in the flag bits, so a receiver never has to infer one from the other.
@@ -308,6 +355,17 @@ def create_sp_hud_status(packer, bus, CC, CC_SP, hud_control, alert_steer_requir
     # the acknowledgement: 1 while the gateway hold on the integrator is active. If the
     # board sees this low while it is not engaged, sunnypilot is not running the protocol.
     'INTEGRATOR_FROZEN': CC_SP.lateralControl.integratorFrozen,
+    # v3, bytes 5-6: the control request of SP-PROTOCOL-V3 section 1.2. Advisory -- 0x0E4
+    # byte 2 bit 7 remains the thing that actually asks for torque, and every gate on the
+    # board still applies. This says what openpilot INTENDS, so the board can answer why it
+    # is not steering in openpilot's own terms on 0x70B.
+    'WANT_CONTROL': CC.latActive,
+    'LAT_READY': lat_ready,
+    'OP_STATE': op_state,
+    'RELEASE_BRAKE': release_brake,
+    'RELEASE_DRIVER': release_driver,
+    'LDW_ACTIVE': hud_control.leftLaneDepart or hud_control.rightLaneDepart,
+    'MAX_TORQUE': SP_HUD_MAX_TORQUE,
   }
   return packer.make_can_msg("SP_HUD_STATUS", bus, values)
 

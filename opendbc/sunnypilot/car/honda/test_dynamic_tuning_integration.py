@@ -19,10 +19,11 @@ import numpy as np
 
 from opendbc.car import Bus, structs
 from opendbc.car.honda.interface import CarInterface
-from opendbc.car.honda.carcontroller import CarController
+from opendbc.car.honda.carcontroller import CarController, brake_release_scale, BRAKE_RELEASE_FRAMES
 from opendbc.car.honda.hondacan import honda_checksum
 from opendbc.car.honda.values import CAR, DBC, CarControllerParams
 from opendbc.can.packer import CANPacker
+from opendbc.can.dbc import DBC as DBCFile
 from opendbc.sunnypilot.car.honda import dynamic_tuning as dt
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -302,7 +303,10 @@ if sp_frames:
     check("on bus 0, 8 bytes", bus == 0 and len(dat) == 8, f"bus={bus} dlc={len(dat)}")
     bad = [d for _, d in sp_frames if (d[7] & 0x0F) != honda_checksum(0x500, None, bytearray(d))]
     check("every frame carries a valid Honda checksum", not bad, f"{len(bad)} bad")
-    check("protocol version is 2", (dat[0] >> 4) & 0x0F == 2, f"{(dat[0] >> 4) & 0x0F}")
+    # v3 since the SP-PROTOCOL-V3 round. The board REJECTS an unknown version whole
+    # (sp_hud.c SP_HUD_VERSION_MAX), which silently takes the HUD merge and the integrator
+    # guard with it, so this number must never lead the flashed firmware.
+    check("protocol version is 3", (dat[0] >> 4) & 0x0F == 3, f"{(dat[0] >> 4) & 0x0F}")
     # set speed is km/h on the wire regardless of cluster units: 30 m/s -> 108
     check("SET_SPEED is km/h, not the cluster's display units", dat[2] == 108, f"{dat[2]}")
     counters = [(d[7] >> 4) & 0x03 for _, d in sp_frames]
@@ -442,6 +446,275 @@ check("ODOMETER_KM is the 24-bit field at bytes 3-5", vl9["SCM_FEEDBACK"]["ODOME
       f"{vl9['SCM_FEEDBACK']['ODOMETER_KM']}")
 raw9 = bytes(as_tuple(packer9.make_can_msg("SCM_FEEDBACK", 0, {"ODOMETER_KM": 164964}))[1])
 check("...and byte 3 carries the top byte (2), matching the car", raw9[3] == 2 and raw9[4] == 0x84 and raw9[5] == 0x64, raw9.hex())
+
+
+# --- 10. SP_HUD_STATUS v3 bytes 5-6: the control request -----------------------
+#
+# SP-PROTOCOL-V3 section 1.2. Bytes 0-4 and 7 are byte-identical to v2 (section 7 above
+# still checks them), so everything here is the two new bytes. The bit positions are
+# transcribed from the board's own parser, sp_hud.c sp_hud_rx():
+#   b5.0 WANT_CONTROL  b5.1 LAT_READY  b5.4:2 OP_STATE
+#   b5.5 RELEASE_BRAKE b5.6 RELEASE_DRIVER  b5.7 LDW_ACTIVE   b6 MAX_TORQUE
+
+print("\n[10] SP_HUD_STATUS v3 control request")
+cc10, CP10, _, _ = build()
+
+
+def v3_frame(lat_active=False, enabled=True, brake=False, steering_pressed=False,
+             ldw_left=False, ldw_right=False, v_ego=25.0, torque=0.0, frames=30, start=0):
+  """Run a few frames and return the last 0x500 payload plus the last 0x0E4 payload."""
+  cs = CS()
+  cs.out.vEgo, cs.out.aEgo = v_ego, 0.0
+  cs.out.brakePressed = brake
+  cs.out.steeringPressed = steering_pressed
+  sp = steer = None
+  for j in range(start, start + frames):
+    cc = structs.CarControl.new_message()
+    cc.enabled = enabled
+    cc.longActive = False
+    cc.latActive = lat_active
+    cc.actuators.torque = torque
+    cc.hudControl.speedVisible = True
+    cc.hudControl.setSpeed = 30.0
+    cc.hudControl.leftLaneDepart = ldw_left
+    cc.hudControl.rightLaneDepart = ldw_right
+    _, sends = cc10.update(cc.as_reader(), CC_SP, cs, j * int(1e7))
+    for m in sends:
+      a, d = as_tuple(m)[0], bytes(as_tuple(m)[1])
+      if a == 0x500:
+        sp = d
+      if a == 0xE4:
+        steer = d
+  return sp, steer
+
+
+OFF, READY, REQUESTING, ACTIVE, WITHDRAWING, FAULTED = 0, 1, 2, 3, 4, 5
+
+
+def b5(d):
+  return d[5]
+
+
+def op_state(d):
+  return (d[5] >> 2) & 0x07
+
+
+f, _ = v3_frame(lat_active=False, enabled=False, v_ego=0.0, start=0)
+check("v3: lateral off and not enabled -> OP_STATE off, WANT_CONTROL clear",
+      f is not None and op_state(f) == OFF and not (b5(f) & 0x01), f"b5={f and f[5]:#04x}")
+check("v3: MAX_TORQUE is 0 -- 'use your own authority', so the ladder lives in one place",
+      f is not None and f[6] == 0, f"{f and f[6]}")
+
+f, _ = v3_frame(lat_active=False, enabled=True, v_ego=25.0, start=100)
+check("v3: enabled, lateral available, not asking -> READY and LAT_READY",
+      f is not None and op_state(f) == READY and (b5(f) & 0x02), f"b5={f and f[5]:#04x}")
+
+f, _ = v3_frame(lat_active=True, torque=0.0, v_ego=25.0, start=200)
+check("v3: asking with a zero command -> REQUESTING, WANT_CONTROL set",
+      f is not None and op_state(f) == REQUESTING and (b5(f) & 0x01), f"b5={f and f[5]:#04x}")
+
+f, _ = v3_frame(lat_active=True, torque=0.5, v_ego=25.0, frames=80, start=300)
+check("v3: asking with a non-zero command -> ACTIVE",
+      f is not None and op_state(f) == ACTIVE, f"b5={f and f[5]:#04x}")
+
+f, _ = v3_frame(lat_active=True, torque=0.5, brake=True, v_ego=25.0, frames=80, start=400)
+check("v3: brake while asking -> WITHDRAWING and RELEASE_BRAKE",
+      f is not None and op_state(f) == WITHDRAWING and (b5(f) & 0x20), f"b5={f and f[5]:#04x}")
+
+f, _ = v3_frame(lat_active=False, enabled=True, brake=True, v_ego=25.0, start=500)
+check("v3: braking with lateral OFF does not claim to be withdrawing",
+      f is not None and op_state(f) != WITHDRAWING and not (b5(f) & 0x20), f"b5={f and f[5]:#04x}")
+
+f, _ = v3_frame(lat_active=True, torque=0.5, steering_pressed=True, v_ego=25.0, frames=80, start=600)
+check("v3: driver on the wheel while asking -> WITHDRAWING and RELEASE_DRIVER",
+      f is not None and op_state(f) == WITHDRAWING and (b5(f) & 0x40), f"b5={f and f[5]:#04x}")
+
+f, _ = v3_frame(lat_active=True, ldw_left=True, v_ego=25.0, start=700)
+check("v3: LDW_ACTIVE follows a lane departure", f is not None and (b5(f) & 0x80), f"b5={f and f[5]:#04x}")
+f, _ = v3_frame(lat_active=True, v_ego=25.0, start=800)
+check("v3: LDW_ACTIVE clear with no departure", f is not None and not (b5(f) & 0x80), f"b5={f and f[5]:#04x}")
+
+
+# --- 11. LDW into STEERING_CONTROL byte 2, and the bits that must stay zero ------
+#
+# The board copies 0x0E4 byte 2 bits 5:4 straight into the camera's serial byte 2 bits 5:4.
+# Byte 2 bit 2 is the board's SERIAL_DOMAIN declaration: setting it while openpilot is still
+# in the 2560 domain tells the board to take STEER_TORQUE as serial counts at unity gain and
+# pins it at full authority from the first frame. It must be zero.
+
+print("\n[11] LDW bits in STEERING_CONTROL byte 2")
+_, st = v3_frame(lat_active=True, ldw_left=True, ldw_right=False, v_ego=25.0, start=900)
+check("LDW_LEFT sets byte 2 bit 4 only", st is not None and (st[2] & 0x30) == 0x10, f"b2={st and st[2]:#04x}")
+_, st = v3_frame(lat_active=True, ldw_left=False, ldw_right=True, v_ego=25.0, start=1000)
+check("LDW_RIGHT sets byte 2 bit 5 only", st is not None and (st[2] & 0x30) == 0x20, f"b2={st and st[2]:#04x}")
+_, st = v3_frame(lat_active=True, ldw_left=True, ldw_right=True, v_ego=25.0, start=1100)
+check("both departures set both bits", st is not None and (st[2] & 0x30) == 0x30, f"b2={st and st[2]:#04x}")
+check("SERIAL_DOMAIN (bit 2) is CLEAR -- openpilot is still in the 2560 domain",
+      st is not None and not (st[2] & 0x04), f"b2={st and st[2]:#04x}")
+check("bits 6, 3, 1 and 0 of byte 2 are zero", st is not None and not (st[2] & 0x4B), f"b2={st and st[2]:#04x}")
+check("STEER_TORQUE_REQUEST (bit 7) still carries latActive", st is not None and (st[2] & 0x80), f"b2={st and st[2]:#04x}")
+_, st = v3_frame(lat_active=False, enabled=True, ldw_left=True, v_ego=25.0, start=1200)
+check("LDW is sent even with lateral off -- it is a warning, not a request",
+      st is not None and (st[2] & 0x10) and not (st[2] & 0x80), f"b2={st and st[2]:#04x}")
+
+
+# --- 12. Release on brake within 200 ms ---------------------------------------
+#
+# The stock camera drops LKAS_ON within about 20 frames of a brake press (c8/c9). This is
+# imitation of stock, not fault avoidance. Two properties are load-bearing: it may only ever
+# REDUCE the command, and it cannot latch.
+
+print("\n[12] brake release ramp")
+cc12, CP12, _, _ = build()
+cs12 = CS()
+cs12.out.vEgo, cs12.out.aEgo = 25.0, 0.0
+
+
+def steer_torque(cc_obj, cs, j, lat_active=True, torque=-1.0):
+  cc = structs.CarControl.new_message()
+  cc.enabled = True
+  cc.longActive = False
+  cc.latActive = lat_active
+  cc.actuators.torque = torque
+  cc.hudControl.speedVisible = True
+  cc.hudControl.setSpeed = 30.0
+  _, sends = cc_obj.update(cc.as_reader(), CC_SP, cs, j * int(1e7))
+  for m in sends:
+    a, d = as_tuple(m)[0], bytes(as_tuple(m)[1])
+    if a == 0xE4:
+      return int.from_bytes(d[0:2], "big", signed=True)
+  return None
+
+
+railed = None
+for j in range(300):                       # wind the rate limiter up to the rail
+  railed = steer_torque(cc12, cs12, j)
+check("a steady request reaches full scale with the brake up", railed is not None and abs(railed) > 2000, f"{railed}")
+
+cs12.out.brakePressed = True
+ramp = [steer_torque(cc12, cs12, 300 + j) for j in range(25)]
+steps = [abs(a - b) for a, b in zip(ramp, ramp[1:], strict=False)]
+check("brake: the command shrinks every frame", all(abs(b) <= abs(a) + 1 for a, b in zip(ramp, ramp[1:], strict=False)),
+      f"{ramp[:6]}")
+check("brake: zero within 20 frames (0.20 s)", ramp[19] == 0, f"frame 20 = {ramp[19]}, ramp={ramp[:21]}")
+# The ceiling walks down 1/BRAKE_RELEASE_FRAMES of full scale per frame, so the withdrawal is
+# an exact linear ramp: 2560/20 = 128 CAN counts, which the board scales by authority/2560 to
+# 4 serial counts at authority 80 -- under the stock camera's p99 of 5 and the 10 that
+# SP-PROTOCOL-V3 section 3 allows, and far under the 16 the stock camera has ever stepped.
+check("brake: the withdrawal is a linear ramp of 128 CAN counts per frame (+-1 for rounding)",
+      max(steps) <= 2560 // BRAKE_RELEASE_FRAMES + 1, f"max step {max(steps)}, steps={steps[:6]}")
+check("brake: it stays at zero while the brake is held", steer_torque(cc12, cs12, 400) == 0)
+
+cs12.out.brakePressed = False
+back = [steer_torque(cc12, cs12, 500 + j) for j in range(300)]
+check("brake released: it does NOT latch -- the command comes back", abs(back[-1]) > 2000, f"{back[-1]}")
+check("brake released: the recovery is rate limited, not a step", abs(back[0]) < 200, f"first frame {back[0]}")
+
+# the scale is a pure function of the frame count, so the monotonicity claim can be checked
+# directly rather than only through the controller
+scales, n = [], 0
+for _ in range(BRAKE_RELEASE_FRAMES + 5):
+  sc, n = brake_release_scale(True, n)
+  scales.append(sc)
+check("scale is monotonically non-increasing and never above 1 or below 0",
+      all(0.0 <= x <= 1.0 for x in scales) and all(b <= a for a, b in zip(scales, scales[1:], strict=False)))
+check("scale reaches exactly 0 at BRAKE_RELEASE_FRAMES", scales[BRAKE_RELEASE_FRAMES - 1] == 0.0, f"{scales}")
+sc, n = brake_release_scale(False, n)
+check("one frame with the brake up clears it completely", sc == 1.0 and n == 0, f"{sc} {n}")
+
+
+# --- 13. GW_STEER_GRANT (0x70B) -> CarStateSP.linbusGateway ---------------------
+#
+# Absence is never permission. The board only began sending this in firmware 75aa91ee, so an
+# older image, or one dropped frame too many, must read as NOT granted -- and must not cost
+# openpilot its CAN, or it would refuse to engage for want of a frame that is allowed to be
+# missing.
+
+print("\n[13] GW_STEER_GRANT -> CarStateSP.linbusGateway")
+CP13 = CarInterface.get_non_essential_params(PLATFORM)
+CP13_SP = CarInterface.get_non_essential_params_sp(CP13, PLATFORM)
+CI13 = CarInterface(CP13, CP13_SP)
+packer13 = CANPacker(DBC[PLATFORM][Bus.pt])
+
+IDLE, GRANT_READY, REQUESTED, INTRO, GRANT_ACTIVE, LIMITED, REFUSED, BOARD_FAULT = range(8)
+
+
+def grant_step(i, values=None):
+  frames = []
+  if values is not None:
+    frames.append(as_tuple(packer13.make_can_msg("GW_STEER_GRANT", 0, values)))
+  _, cs_sp = CI13.update([((i + 1) * int(1e7), frames)])
+  return cs_sp.linbusGateway
+
+
+g = grant_step(0, None)
+check("no 0x70B has ever arrived -> not valid, NOT granted", not g.grantValid and not g.granted)
+
+g = grant_step(1, {"STATE": GRANT_ACTIVE, "REASON": 0, "AUTHORITY": 80, "EPS_ACK": 1,
+                   "EPS_FRESH": 1, "CAM_LKAS_ON": 1, "APPLIED": 40, "MOTOR_TORQUE": -16,
+                   "RETRY_IN": 0, "GRANT_COUNTER": 7})
+check("a frame arrives -> valid and granted", g.grantValid and g.granted)
+check("STATE, REASON and AUTHORITY decode", g.grantState == GRANT_ACTIVE and g.grantReason == 0 and g.authority == 80,
+      f"{g.grantState} {g.grantReason} {g.authority}")
+check("the EPS bits decode", g.epsAck and g.epsFresh and g.camLkasOn and not g.epsLatched)
+check("APPLIED is signed with scale 2", g.applied == 40, f"{g.applied}")
+check("MOTOR_TORQUE is signed with scale 4", g.motorTorque == -16, f"{g.motorTorque}")
+check("not latched", not g.latchedUntilKeyOff)
+
+g = grant_step(2, {"STATE": REFUSED, "REASON": 8, "EPS_LATCHED": 1, "EPS_ERROR_STATE": 4,
+                   "RETRY_IN": 255, "GRANT_COUNTER": 8})
+check("REFUSED is not granted", g.grantValid and not g.granted and g.grantState == REFUSED)
+check("REASON reaches carStateSP for the driver-facing layer", g.grantReason == 8, f"{g.grantReason}")
+check("EPS_ERROR_STATE 4 decodes", g.epsErrorState == 4, f"{g.epsErrorState}")
+check("RETRY_IN 255 -> latchedUntilKeyOff", g.latchedUntilKeyOff and g.retryIn == 255, f"{g.retryIn}")
+
+g = grant_step(3, {"STATE": INTRO, "REASON": 15, "RETRY_IN": 0, "GRANT_COUNTER": 9})
+check("INTRO counts as granted (the board is about to put torque on the wire)", g.granted)
+check("the latch is NOT sticky on our side -- the board clearing it clears this",
+      not g.latchedUntilKeyOff and g.retryIn == 0)
+
+g = grant_step(4, {"STATE": LIMITED, "REASON": 15, "GRANT_COUNTER": 10})
+check("LIMITED counts as granted", g.granted)
+g = grant_step(5, {"STATE": REQUESTED, "REASON": 3, "GRANT_COUNTER": 11})
+check("REQUESTED does not", not g.granted)
+
+for i in range(6, 6 + 49):
+  g = grant_step(i, None)
+check("still valid one frame inside the 500 ms window", g.grantValid)
+g = grant_step(56, None)
+check("stale after 50 frames -> not valid and NOT granted", not g.grantValid and not g.granted)
+check("a stale frame reports nothing rather than the last thing it heard",
+      g.grantState == 0 and g.grantReason == 0 and g.authority == 0 and not g.epsAck)
+
+st13 = CI13.can_parsers[Bus.pt].message_states[0x70B]
+check("GW_STEER_GRANT is registered before the first update", 0x70B in CI13.can_parsers[Bus.pt].addresses)
+check("GW_STEER_GRANT is liveness-exempt (ignore_alive)", st13.ignore_alive)
+fresh13 = CarInterface(CP13, CP13_SP)
+fresh13.update([(int(1e7), [])])
+fresh_st13 = fresh13.can_parsers[Bus.pt].message_states[0x70B]
+check("a board that never sends 0x70B still reads as a valid message, not a CAN timeout",
+      fresh_st13.valid(int(5e9), False) and not fresh_st13.timestamps)
+# THE trap this whole registration exists for: a message reached lazily through cp.vl[...]
+# is registered with freq=None, takes a timeout threshold, and a message past its timeout
+# makes can_valid false -- which feeds canValid and makes openpilot refuse to engage. The
+# board's telemetry has been observed blacked out for 94.5 s. Drive it past the threshold
+# and check the message still reports valid.
+# (can_valid itself cannot be asserted here: this CarInterface has only ever been fed 0x70B,
+# so every other car message on the bus is legitimately timed out.)
+_cp13 = CI13.can_parsers[Bus.pt]
+for i in range(57, 57 + 12000):            # 120 s of silence at the 100 Hz carstate rate
+  grant_step(i, None)
+_age_ns = _cp13._last_update_nanos - st13.timestamps[-1]
+check("blacked out for far longer than its own timeout threshold",
+      _age_ns > st13.timeout_threshold, f"{_age_ns / 1e9:.1f} s dark, threshold {st13.timeout_threshold / 1e9:.1f} s")
+check("and it STILL reports valid, so it can never be the reason can_valid goes false",
+      st13.valid(_cp13._last_update_nanos, False))
+
+sigs13 = DBCFile(DBC[PLATFORM][Bus.pt]).addr_to_msg[0x70B].sigs
+check("its counter is NOT named COUNTER (a honda_ DBC would enforce continuity and drop it)",
+      "COUNTER" not in sigs13 and "GRANT_COUNTER" in sigs13, f"{sorted(sigs13)}")
+check("it has no CHECKSUM signal (the board computes no Honda checksum for it)",
+      "CHECKSUM" not in sigs13)
 
 
 print("\n" + "=" * 60)

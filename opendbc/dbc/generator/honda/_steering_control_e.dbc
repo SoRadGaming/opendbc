@@ -1,7 +1,10 @@
 BO_ 228 STEERING_CONTROL: 5 ADAS
  SG_ STEER_TORQUE : 7|16@0- (1,0) [-3840|3840] "" EPS
  SG_ STEER_TORQUE_REQUEST : 23|1@0+ (1,0) [0|1] "" EPS
- SG_ SET_ME_X00 : 22|7@0+ (1,0) [0|127] "" EPS
+ SG_ SET_ME_X00 : 22|1@0+ (1,0) [0|1] "" EPS
+ SG_ LDW_RIGHT : 21|1@0+ (1,0) [0|1] "" EPS
+ SG_ LDW_LEFT : 20|1@0+ (1,0) [0|1] "" EPS
+ SG_ SET_ME_X00_3 : 19|4@0+ (1,0) [0|15] "" EPS
  SG_ SET_ME_X00_2 : 31|8@0+ (1,0) [0|0] "" EPS
  SG_ COUNTER : 37|2@0+ (1,0) [0|3] "" EPS
  SG_ CHECKSUM : 35|4@0+ (1,0) [0|15] "" EPS
@@ -16,3 +19,31 @@ BO_ 399 STEER_STATUS: 7 EPS
  SG_ CHECKSUM : 51|4@0+ (1,0) [0|3] "" EON
 
 VAL_ 399 STEER_STATUS 7 "permanent_fault" 6 "tmp_fault" 5 "fault_1" 4 "no_torque_alert_2" 3 "low_speed_lockout" 2 "no_torque_alert_1" 1 "driver_steering" 0 "normal" ;
+
+CM_ BO_ 228 "FORK(HONDA_ACCORD_9G_AU): byte 2 is carved up. On a stock Honda the whole of
+bits 6:0 is a constant zero and the car ignores it -- 0x0E4 on this car is not read by the
+EPS at all, it is consumed by the in-line LIN-bus gateway board (S:\Software\EPS-LKAS),
+which translates it to the camera's 9600 8E1 serial protocol. The board reads byte 2 as a
+bit field, so the bits it acts on are named here instead of being buried in SET_ME_X00.
+This fragment is imported by honda_accord_au_2015_can.dbc and by nothing else, so no other
+platform sees these names.
+
+Bits NOT named here stay zero and must stay zero:
+  bit 3 TX_RAW_SERIAL   diagnostics only
+  bit 2 SERIAL_DOMAIN   1 would declare STEER_TORQUE to be in serial counts (-239..239).
+                        openpilot is in the 2560 CAN domain and the board scales by
+                        authority/2560; setting this bit without converting the scale pins
+                        the board at full authority from the first frame. DO NOT SET IT
+                        without changing lateralParams in the same commit.
+  bit 1 reserved
+  bit 0 BLEND_DISABLE   1 = openpilot owns the driver-torque blend
+That is what SET_ME_X00_3 holds at zero. SET_ME_X00 is now just bit 6 (WIGGLE_DISABLE); the
+board owns the command LSB alternation, so it stays zero too.
+
+panda is unaffected: the only check honda_tx_hook makes on 0x0E4 is that bytes 0-1 are zero
+while controls are not allowed (opendbc/safety/modes/honda.h).";
+
+CM_ SG_ 228 LDW_RIGHT "Right lane departure. The board passes it to serial camera-to-EPS
+byte 2 bit 5. From hudControl.rightLaneDepart.";
+CM_ SG_ 228 LDW_LEFT "Left lane departure -> serial byte 2 bit 4. From
+hudControl.leftLaneDepart.";
