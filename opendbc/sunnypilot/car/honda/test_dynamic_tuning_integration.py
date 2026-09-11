@@ -537,7 +537,11 @@ check("v3: LDW_ACTIVE clear with no departure", f is not None and not (b5(f) & 0
 
 # --- 11. LDW into STEERING_CONTROL byte 2, and the bits that must stay zero ------
 #
-# The board copies 0x0E4 byte 2 bits 5:4 straight into the camera's serial byte 2 bits 5:4.
+# 0x0E4 byte 2 bits 5:4 are SPECIFIED (SP-PROTOCOL-V3 section 4) to reach the camera's serial
+# byte 2 bits 5:4, and are INERT on firmware 875ba124: the board's 0x0E4 parse reads only bits
+# 7 and 2 (gw_active.c:759-773) and lkas_uart.c:449 hard-zeroes serial byte 2 bits 5:4. What
+# is checked below is therefore openpilot's TRANSMISSION only -- it proves nothing about what
+# the EPS or the cluster sees, and must not be read as proof the warning was delivered.
 # Byte 2 bit 2 is the board's SERIAL_DOMAIN declaration: setting it while openpilot is still
 # in the 2560 domain tells the board to take STEER_TORQUE as serial counts at unity gain and
 # pins it at full authority from the first frame. It must be zero.
@@ -668,20 +672,31 @@ check("REASON reaches carStateSP for the driver-facing layer", g.grantReason == 
 check("EPS_ERROR_STATE 4 decodes", g.epsErrorState == 4, f"{g.epsErrorState}")
 check("RETRY_IN 255 -> latchedUntilKeyOff", g.latchedUntilKeyOff and g.retryIn == 255, f"{g.retryIn}")
 
-g = grant_step(3, {"STATE": INTRO, "REASON": 15, "RETRY_IN": 0, "GRANT_COUNTER": 9})
+# EPS_LATCHED IS NOT A LATCH. Byte 3 bit 1 is the board's `refusing` flag (gw_active.c:1391),
+# a timed hold -- 3 s (GW_NOACK_HOLD_MS) when the EPS simply has not acknowledged, which this
+# EPS does routinely below about 60 km/h. RETRY_IN counts that hold down in seconds, and 255
+# is the only thing the board ever says that means "not this key cycle" (gw_active.c:1401-06).
+# Telling the driver to cycle the ignition over a 3 s hold is the failure this guards.
+g = grant_step(3, {"STATE": REFUSED, "REASON": 9, "EPS_LATCHED": 1, "EPS_ERROR_STATE": 0,
+                   "RETRY_IN": 2, "GRANT_COUNTER": 9})
+check("a no-ack refusal reports the hold, not a key-cycle latch",
+      g.epsLatched and g.retryIn == 2 and not g.latchedUntilKeyOff, f"retryIn={g.retryIn}")
+check("REASON 9 (EPS not acknowledging) reaches carStateSP", g.grantReason == 9, f"{g.grantReason}")
+
+g = grant_step(4, {"STATE": INTRO, "REASON": 15, "RETRY_IN": 0, "GRANT_COUNTER": 10})
 check("INTRO counts as granted (the board is about to put torque on the wire)", g.granted)
 check("the latch is NOT sticky on our side -- the board clearing it clears this",
       not g.latchedUntilKeyOff and g.retryIn == 0)
 
-g = grant_step(4, {"STATE": LIMITED, "REASON": 15, "GRANT_COUNTER": 10})
+g = grant_step(5, {"STATE": LIMITED, "REASON": 15, "GRANT_COUNTER": 11})
 check("LIMITED counts as granted", g.granted)
-g = grant_step(5, {"STATE": REQUESTED, "REASON": 3, "GRANT_COUNTER": 11})
+g = grant_step(6, {"STATE": REQUESTED, "REASON": 3, "GRANT_COUNTER": 12})
 check("REQUESTED does not", not g.granted)
 
-for i in range(6, 6 + 49):
+for i in range(7, 7 + 49):
   g = grant_step(i, None)
 check("still valid one frame inside the 500 ms window", g.grantValid)
-g = grant_step(56, None)
+g = grant_step(57, None)
 check("stale after 50 frames -> not valid and NOT granted", not g.grantValid and not g.granted)
 check("a stale frame reports nothing rather than the last thing it heard",
       g.grantState == 0 and g.grantReason == 0 and g.authority == 0 and not g.epsAck)

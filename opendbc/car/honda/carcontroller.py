@@ -466,6 +466,15 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         # RELEASE_* are only meaningful while openpilot is asking for lateral; asserting
         # them at a red light with lateral off would tell the board it is withdrawing from
         # something it was never doing.
+        #
+        # RELEASE_BRAKE has a matching action -- the BRAKE_RELEASE_FRAMES ceiling above, which
+        # walks the command to zero. RELEASE_DRIVER deliberately has none: openpilot keeps
+        # steering through steeringPressed, as it does on every Honda, and the driver-torque
+        # blend and override gate stay the board's (INH_DRIVER_OVERRIDE). So this bit is
+        # ADVISORY: it says "the driver is on the wheel", not "I am ramping out". Firmware
+        # 875ba124 stores it and never reads it. If the board starts acting on it, the ramp
+        # has to be added here in the same change, or the two sides will disagree about who
+        # is backing off mid-corner.
         release_brake = CC.latActive and CS.out.brakePressed
         release_driver = CC.latActive and CS.out.steeringPressed
         # "would steer if the board allowed it". latActive is ORed in so this can never read

@@ -26,7 +26,8 @@ LINBUS_GRANT_STALE_FRAMES = 50
 # torque on the serial line.
 GRANT_STATES_STEERING = (3, 4, 5)   # INTRO, ACTIVE, LIMITED
 
-# RETRY_IN: seconds until a new request is considered. This value means "not this key cycle".
+# RETRY_IN: seconds until a new request is considered. This value means "not this key cycle",
+# and it is the ONLY thing the board says that means that -- see latchedUntilKeyOff below.
 GRANT_RETRY_KEY_CYCLE = 255
 
 # SCM_BUTTONS.FUEL_LEVEL is clamped by the meter at 105 (~52 L of a ~60 L tank), so this is
@@ -130,6 +131,10 @@ class CarStateExt:
     ret_sp.linbusGateway.granted = valid and state in GRANT_STATES_STEERING
     ret_sp.linbusGateway.authority = int(g["AUTHORITY"]) if valid else 0
     ret_sp.linbusGateway.epsAck = valid and bool(g["EPS_ACK"])
+    # NOT a latch, whatever the signal is called on the wire. Byte 3 bit 1 is the board's
+    # `refusing` flag (gw_active.c:1391), which is a TIMED hold: GW_REFUSE_HOLD_MS = 60 s for
+    # an EPS error state, but GW_NOACK_HOLD_MS = 3 s for a merely missing acknowledgement
+    # (gw_active.c:1017-1022). "The board is inside its refusal hold", nothing stronger.
     ret_sp.linbusGateway.epsLatched = valid and eps_latched
     ret_sp.linbusGateway.epsErrorState = int(g["EPS_ERROR_STATE"]) if valid else 0
     ret_sp.linbusGateway.epsFresh = valid and bool(g["EPS_FRESH"])
@@ -141,7 +146,14 @@ class CarStateExt:
     # nothing to retry into. Reported, never made sticky on this side -- if the board's next
     # fresh frame says otherwise, believe the board, so a one-frame glitch cannot strand the
     # driver for the rest of the drive.
-    ret_sp.linbusGateway.latchedUntilKeyOff = valid and (retry_in == GRANT_RETRY_KEY_CYCLE or eps_latched)
+    #
+    # RETRY_IN IS THE ONLY AUTHORITY HERE, and EPS_LATCHED is deliberately NOT ORed in. The
+    # board emits 255 only while `refusing && eps_errst != 0` (gw_active.c:1401-1406) -- the
+    # error-4 case that really does latch for the key cycle. EPS_LATCHED alone is the 3 s
+    # no-acknowledgement hold, which this EPS does routinely below about 60 km/h (HANDOFF 0e);
+    # ORing it in would tell the driver to cycle the ignition for something that clears itself
+    # before he could reach the key.
+    ret_sp.linbusGateway.latchedUntilKeyOff = valid and retry_in == GRANT_RETRY_KEY_CYCLE
 
     # The board's answer has to reach a human somehow. carStateSP is the surface; this is the
     # breadcrumb for the log, one line per change of (state, reason), so a 10 Hz frame cannot

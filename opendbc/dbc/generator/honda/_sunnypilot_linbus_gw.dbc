@@ -66,11 +66,26 @@ the 0x0E4 STEER_TORQUE_REQUEST bit, which remains the thing that actually asks."
 CM_ SG_ 1280 LAT_READY "openpilot would steer if the board allowed it.";
 CM_ SG_ 1280 OP_STATE "openpilot's own lateral state machine, NOT the board's. See
 GW_STEER_GRANT.STATE for the board's.";
-CM_ SG_ 1280 MAX_TORQUE "The ceiling openpilot is willing to use, in SERIAL counts. NEGOTIATES
-DOWNWARD ONLY: the board applies min(this, its own authority), so a stale or absent 0x500 can
-never raise the limit. 0 means 'use the board's own authority', which is what openpilot sends
-while the authority ladder is still moving -- sending the number here as well would mean two
-places to change it.";
+CM_ SG_ 1280 RELEASE_DRIVER "ADVISORY ONLY. openpilot sets it on steeringPressed and
+deliberately keeps steering: unlike RELEASE_BRAKE there is no matching ramp on the command,
+because the driver-torque blend and the override gate are the board's (INH_DRIVER_OVERRIDE).
+Firmware 875ba124 stores the bit and never reads it. If the board ever starts acting on it,
+openpilot must ramp here in the same change, or the two sides will disagree about who is
+backing off.";
+CM_ SG_ 1280 LDW_ACTIVE "A lane-departure warning is being shown on either side. NOT decoded
+into anything by firmware 875ba124: sp_hud.c:88 parses it and sp_hud_merge_lkas() never reads
+it, so no RDM_HUD or BEEP is raised from it. Sent ahead of the firmware on purpose.";
+CM_ SG_ 1280 MAX_TORQUE "The ceiling openpilot is willing to use, in SERIAL counts. 0 means
+'use the board's own authority', which is what openpilot sends while the authority ladder is
+still moving -- sending the number here as well would mean two places to change it.
+
+NOT ENFORCED BY FIRMWARE 875ba124. The board reads this field in exactly one place,
+gw_active.c:1348, and only to compute the AUTHORITY byte it REPORTS on GW_STEER_GRANT. The
+command path is unconditional -- gw_active.c:1104,1108 clamp to the compile-time
+GW_LIN_AUTHORITY -- so setting a non-zero value here today would make 0x70B AUTHORITY report
+the cap while the board kept commanding its own. Harmless while openpilot sends 0, which is
+why it does. Do not use this as a probe-drive limiter until the board applies the negotiated
+value at gw_active.c:1104,1108.";
 
 VAL_ 1280 OP_STATE 5 "faulted" 4 "withdrawing" 3 "active" 2 "requesting" 1 "ready" 0 "off" ;
 
@@ -126,16 +141,30 @@ bits, matching the rest of this file.";
 
 CM_ SG_ 1803 STATE "The board's steering state machine. Only INTRO, ACTIVE and LIMITED mean it
 is or is about to be putting torque on the serial line.";
-CM_ SG_ 1803 REASON "Why the board is not steering. 0 while it is.";
-CM_ SG_ 1803 AUTHORITY "The board's current ceiling in SERIAL counts, after the SP_HUD_STATUS
-MAX_TORQUE negotiation. Informational: openpilot stays in the 2560 CAN domain and the board
-scales by AUTHORITY/2560, so openpilot's full scale IS this number whatever it is.";
+CM_ SG_ 1803 REASON "Why the board is not steering. 0 while it is. Value 6 'brake' is defined
+in the protocol but NOT emitted by firmware 875ba124: GW_RSN_BRAKE exists at gw_active.c:234
+and the reason ladder at gw_active.c:1356-1375 has no brake branch, so a brake-time withdrawal
+arrives as 1 'no_request'.";
+CM_ SG_ 1803 AUTHORITY "The board's current ceiling in SERIAL counts, as the board REPORTS it.
+Informational: openpilot stays in the 2560 CAN domain and the board scales by AUTHORITY/2560,
+so openpilot's full scale IS this number whatever it is. Note that firmware 875ba124 folds
+SP_HUD_STATUS.MAX_TORQUE into this byte only -- it does not apply it to the command. See the
+MAX_TORQUE comment above.";
+CM_ SG_ 1803 EPS_LATCHED "NOT a key-cycle latch, despite the name. It is the board's `refusing`
+flag (gw_active.c:1391), a TIMED hold: GW_REFUSE_HOLD_MS = 60 s when the EPS reports an error
+state, GW_NOACK_HOLD_MS = 3 s when it merely fails to acknowledge (gw_active.c:1017-1022).
+Read it as 'the board is inside its refusal hold'. RETRY_IN is what separates the two.";
 CM_ SG_ 1803 EPS_ERROR_STATE "Serial B2 bits 2:0 with B0 bit 4 as its top bit. 4 is the code
 this EPS returns when it refuses a torque request, and it latches for the key cycle.";
 CM_ SG_ 1803 RETRY_IN "Seconds until a new request will be considered. 0 = now. 255 = NOT THIS
 KEY CYCLE: the EPS has latched and only an ignition cycle clears it, so say so to the driver
-rather than retrying into a dead EPS for the rest of the drive.";
-CM_ SG_ 1803 APPLIED "Serial counts actually put on the wire, scale 2.";
+rather than retrying into a dead EPS for the rest of the drive. THE ONLY KEY-CYCLE STATEMENT
+THE BOARD MAKES -- it emits 255 only while refusing with a non-zero EPS error state
+(gw_active.c:1401-1406); for a plain no-acknowledgement it counts a finite hold down instead.";
+CM_ SG_ 1803 APPLIED "Serial counts actually put on the wire, scale 2 -- and therefore
+QUANTISED to 2 counts: the board packs (int8)(cmd / 2) with C truncation toward zero
+(gw_active.c:1394), so a commanded +/-1 reads back as 0. Use STATE, or 0x704 CMD_APPLY_STEER,
+for any 'is anything on the wire' check.";
 
 VAL_ 1803 STATE 7 "board_fault" 6 "refused" 5 "limited" 4 "active" 3 "intro" 2 "requested" 1 "ready" 0 "idle" ;
 VAL_ 1803 REASON 15 "soft_start" 14 "dry_run" 13 "board_fault" 12 "camera_fault" 11 "integrator_too_large" 10 "serial_checksum" 9 "eps_no_ack" 8 "eps_refused_latched" 7 "standstill" 6 "brake" 5 "blinker" 4 "driver_override" 3 "speed_too_low" 2 "op_stale" 1 "no_request" 0 "none" ;

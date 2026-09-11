@@ -24,7 +24,9 @@ CM_ BO_ 228 "FORK(HONDA_ACCORD_9G_AU): byte 2 is carved up. On a stock Honda the
 bits 6:0 is a constant zero and the car ignores it -- 0x0E4 on this car is not read by the
 EPS at all, it is consumed by the in-line LIN-bus gateway board (S:\Software\EPS-LKAS),
 which translates it to the camera's 9600 8E1 serial protocol. The board reads byte 2 as a
-bit field, so the bits it acts on are named here instead of being buried in SET_ME_X00.
+bit field, so the bits it acts on, or is specified to act on, are named here instead of
+being buried in SET_ME_X00. Firmware 875ba124 acts on bit 7 and bit 2 only; LDW_LEFT and
+LDW_RIGHT are specified but not yet decoded -- see their signal comments.
 This fragment is imported by honda_accord_au_2015_can.dbc and by nothing else, so no other
 platform sees these names.
 
@@ -43,7 +45,11 @@ board owns the command LSB alternation, so it stays zero too.
 panda is unaffected: the only check honda_tx_hook makes on 0x0E4 is that bytes 0-1 are zero
 while controls are not allowed (opendbc/safety/modes/honda.h).";
 
-CM_ SG_ 228 LDW_RIGHT "Right lane departure. The board passes it to serial camera-to-EPS
-byte 2 bit 5. From hudControl.rightLaneDepart.";
-CM_ SG_ 228 LDW_LEFT "Left lane departure -> serial byte 2 bit 4. From
-hudControl.leftLaneDepart.";
+CM_ SG_ 228 LDW_RIGHT "Right lane departure, from hudControl.rightLaneDepart. Specified in
+SP-PROTOCOL-V3 section 4 to reach serial camera-to-EPS byte 2 bit 5. NOT IMPLEMENTED on the
+board as of firmware 875ba124 -- this bit is currently INERT. gw_active.c:759-773 is the whole
+of the board's 0x0E4 parse and reads only bit 7 and bit 2, and lkas_uart.c:449 builds serial
+byte 2 as 0x80 | (lkas_on ? 0 : 0x40), hard-zeroing bits 5:4 on every frame it transmits. Sent
+anyway so the firmware side can land without another openpilot change.";
+CM_ SG_ 228 LDW_LEFT "Left lane departure, from hudControl.leftLaneDepart. Specified to reach
+serial byte 2 bit 4; INERT on firmware 875ba124 for the same reason as LDW_RIGHT above.";

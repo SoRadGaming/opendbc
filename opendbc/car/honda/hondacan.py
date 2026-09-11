@@ -139,8 +139,17 @@ def create_steering_control(packer, CAN, apply_torque, lkas_active, tja_control,
 
   # FORK(HONDA_ELESYS): nothing in this car reads 0x0E4 -- the EPS has no CAN steering input
   # and the in-line LIN-bus gateway board consumes the frame and re-emits it on the camera's
-  # serial line. The board copies byte 2 bits 5:4 straight into serial camera-to-EPS byte 2
-  # bits 5:4, which is where the stock camera puts its lane-departure warning.
+  # serial line. Byte 2 bits 5:4 are SPECIFIED (SP-PROTOCOL-V3 section 4) to reach serial
+  # camera-to-EPS byte 2 bits 5:4, where the stock camera puts its lane-departure warning.
+  #
+  # THEY ARE INERT ON FIRMWARE 875ba124, in both directions. gw_active.c:759-773 is the whole
+  # of the board's 0x0E4 parse and reads only bit 7 (the request) and bit 2 (the domain), and
+  # lkas_uart.c:449 builds serial byte 2 as 0x80 | (lkas_on ? 0 : 0x40), so bits 5:4 are hard
+  # zero on every frame the board transmits. The 0x500 LDW_ACTIVE path is the same: sp_hud.c
+  # decodes it, sp_hud_merge_lkas() never reads it. Sent regardless, because they cost nothing
+  # and let the board-side change land without another openpilot commit -- but do not go
+  # looking for a cluster warning yet, and do not read a correct 0x0E4 in the log as proof the
+  # EPS saw anything.
   #
   # Only these two bits are filled. Byte 2 bit 2 is the board's SERIAL_DOMAIN declaration and
   # MUST stay clear while openpilot is in the 2560 CAN domain: setting it tells the board to
@@ -283,8 +292,14 @@ SP_OP_STATE_FAULTED = 5
 # this sends on purpose: the board scales openpilot's 2560-count full scale by
 # authority/2560, so openpilot's full scale already IS the board's authority whatever the
 # authority is. Sending the number here as well would put the authority ladder
-# (40 -> 80 -> 120 -> 160) in two places that could disagree. The negotiation is
-# min(MAX_TORQUE, the board's own authority), so 0 can never raise the ceiling.
+# (40 -> 80 -> 120 -> 160) in two places that could disagree.
+#
+# THE FIELD IS REPORTED, NOT ENFORCED, ON FIRMWARE 875ba124. The board reads it in exactly one
+# place -- gw_active.c:1348 -- and only to compute the AUTHORITY byte it puts in 0x70B. The
+# command path clamps to the compile-time GW_LIN_AUTHORITY unconditionally
+# (gw_active.c:1104,1108), so a non-zero value here would make 0x70B report a cap the board
+# was not applying. That costs nothing while this is 0, which is the other reason it is 0.
+# Do not use it as a probe-drive limiter until the board clamps to the negotiated value.
 SP_HUD_MAX_TORQUE = 0
 
 
