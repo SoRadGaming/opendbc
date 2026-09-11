@@ -238,6 +238,24 @@ class CarInterface(CarInterfaceBase):
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 2560], [0, 2560]]
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
+    # FORK(HONDA_ACCORD_9G_AU): NOT TO BE DRIVEN UNTIL AFTER THE AUTHORITY-80 DRIVE.
+    # This platform otherwise falls through to the generic else branch above and takes the
+    # 0.15 default. 0.3 is what mvl-boston runs for both of the serial-board cars -- the
+    # 9G Accord and the 3G MDX -- in opendbc/car/honda/interface.py:243-247 of
+    # mvl-boston/openpilot@lkas-test.
+    #
+    # The latency is real and structural, not a guess: openpilot's 0x0E4 lands on the board,
+    # the board waits for the camera's next serial header to borrow its counter, and only
+    # then transmits. That is up to a full serial frame period before the EPS sees the
+    # request at all, on top of the 9600 8E1 frame itself.
+    #
+    # DELIBERATELY ALONE. mvl's branch also sets lateralParams to [[0, 239], [0, 239]] and
+    # switches to a PID tune; neither is here. The torque domain stays at 2560 -- the board
+    # scales by authority/2560, so openpilot's full scale already IS the board's authority --
+    # and the controller choice is its own decision. One variable per drive.
+    if candidate == CAR.HONDA_ACCORD_9G_AU:
+      ret.steerActuatorDelay = 0.3
+
     if candidate == CAR.ACURA_RDX_3G_MMR:
       CarControllerParams.BOSCH_GAS_LOOKUP_V = [0, 2000] # alpha longitudinal pedal tuning
       ret.dashcamOnly = is_release  # TODO: release from dashcam when there's enough driving data for torqued/paramsd to converge
