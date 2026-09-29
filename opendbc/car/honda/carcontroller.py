@@ -11,6 +11,7 @@ from opendbc.sunnypilot.car.honda.mads import MadsCarController
 from opendbc.sunnypilot.car.honda.gas_interceptor import GasInterceptorCarController
 from opendbc.sunnypilot.car.honda.icbm import IntelligentCruiseButtonManagementInterface
 from opendbc.sunnypilot.car.honda.dynamic_tuning import HondaDynamicTuner
+from opendbc.sunnypilot.car.honda.brake_lamp_test import BrakeLampTest  # FORK(BRAKE-LAMP-TEST)
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -248,6 +249,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.tja_control = bool(CP.flags & HondaFlags.BOSCH_TJA_CONTROL)
     # FORK: self-learning longitudinal tuning. Inert unless HondaDynamicTuningEnabled is set.
     self.dynamic_tuner = HondaDynamicTuner(CP, CP_SP)
+    # FORK(BRAKE-LAMP-TEST): extra bits in openpilot's own 0x1FA/0x30C at a standstill hold, one
+    # candidate at a time, to find out whether any of them lights the stop lamps. Inert unless
+    # HondaBrakeLampTest > 0 on a HONDA_ELESYS car with openpilot longitudinal.
+    self.brake_lamp_test = BrakeLampTest(CP)
 
     self.braking = False
     self.brake_steady = 0.
@@ -423,11 +428,16 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
             pump_on, self.last_pump_ts = brake_pump_hysteresis(apply_brake, self.apply_brake_last, self.last_pump_ts, ts)
 
           pcm_override = True
-          can_sends.append(hondacan.create_brake_command(self.packer, self.CAN, apply_brake, pump_on,
-                                                         pcm_override, pcm_cancel_cmd, alert_fcw,
-                                                         CS.stock_brake, self.CP_SP,
-                                                         # FORK(HONDA_ACCORD_9G_AU): BRAKE_COMMAND units bit
-                                                         is_metric=CS.is_metric, elesys=self.CP.carFingerprint in HONDA_ELESYS))
+          brake_msg = hondacan.create_brake_command(self.packer, self.CAN, apply_brake, pump_on,
+                                                    pcm_override, pcm_cancel_cmd, alert_fcw,
+                                                    CS.stock_brake, self.CP_SP,
+                                                    # FORK(HONDA_ACCORD_9G_AU): BRAKE_COMMAND units bit
+                                                    is_metric=CS.is_metric, elesys=self.CP.carFingerprint in HONDA_ELESYS)
+          # FORK(BRAKE-LAMP-TEST): only settled at a standstill, openpilot holding the brake, no pedal
+          # pressed, once per setting; the frame is returned untouched otherwise
+          self.brake_lamp_test.update(self.frame, CC.longActive, CS.out.vEgo, CS.out.standstill, apply_brake,
+                                      CS.out.brakePressed, CS.out.gasPressed)
+          can_sends.append(self.brake_lamp_test.apply(brake_msg))
           self.apply_brake_last = apply_brake
           self.brake = apply_brake / self.params.NIDEC_BRAKE_MAX
 
@@ -445,8 +455,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     if self.frame % 10 == 0:
       if self.CP.openpilotLongitudinalControl:
         # On Nidec, this also controls longitudinal positive acceleration
-        can_sends.append(hondacan.create_acc_hud(self.packer, self.CAN.pt, self.CP, CC.enabled, pcm_speed, pcm_accel,
-                                                 hud_control, hud_v_cruise, CS.is_metric, CS.acc_hud))
+        # FORK(BRAKE-LAMP-TEST): the 0x30C entries; state is from this frame's brake block (frame % 10 is even)
+        can_sends.append(self.brake_lamp_test.apply(
+          hondacan.create_acc_hud(self.packer, self.CAN.pt, self.CP, CC.enabled, pcm_speed, pcm_accel,
+                                  hud_control, hud_v_cruise, CS.is_metric, CS.acc_hud)))
 
       steering_available = CS.out.cruiseState.available and CS.out.vEgo > max(self.params.STEER_GLOBAL_MIN_SPEED, self.CP.minSteerSpeed)
       # HONDA_ELESYS: 4-byte LKAS_HUD with a different layout; stock camera's HUD is forwarded instead

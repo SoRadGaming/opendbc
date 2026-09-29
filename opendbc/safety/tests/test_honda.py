@@ -448,7 +448,54 @@ class TestHondaNidecAltGasInterceptorSafety(GasInterceptorSafetyTest, HondaButto
     return self.packer.make_can_msg_safety("SCM_BUTTONS", bus, values)
 
 
-class TestHondaElesysScmStanddownSafety(TestHondaNidecPcmAltSafety):
+class ElesysBrakeLampTestMixin:
+  """
+    FORK(BRAKE-LAMP-TEST): the stop-lamp bit test ORs extra bits into openpilot's own 0x1FA / 0x30C
+    at a standstill hold (opendbc/sunnypilot/car/honda/brake_lamp_test.py). The tx hook reads only
+    COMPUTER_BRAKE from 0x1FA and only PCM speed/gas (bytes 0-2) from 0x30C, so every entry must be
+    allowed or refused exactly as the same frame without the extra bits. No safety change needed.
+  """
+
+  def _lamp_test_msg(self, addr, values, bits):
+    from opendbc.sunnypilot.car.honda.brake_lamp_test import set_bits
+    name = "BRAKE_COMMAND" if addr == 0x1FA else "ACC_HUD"
+    fix = (lambda m: (m[0], set_bits(m[0], m[1], bits), m[2])) if bits else None
+    return self.packer.make_can_msg_safety(name, 0, values, fix_checksum=fix)
+
+  def test_brake_lamp_test_frames_same_verdict(self):
+    from opendbc.sunnypilot.car.honda.brake_lamp_test import CANDIDATES
+    for cand in CANDIDATES:
+      for controls_allowed in (True, False):
+        for fwd_brake in (False, True):
+          for value in ((0, 1, 120, 189, 255, 256) if cand.addr == 0x1FA else ((0, 0), (0, 198), (100, 0))):
+            with self.subTest(label=cand.label, controls_allowed=controls_allowed, fwd_brake=fwd_brake, value=value):
+              self.safety.set_controls_allowed(controls_allowed)
+              self.safety.set_honda_fwd_brake(fwd_brake)
+              if cand.addr == 0x1FA:
+                values = {self.BRAKE_SIG: value}
+              else:
+                values = {"PCM_GAS": value[1], "PCM_SPEED": value[0]}
+              plain = self._tx(self._lamp_test_msg(cand.addr, values, ()))
+              self.safety.set_honda_fwd_brake(fwd_brake)
+              lamp = self._tx(self._lamp_test_msg(cand.addr, values, cand.bits))
+              self.assertEqual(plain, lamp)
+    self.safety.set_honda_fwd_brake(False)
+
+  def test_brake_lamp_test_hold_is_allowed(self):
+    # the actual hold: openpilot engaged, braking at a standstill, every entry goes out
+    from opendbc.sunnypilot.car.honda.brake_lamp_test import CANDIDATES
+    self.safety.set_controls_allowed(True)
+    self.safety.set_honda_fwd_brake(False)
+    for cand in CANDIDATES:
+      with self.subTest(label=cand.label):
+        if cand.addr == 0x1FA:
+          values = {self.BRAKE_SIG: 189, "COMPUTER_BRAKE_REQUEST": 1, "CRUISE_OVERRIDE": 1, "BRAKE_LIGHTS": 1}
+        else:
+          values = {"PCM_GAS": 0, "PCM_SPEED": 0}
+        self.assertTrue(self._tx(self._lamp_test_msg(cand.addr, values, cand.bits)))
+
+
+class TestHondaElesysScmStanddownSafety(ElesysBrakeLampTestMixin, TestHondaNidecPcmAltSafety):
   """
     HONDA_ACCORD_9G_AU (Elesys radar) stock-ACC stand-down (ELESYS_SCM_STANDDOWN): OP re-sends SCM_BUTTONS
     (0x1A6) on bus 2 with MAIN_ON=0 and the stock 0x1A6 is blocked bus 0 -> 2.
@@ -491,7 +538,7 @@ class TestHondaElesysScmStanddownSafety(TestHondaNidecPcmAltSafety):
     super(TestHondaNidecSafetyBase, self).test_fwd_hook()
 
 
-class TestHondaElesysStanddownGasInterceptorSafety(TestHondaNidecAltGasInterceptorSafety):
+class TestHondaElesysStanddownGasInterceptorSafety(ElesysBrakeLampTestMixin, TestHondaNidecAltGasInterceptorSafety):
   """
     HONDA_ACCORD_9G_AU with comma pedal: ELESYS_SCM_STANDDOWN + gas interceptor.
     OP may send GAS_COMMAND (0x200) and the bus-2 SCM_BUTTONS re-send (0x1A6);
