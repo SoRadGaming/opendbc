@@ -158,7 +158,8 @@ the 2026-09 merge.
 * `opendbc/sunnypilot/car/honda/elesys_stop.py` (new, 2026-10): the soft final stop. `soft_stop_ceiling()` holds the
   brake at `max(125 + ~17/deg downhill, the command at entry)` while the car still rolls in the stopping state, and
   rises at 250 counts/s 0.55 s after the wheels read zero (or on the wheels turning again, weak deceleration after
-  0.3 s at the ceiling, or 1.9 s of rolling), so the hold is today's 189. It only lowers the command. `ElesysSoftStop`
+  0.3 s at the ceiling, or 1.9 s after entry, absolute), so the hold is today's 189. No ceiling when stopping is
+  entered above 1.2 m/s (`vEgo`; measured entries reach 1.08). It only lowers the command. `ElesysSoftStop`
   wraps it for `CarController`: reads `CC`/`CS` and `HondaDynamicTuner.filtered_pitch()`, logs one `hondastop` line per
   stop, never raises. Design and numbers: sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` 7.8.
 * `opendbc/sunnypilot/car/honda/elesys_gas.py` (new, 2026-10): this car's gas law. v1 is the previous law
