@@ -116,7 +116,8 @@ the 2026-09 merge.
   * `longitudinalActuatorDelay` 0.6, `stopAccel` -0.8. **No `vEgoStopping`**: upstream deprecated it (assigning it
     raises), and the car's 0.8 m/s stopping speed now lives in sunnypilot's
     `openpilot/sunnypilot/selfdrive/controls/lib/stopping_tune.py`;
-  * `steerActuatorDelay` 0.38, `steerAtStandstill`;
+  * `steerActuatorDelay` 0.18 (0.38 until 2026-10), `steerAtStandstill`. The car's delay is ~0.38 s; both readers of
+    the bare value (lagd's `initial_lag` and the LagdToggle-off path) add 0.2, so 0.18 lands them on 0.38, not 0.58;
   * `lateralTuning.torque.latAccelOffset = -0.43`, the seed torqued and the torque controllers start from (the
     sunnypilot `torqued.py` FORK hunk reads it). `configure_torque_tune()` sets 0.0 for every other car;
   * the stand-down safety parameter;

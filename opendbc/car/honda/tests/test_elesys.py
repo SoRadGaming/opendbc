@@ -815,6 +815,29 @@ class TestElesysReportedTorqueSeam(unittest.TestCase):
     self.assertGreater(last, 0.4)                     # the command itself never stopped
 
 
+class TestElesysSteerDelay(unittest.TestCase):
+  """lagd measured ~0.38 s on this car (0.383/0.377 on d3/d4, 0.342 by fd). Both places that read
+  steerActuatorDelay bare add 0.2 to it (lagd's initial_lag, and LagdToggle off with the default
+  LagdToggleDelay), so the line is 0.18 and both fallbacks land on 0.38 instead of 0.58."""
+
+  LAGD_FALLBACK_ADD = 0.2   # lagd.py initial_lag; LagdToggleDelay default (params_keys.h)
+
+  def test_delay_is_0_18_and_its_fallbacks_are_0_38(self):
+    from opendbc.car.honda.interface import CarInterface
+    CP = CarInterface.get_non_essential_params(ELESYS_CAR)
+    self.assertAlmostEqual(CP.steerActuatorDelay, 0.18, places=6)
+    self.assertAlmostEqual(CP.steerActuatorDelay + self.LAGD_FALLBACK_ADD, 0.38, places=6)
+
+  def test_other_hondas_keep_their_delay(self):
+    # upstream's 0.1 (base) or 0.15 (torque-tuned branches); only the Elesys block sets anything else
+    from opendbc.car.honda.interface import CarInterface
+    for car in CAR:
+      if car in HONDA_ELESYS:
+        continue
+      delay = CarInterface.get_non_essential_params(car).steerActuatorDelay
+      self.assertTrue(abs(delay - 0.1) < 1e-6 or abs(delay - 0.15) < 1e-6, msg=f"{car}: {delay}")
+
+
 class TestElesysTorqueScale(unittest.TestCase):
   """Item 7: openpilot's full scale is the board's full scale. torque 1.0 = 2560 on 0x0E4 = 160 serial counts
   (GW_OP_FULL_SCALE 2560, GW_LIN_AUTHORITY 160); the board clamps at 160 anyway, and openpilot's anti-windup
