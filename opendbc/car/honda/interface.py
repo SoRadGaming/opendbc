@@ -270,6 +270,19 @@ class CarInterface(CarInterfaceBase):
       # This only keeps openpilot's REQUEST alive so the graphic can follow it.
       ret.steerAtStandstill = True
 
+      # FORK(HONDA_ELESYS): seed the torque controller's lateral-accel offset with the value this
+      # car learns, instead of configure_torque_tune()'s 0.0. On routes f2/fc/fd/103 the logged
+      # feedforward is exactly desired - roll*g - offset, and torqued's offset sits at -0.42 to -0.50
+      # (replay: -0.39 to -0.47): it cancels about 0.4 m/s^2 of road crossfall in the device roll.
+      # torqued starts its offset from this value (FORK hunk in torqued.py) whenever it has no valid
+      # cache - which the HONDA_ACCORD_9G_AU prior in override.toml forces once - and the torque
+      # controllers start from it too. Without the seed the feedforward loses ~0.43 m/s^2 (~60
+      # serial counts) until torqued is valid again (23-58 min of driving in the replays), more
+      # than the 0.25 the integrator may carry into a takeover (LINBUS_I_CARRY_MAX).
+      # Not applied when sunnypilot re-runs configure_torque_tune() (EnforceTorqueControl or NNLC on).
+      if ret.lateralTuning.which() == 'torque':
+        ret.lateralTuning.torque.latAccelOffset = -0.43
+
     if candidate == CAR.ACURA_RDX_3G_MMR:
       CarControllerParams.BOSCH_GAS_LOOKUP_V = [0, 2000] # alpha longitudinal pedal tuning
       ret.dashcamOnly = is_release  # TODO: release from dashcam when there's enough driving data for torqued/paramsd to converge

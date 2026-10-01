@@ -550,5 +550,78 @@ class TestElesysStockAeb(unittest.TestCase):
       self.assertIn(s, sigs, msg=f"{s} missing from BRAKE_COMMAND")
 
 
+class TestElesysTorquePrior(unittest.TestCase):
+  """The car's own torqued prior (override.toml) and the offset seed (interface.py).
+
+  The substitute to HONDA_ACCORD (LAF 1.689) held torqued at its 1.18 floor on this car, where torque
+  1.0 = 2560 on 0x0E4 = 160 serial counts. The prior is also torqued's cache restore key, so these
+  numbers only change together with the board's authority / full scale."""
+
+  @staticmethod
+  def _toml(name):
+    import os
+    import tomllib
+    from opendbc.car.interfaces import TORQUE_PARAMS_PATH
+    with open(os.path.join(os.path.dirname(TORQUE_PARAMS_PATH), name), 'rb') as f:
+      return tomllib.load(f)
+
+  @staticmethod
+  def _cp(car):
+    from opendbc.car.honda.interface import CarInterface
+    return CarInterface.get_non_essential_params(car)
+
+  def test_own_prior(self):
+    from opendbc.car.interfaces import get_torque_params
+    p = get_torque_params()['HONDA_ACCORD_9G_AU']
+    self.assertEqual(p['LAT_ACCEL_FACTOR'], 1.1)
+    self.assertEqual(p['MAX_LAT_ACCEL_MEASURED'], 1.1)
+    self.assertEqual(p['FRICTION'], 0.18)
+
+  def test_honda_accord_prior_unchanged(self):
+    # upstream's fleet value for the 2018+ Accord, read straight from params.toml, not re-typed here
+    from opendbc.car.interfaces import get_torque_params
+    params = self._toml('params.toml')
+    want = dict(zip(params['legend'], params['HONDA_ACCORD'], strict=True))
+    self.assertEqual(get_torque_params()['HONDA_ACCORD'], want)
+    self.assertNotEqual(get_torque_params()['HONDA_ACCORD_9G_AU'], want)
+
+  def test_not_substituted(self):
+    # a merge that brings the substitute back would silently restore the 1.689 prior (or, with the
+    # override entry, make the loader raise "defined twice")
+    self.assertNotIn('HONDA_ACCORD_9G_AU', self._toml('substitute.toml'))
+    self.assertIn('HONDA_ACCORD_9G_AU', self._toml('override.toml'))
+    self.assertNotIn('HONDA_ACCORD_9G_AU', self._toml('params.toml'))
+
+  def test_learnable_window_covers_the_measured_values(self):
+    # torqued clips the factor to (1 +- FACTOR_SANITY 0.3) * prior and friction to (1 +- 0.5) * prior.
+    # Logged raw LAF on fc/fd/103 (current firmware) was 0.944-1.281, the TorqueEstimator replay
+    # 0.76-1.44 end to end; friction learned 0.16-0.23.
+    from opendbc.car.interfaces import get_torque_params
+    p = get_torque_params()['HONDA_ACCORD_9G_AU']
+    lo, hi = 0.7 * p['LAT_ACCEL_FACTOR'], 1.3 * p['LAT_ACCEL_FACTOR']
+    self.assertAlmostEqual(lo, 0.77)
+    self.assertAlmostEqual(hi, 1.43)
+    for laf in (0.944, 1.0, 1.09, 1.19, 1.281, 1.354):
+      self.assertTrue(lo <= laf <= hi, msg=f"{laf} outside {lo}-{hi}")
+    for friction in (0.14, 0.16, 0.18, 0.193, 0.23):
+      self.assertTrue(0.5 * p['FRICTION'] <= friction <= 1.5 * p['FRICTION'], msg=f"{friction}")
+
+  def test_car_params_carry_the_prior_and_the_offset_seed(self):
+    CP = self._cp(ELESYS_CAR)
+    self.assertEqual(CP.lateralTuning.which(), 'torque')
+    self.assertAlmostEqual(CP.lateralTuning.torque.latAccelFactor, 1.1, places=6)
+    self.assertAlmostEqual(CP.lateralTuning.torque.friction, 0.18, places=6)
+    self.assertAlmostEqual(CP.lateralTuning.torque.latAccelOffset, -0.43, places=6)
+
+  def test_other_hondas_keep_a_zero_offset(self):
+    # configure_torque_tune() sets 0.0; only the Elesys block seeds it, so every other car is unchanged
+    for car in CAR:
+      if car in HONDA_ELESYS:
+        continue
+      CP = self._cp(car)
+      if CP.lateralTuning.which() == 'torque':
+        self.assertEqual(CP.lateralTuning.torque.latAccelOffset, 0.0, msg=str(car))
+
+
 if __name__ == "__main__":
   unittest.main()

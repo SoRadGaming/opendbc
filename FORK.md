@@ -112,6 +112,8 @@ the 2026-09 merge.
     raises), and the car's 0.8 m/s stopping speed now lives in sunnypilot's
     `openpilot/sunnypilot/selfdrive/controls/lib/stopping_tune.py`;
   * `steerActuatorDelay` 0.38, `steerAtStandstill`;
+  * `lateralTuning.torque.latAccelOffset = -0.43`, the seed torqued and the torque controllers start from (the
+    sunnypilot `torqued.py` FORK hunk reads it). `configure_torque_tune()` sets 0.0 for every other car;
   * the stand-down safety parameter;
   * `minEnableSpeed` 19 mph, and in `_get_params_sp()` the exemption that keeps it: upstream `4455464a` sets `-1` for
     every gas-interceptor car, `candidate not in HONDA_ELESYS` keeps this one at 19 mph.
@@ -136,7 +138,13 @@ the 2026-09 merge.
 * `opendbc/car/honda/radar_interface.py` (0): Elesys radar parser and fault states.
 * `opendbc/car/car_helpers.py` (0): the `skip_fw_query` argument on `fingerprint()` and `get_car()`.
 * `opendbc/car/tests/routes.py` (0): test route `15646e8515eda1a7/00000019--dd0700eac9`.
-* `opendbc/car/torque_data/substitute.toml` (0): `HONDA_ACCORD_9G_AU = HONDA_ACCORD`.
+* `opendbc/car/torque_data/override.toml` (0): the car's own torqued prior, `"HONDA_ACCORD_9G_AU" = [1.1, 1.1, 0.18]`
+  (2026-10). Torque 1.0 = 2560 on `0x0E4` = 160 serial counts at board authority 160; **any change of the board's
+  authority or full scale must change this prior too**, because the prior is torqued's cache key.
+* `opendbc/car/torque_data/substitute.toml` (0): a `FORK` comment where `HONDA_ACCORD_9G_AU = HONDA_ACCORD` used to be.
+  The substitute pinned torqued at its 1.18 floor; `test_elesys.py` fails if a merge brings it back. sunnypilot's NNLC
+  model lookup (`nnlc/helpers.py`) also reads this file as a fallback. Without the line it still picks
+  `HONDA_ACCORD.json` (fuzzy, by name similarity), the same model as before; NNLC is off on this car anyway.
 * `opendbc/sunnypilot/car/car_list.json` (0): `"Honda Accord 2013-15"`. Regenerate it with
   `python opendbc/sunnypilot/car/platform_list.py`.
 * `opendbc/sunnypilot/car/honda/dynamic_tuning.py` (0): `HondaDynamicTuner`. Its params are `HondaDynamicTuningEnabled`
