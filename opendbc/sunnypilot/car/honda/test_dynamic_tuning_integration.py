@@ -1049,6 +1049,52 @@ with mock.patch.object(eg, "_open_params", lambda: None):
   check("no openpilot Params at all gives the registered default (v2)", eg.ElesysGasLaw().law == "v2")
 
 
+# --- 17b. a NaN vEgo in the brake block -----------------------------------------
+#
+# vEgo NaN made wind_brake NaN, and the brake block's int() raised: no 0x1FA, BRAKE_ERROR ~1 s
+# later. The block now falls back to the brake without the aero credit.
+
+print("\n[17b] a NaN vEgo does not raise in the brake block")
+for tuning in (True, False):
+  for label, nan_every in (("throughout", 1), ("every 3rd frame", 3)):
+    raised, missing = None, []
+    try:
+      cc_obj = build(tuning=tuning)[0]
+      cs = CS()
+      for i in range(300):
+        cs.out.vEgo = NAN if i % nan_every == 0 else 12.0
+        cs.out.aEgo = -1.0
+        _, sends = cc_obj.update(make_cc(-2.0), CC_SP, cs, i * int(1e7))
+        if i % 2 == 0 and not brake_frames(sends):
+          missing.append(i)
+    except Exception as e:      # the point of the check
+      raised = e
+    check(f"NaN vEgo {label} while braking (tuner {'on' if tuning else 'off'}): no exception, 0x1FA every even frame",
+          raised is None and not missing, f"raised={raised!r} missing={missing[:3]}")
+
+# What a NaN vEgo does to the brake now that it cannot raise: upstream's actuator_hysteresis() already
+# holds its last steady value through a NaN request, and the brake block falls back to that without
+# the aero credit -- so mid-braking the command holds (a little firmer), it neither drops nor rails.
+# With the tuner on, the learned gain also fades out (the tuner reads an unknown speed as 0), so it
+# holds at least the un-learned command.
+nan_runs = {}
+for tuning in (True, False):
+  cc_nan = build(tuning=tuning)[0]
+  cs_nan = CS()
+  cbs = []
+  for i in range(300):
+    cs_nan.out.vEgo = 20.0 if i < 200 else NAN
+    cc_nan.update(make_cc(-2.0), CC_SP, cs_nan, i * int(1e7))
+    if i % 2 == 0:
+      cbs.append(cc_nan.apply_brake_last)
+  nan_runs[tuning] = cbs
+finite = nan_runs[False][99]
+for tuning, cbs in nan_runs.items():
+  check(f"NaN vEgo mid-braking (tuner {'on' if tuning else 'off'}): the brake holds at least the un-learned command, " +
+        "and only the aero credit above it", finite > 100 and all(finite <= cb <= finite + 30 for cb in cbs[100:]),
+        f"{finite} -> {cbs[100:103]}..{cbs[-1]}")
+
+
 class TestDynamicTuningIntegration(unittest.TestCase):
   """The checks above run when the module loads. This is what lets unittest discovery (lefthook's
   unittest-parallel) report them as a test; a sys.exit(1) at import only showed up as a module

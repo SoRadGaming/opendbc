@@ -405,6 +405,11 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
                                                         self.stopping_counter, self.CP))
         else:
           apply_brake = np.clip(self.brake_last - wind_brake * self.dynamic_tuner.wind_scale(), 0.0, 1.0)
+          # FORK(HONDA_ACCORD_9G_AU): never raise here. A non-finite vEgo makes wind_brake NaN, and the int() below
+          # raised; an exception in update() means no 0x1FA at all, and the VSA latches BRAKE_ERROR ~1.0 s later.
+          # Fall back to the brake without the aero credit, the more-braking side. Finite values are untouched.
+          if not np.isfinite(apply_brake):
+            apply_brake = float(np.clip(self.brake_last, 0.0, 1.0)) if np.isfinite(self.brake_last) else 0.0
           # FORK: learned brake gain. This is what replaces hand-editing the brake divisor in
           # compute_gb_honda_elesys(); returns 1.0 with the dynamic tuner off.
           brake_gain = self.dynamic_tuner.brake_gain(CC, CS, float(apply_brake))
