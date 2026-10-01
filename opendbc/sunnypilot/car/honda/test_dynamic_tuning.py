@@ -4,24 +4,25 @@
 These do not prove the tuning is *good* -- only road data can do that. They prove
 the things that have to hold before it is ever flashed:
   1. with the toggle off, everything the car controller consumes is stock,
-  2. the learners move the right way and settle,
+  2. the brake learner moves the right way and settles,
   3. the clamps hold under adversarial input,
-  4. no learner can rail on actuator lag, latch, or persist a transient.
+  4. no learner can rail on actuator lag, latch, or persist a transient,
+  5. the retired pedal and aero learners stay retired (pedal gain 1.0, aero 1.0),
+     and the per-drive-mode data counter counts the right thing in the right slot.
 
 Several checks below are named for the specific failure mode they regression-test.
 """
 
 import sys
 from dataclasses import dataclass, field
+from unittest import mock
 
 import numpy as np
 
 from opendbc.car import structs
 from opendbc.sunnypilot.car.honda import dynamic_tuning as dt
 from opendbc.sunnypilot.car.honda.dynamic_tuning import (
-  HondaDynamicTuner, _bp_weights, PEDAL_GAIN_BP, PEDAL_GAIN_MIN, PEDAL_GAIN_MAX,
-  SETTLE_FRAMES, BRAKE_POS_LIMIT, WIND_FACTOR_MAX, WIND_FACTOR_MIN,
-  PITCH_ACCEL_LIMIT, PITCH_STALE_FRAMES,
+  HondaDynamicTuner, SETTLE_FRAMES, BRAKE_POS_LIMIT, PITCH_ACCEL_LIMIT, PITCH_STALE_FRAMES,
 )
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -140,20 +141,19 @@ t = make_tuner(enabled=False)
 cc, cs = base(12.0, 1.0)
 cc.orientationNED = [0.0, 0.30, 0.0]
 check("pitch feedforward is exactly 0.0", t.update_state(cc, cs) == 0.0)
-check("pedal gain is exactly 1.0", t.pedal_gain_at(12.0) == 1.0)
 check("wind scale is exactly 1.0", t.wind_scale() == 1.0)
 check("brake gain is exactly 1.0", t.brake_gain(cc, cs, 0.5) == 1.0)
 
-before = list(t.pedal_gain)
 for _ in range(500):
   t.update_state(cc, cs)
-  t.update_pedal(cc, cs, 0.5)
+  t.observe_pedal(cc, cs, 0.3, "v2")
   t.update_wind(cc, cs, 0.2)
-check("no learner moves when disabled", t.pedal_gain == before and t.wind_factor == 1.0)
+check("nothing is counted when disabled",
+      all(x == 0 for x in t.mode_admitted.values()) and all(x == 0.0 for x in t.mode_seconds.values()),
+      f"{t.mode_admitted} {t.mode_seconds}")
 
-# gain of exactly 1.0 must be an identity on the command, not just close
+# a scale of exactly 1.0 must be an identity on the command, not just close
 gas = 0.4213
-check("disabled gain is an exact identity on gas", gas * t.pedal_gain_at(12.0) == gas)
 check("disabled wind scale is an exact identity", gas * t.wind_scale() == gas)
 
 
@@ -199,101 +199,106 @@ for _ in range(PITCH_STALE_FRAMES + 2000):
 check("stale pose ramps the feedforward out", abs(after) < 0.05 * abs(held), f"held={held:.3f} after={after:.3f}")
 
 
-# --- 3. breakpoint weights ---------------------------------------------------
+# --- 3. the retired channels stay retired ------------------------------------
+#
+# The per-band pedal gain could not persist anything and was gate-biased; the aero scale was a
+# random walk that also moved the brake-on point. Both are gone: no API, no params, and the aero
+# scale is a constant 1.0 whatever the error does.
 
-print("\n[3] breakpoint weighting")
-check("below first bp -> all weight on bp0", _bp_weights(-1.0, PEDAL_GAIN_BP) == [(0, 1.0)])
-check("above last bp -> all weight on last", _bp_weights(99.0, PEDAL_GAIN_BP) == [(5, 1.0)])
-w = _bp_weights(4.5, PEDAL_GAIN_BP)
-check("midpoint splits evenly", abs(w[0][1] - 0.5) < 1e-9 and abs(w[1][1] - 0.5) < 1e-9, str(w))
-check("weights sum to 1 everywhere",
-      all(abs(sum(x[1] for x in _bp_weights(float(v), PEDAL_GAIN_BP)) - 1.0) < 1e-9
-          for v in np.linspace(0, 25, 200)))
+print("\n[3] retired pedal and aero learners")
+check("no pedal-gain API is left on the tuner",
+      not any(hasattr(HondaDynamicTuner, a) for a in ("pedal_gain_at", "update_pedal")))
+check("no retired key is read or written",
+      not any(k.startswith(("HondaDynPedalGain", "HondaDynWindFactor")) for k in dt._PARAM_SPEC),
+      f"{sorted(dt._PARAM_SPEC)}")
+check("the tuner no longer imports the gas grid (the PEDAL_GAIN_BP trap)",
+      not hasattr(dt, "PEDAL_GAIN_BP") and not hasattr(dt, "ELESYS_GAS_BP"))
 
-
-# --- 4. pedal learner --------------------------------------------------------
-
-print("\n[4] pedal learner")
-SHORTFALL = 0.65
+# adversarial: a huge, one-signed error in the old aero learner's own band, tuner ON
 t = make_tuner()
-cc, cs = base(10.0, 1.0)
+cc, cs = base(30.0, 0.1, -3.0)
 settle(t, cc, cs)
-for _ in range(30000):
+scales = set()
+for _ in range(8000):
   t.update_state(cc, cs)
-  cs.out.aEgo = cc.actuators.accel * SHORTFALL * t.pedal_gain_at(cs.out.vEgo)
-  t.update_pedal(cc, cs, 0.5)
-achieved = cc.actuators.accel * SHORTFALL * t.pedal_gain_at(10.0)
-check("gain grew to close the shortfall", t.pedal_gain_at(10.0) > 1.3)
-check("achieved accel converged on target", abs(achieved - 1.0) < 0.05, f"{achieved:.3f}")
-check("converged estimate tracked the live value",
-      abs(t.pedal_gain_converged[3] - t.pedal_gain[3]) < 0.05,
-      f"live={t.pedal_gain[3]:.3f} conv={t.pedal_gain_converged[3]:.3f}")
+  t.update_wind(cc, cs, 0.441)
+  scales.add(t.wind_scale())
+check("wind scale is frozen at exactly 1.0 with the tuner on", scales == {1.0}, f"{scales}")
 
-t = make_tuner()
-cc, cs = base(10.0, 1.0)
-settle(t, cc, cs)
-for _ in range(20000):
-  t.update_state(cc, cs)
-  cs.out.aEgo = cc.actuators.accel * 1.6 * t.pedal_gain_at(cs.out.vEgo)
-  t.update_pedal(cc, cs, 0.5)
-check("gain shrinks when over-delivering", t.pedal_gain_at(10.0) < 0.9)
 
-# clamps
-t = make_tuner()
-cc, cs = base(10.0, 4.0, -4.0)
-settle(t, cc, cs)
-for _ in range(6000):
-  t.update_state(cc, cs)
-  t.update_pedal(cc, cs, 0.5)
-check("gain clamps at PEDAL_GAIN_MAX", max(t.pedal_gain) <= PEDAL_GAIN_MAX + 1e-9)
-check("railed value is NOT written to the converged estimate",
-      max(t.pedal_gain_converged) < PEDAL_GAIN_MAX - 0.1,
-      f"conv={max(t.pedal_gain_converged):.3f}")
+# --- 4. per-drive-mode data counter -------------------------------------------
+#
+# Nothing learns on the gas side. observe_pedal() counts, per slot (D / ECON / S), the samples a
+# steady-pedal plant fit could use, and update_state() the engaged moving seconds, so the hondadyn
+# line says how much ECON and S data a drive collected.
 
-t = make_tuner()
-cc, cs = base(10.0, 4.0, 40.0)
-settle(t, cc, cs)
-for _ in range(6000):
-  t.update_state(cc, cs)
-  t.update_pedal(cc, cs, 0.5)
-check("gain clamps at PEDAL_GAIN_MIN", min(t.pedal_gain) >= PEDAL_GAIN_MIN - 1e-9)
+print("\n[4] per-mode data counter")
+GearShifter = structs.CarState.GearShifter
 
-# gates
+
+def counted(gear=None, econ=None, frames=3000, pedal=lambda i: 0.20, mutate=None, v=12.0, target=0.5):
+  t = make_tuner()
+  cc, cs = base(v, target, target)
+  if gear is not None:
+    cs.out.gearShifter = gear
+  cs.econ_on = econ
+  settle(t, cc, cs)
+  if mutate is not None:
+    mutate(cc, cs)
+  for i in range(frames):
+    t.update_state(cc, cs)
+    if i % 2 == 0:                        # the interceptor runs at 50 Hz
+      t.observe_pedal(cc, cs, pedal(i), "v2")
+  return t
+
+
+t = counted(GearShifter.drive, False)
+check("a steady pedal in D is counted in D", t.mode_admitted["D"] > 1000 and t.mode_admitted["ECON"] == 0
+      and t.mode_admitted["S"] == 0, f"{t.mode_admitted}")
+check("and its engaged seconds land in D", 30.0 <= t.mode_seconds["D"] <= 32.0
+      and t.mode_seconds["ECON"] == 0.0, f"{t.mode_seconds}")
+check("the gas law tag reaches the log fields", t.debug_values()["gas_law"] == "v2")
+t = counted(GearShifter.drive, True)
+check("ECON on counts in ECON", t.mode_admitted["ECON"] > 1000 and t.mode_admitted["D"] == 0, f"{t.mode_admitted}")
+check("...even though the brake learner is frozen there", not t.mode_ok)
+t = counted(GearShifter.sport, True)
+check("S overrides ECON", t.mode_admitted["S"] > 1000 and t.mode_admitted["ECON"] == 0, f"{t.mode_admitted}")
+t = counted(GearShifter.unknown, None)
+check("unknown gear counts as D", t.mode_admitted["D"] > 1000, f"{t.mode_admitted}")
+
+t = counted(pedal=lambda i: 0.20 + 0.05 * ((i // 20) % 2))
+check("an unsteady pedal is not counted", t.mode_admitted["D"] == 0, f"{t.mode_admitted}")
+t = counted(pedal=lambda i: 0.01)
+check("a pedal at the brake end is not counted", t.mode_admitted["D"] == 0, f"{t.mode_admitted}")
+t = counted(pedal=lambda i: 0.95)
+check("a pedal near the top is not counted", t.mode_admitted["D"] == 0, f"{t.mode_admitted}")
+t = counted(v=2.0)
+check("below 3 m/s nothing is counted", t.mode_admitted["D"] == 0, f"{t.mode_admitted}")
 for label, mutate in [
   ("gas pressed", lambda c, s: setattr(s.out, "gasPressed", True)),
   ("brake pressed", lambda c, s: setattr(s.out, "brakePressed", True)),
   ("stock AEB", lambda c, s: setattr(s.out, "stockAeb", True)),
   ("long inactive", lambda c, s: setattr(c, "longActive", False)),
   ("not in PID state", lambda c, s: setattr(c.actuators, "longControlState", LongCtrlState.stopping)),
+  ("pose stale", lambda c, s: setattr(c, "orientationNED", [])),
+  ("steep pitch", lambda c, s: setattr(c, "orientationNED", [0.0, 0.15, 0.0])),
 ]:
-  t = make_tuner()
-  cc, cs = base(10.0, 2.0)
-  settle(t, cc, cs)
-  mutate(cc, cs)
-  before = list(t.pedal_gain)
-  for _ in range(2000):
-    t.update_state(cc, cs)
-    t.update_pedal(cc, cs, 0.5)
-  check(f"no learning while {label}", t.pedal_gain == before)
+  t = counted(mutate=mutate)
+  check(f"nothing is counted while {label}", t.mode_admitted["D"] == 0, f"{t.mode_admitted}")
+t = counted(mutate=lambda c, s: setattr(c, "longActive", False))
+check("and no engaged seconds while disengaged", t.mode_seconds["D"] < 3.0, f"{t.mode_seconds}")
 
-for label, cmd in [("railed high", 1.0), ("zero", 0.0)]:
-  t = make_tuner()
-  cc, cs = base(10.0, 2.0)
-  settle(t, cc, cs)
-  before = list(t.pedal_gain)
-  for _ in range(2000):
-    t.update_state(cc, cs)
-    t.update_pedal(cc, cs, cmd)
-  check(f"no learning when gas command is {label}", t.pedal_gain == before)
-
+# robustness: it runs inside CarController.update(), so odd input must never raise
 t = make_tuner()
-cc, cs = base(10.0)
-before = list(t.pedal_gain)
-for i in range(4000):
-  cc.actuators.accel = 2.0 if (i // 3) % 2 == 0 else -1.0
-  t.update_state(cc, cs)
-  t.update_pedal(cc, cs, 0.5)
-check("dwell guard blocks learning on a thrashing target", t.pedal_gain == before)
+cc, cs = base(12.0, 0.5)
+for bad in (float("nan"), float("inf"), None, "x", -5.0):
+  try:
+    t.observe_pedal(cc, cs, bad, "v2")
+    t.observe_pedal(None, None, bad, None)
+    ok = True
+  except Exception:
+    ok = False
+  check(f"observe_pedal never raises on {bad!r}", ok)
 
 
 # --- 5. brake learner --------------------------------------------------------
@@ -419,37 +424,6 @@ for _ in range(30):                 # dwell not yet satisfied
 check("brake integrator frozen before the dwell opens", abs(t.brake_pid.i - before) < 1e-9)
 
 
-# --- 9. wind learner ---------------------------------------------------------
-
-print("\n[9] wind learner")
-t = make_tuner()
-cc, cs = base(30.0, 1.0, -3.0)
-settle(t, cc, cs)
-for _ in range(8000):
-  t.update_state(cc, cs)
-  t.update_wind(cc, cs, 0.441)
-check("wind factor clamps high", t.wind_factor <= WIND_FACTOR_MAX + 1e-9, f"{t.wind_factor}")
-
-t = make_tuner()
-cc, cs = base(30.0, 1.0, 5.0)
-settle(t, cc, cs)
-for _ in range(8000):
-  t.update_state(cc, cs)
-  t.update_wind(cc, cs, 0.441)
-check("wind factor clamps low", t.wind_factor >= WIND_FACTOR_MIN - 1e-9, f"{t.wind_factor}")
-
-# REGRESSION (review finding 9): a zero-mean error must not ratchet the factor
-t = make_tuner()
-cc, cs = base(30.0, 1.0)
-settle(t, cc, cs)
-for i in range(40000):
-  cs.out.aEgo = 1.0 - (0.5 if i % 2 == 0 else -0.5)     # symmetric error
-  t.update_state(cc, cs)
-  t.update_wind(cc, cs, 0.441)
-check("zero-mean error does not drift the wind factor", abs(t.wind_factor - 1.0) < 0.02,
-      f"{t.wind_factor:.5f}")
-
-
 # --- 10. params: load clamping, unknown keys, persistence -------------------
 
 print("\n[10] params handling")
@@ -457,20 +431,22 @@ known = set(dt._PARAM_SPEC) | {"HondaDynamicTuningEnabled"}
 
 # REGRESSION (review finding 14): corrupted / hand-edited values must be clamped
 p = FakeParams({"HondaDynamicTuningEnabled": True, "HondaDynBrakeGain": 10.0,
-                "HondaDynPedalGain0": 99.0}, known)
+                "HondaDynModeSecD": -99.0, "HondaDynModeSecS": 1e30}, known)
 t = make_tuner(params=p)
 check("out-of-range brake gain is clamped on load", t.brake_pid.i <= BRAKE_POS_LIMIT + 1e-9,
       f"{t.brake_pid.i}")
-check("out-of-range pedal gain is clamped on load", t.pedal_gain[0] <= PEDAL_GAIN_MAX + 1e-9)
+check("negative and absurd mode totals are clamped on load",
+      t.mode_seconds_loaded["D"] == 0.0 and t.mode_seconds_loaded["S"] <= dt.MODE_SEC_MAX,
+      f"{t.mode_seconds_loaded}")
 cc, cs = base(10.0, -2.0, -1.0)
 check("clamped brake gain reaches the output bounded",
       t.brake_gain(cc, cs, 1.0) <= 1.0 + BRAKE_POS_LIMIT + 1e-9)
 
-p = FakeParams({"HondaDynamicTuningEnabled": True, "HondaDynPedalGain2": float("nan"),
-                "HondaDynWindFactor": float("inf")}, known)
+p = FakeParams({"HondaDynamicTuningEnabled": True, "HondaDynBrakeGain": float("nan"),
+                "HondaDynModeSecECON": float("inf")}, known)
 t = make_tuner(params=p)
-check("NaN param falls back to the default", np.isfinite(t.pedal_gain[2]))
-check("inf param is clamped", np.isfinite(t.wind_factor) and t.wind_factor <= WIND_FACTOR_MAX + 1e-9)
+check("NaN param falls back to the default", t.brake_gain_converged == 0.0, f"{t.brake_gain_converged}")
+check("inf param falls back to the default", t.mode_seconds_loaded["ECON"] == 0.0, f"{t.mode_seconds_loaded}")
 
 # unknown keys (params_keys.h not updated) must degrade, not crash
 p = FakeParams({}, known=set())
@@ -478,23 +454,26 @@ t = make_tuner(params=p)
 check("unregistered keys degrade to disabled without raising", t.enabled is False)
 check("no writer thread started when disabled", t._writer is None)
 
-# persistence writes the CONVERGED values only
-p = FakeParams({"HondaDynamicTuningEnabled": True}, known)
+# persistence writes the CONVERGED brake value only, and the mode totals as loaded + this drive
+p = FakeParams({"HondaDynamicTuningEnabled": True, "HondaDynModeSecECON": 87.0}, known)
 t = make_tuner(params=p)
-t.pedal_gain = [1.7] * 6
-t.pedal_gain_converged = [1.1] * 6
 t.brake_pid_factor, t.brake_gain_converged = 0.6, 0.12
+t.mode_seconds["ECON"] = 13.0
 t.persist(dt.PERSIST_INTERVAL)
 # the writer is a daemon thread with no task_done()/join() contract; poll instead
 import time as _time
 for _ in range(100):
-  if "HondaDynBrakeGain" in p.written:
+  if "HondaDynBrakeGain" in p.written and "HondaDynModeSecS" in p.written:
     break
   _time.sleep(0.01)
-check("persist writes the converged pedal gain, not the live one",
-      abs(p.written.get("HondaDynPedalGain0", -1) - 1.1) < 1e-9, str(p.written.get("HondaDynPedalGain0")))
 check("persist writes the converged brake gain, not the live one",
       abs(p.written.get("HondaDynBrakeGain", -1) - 0.12) < 1e-9, str(p.written.get("HondaDynBrakeGain")))
+check("persist writes the mode totals as loaded + this drive",
+      p.written.get("HondaDynModeSecECON") == 100.0 and p.written.get("HondaDynModeSecD") == 0.0,
+      str({k: v for k, v in p.written.items() if k.startswith("HondaDynModeSec")}))
+check("every persisted value is a plain float (put_many runs float() in the control thread)",
+      all(type(v) is float for v in p.written.values()), str({k: type(v).__name__ for k, v in p.written.items()}))
+check("no retired key is written", not any(k.startswith(("HondaDynPedalGain", "HondaDynWindFactor")) for k in p.written))
 t2 = make_tuner(params=FakeParams({"HondaDynamicTuningEnabled": True}, known))
 t2.persist(dt.PERSIST_INTERVAL + 1)
 check("persist is a no-op off the interval", len(t2._writer._queue.queue) == 0)
@@ -575,10 +554,10 @@ check("pitch feedforward is live while cruising", hill_moving > 0.5, f"{hill_mov
 # Params that come back as a numpy scalar / string must still load.
 p = FakeParams({"HondaDynamicTuningEnabled": True,
                 "HondaDynBrakeGain": np.float64(0.25),
-                "HondaDynPedalGain1": "1.25"}, known)
+                "HondaDynModeSecS": "12.5"}, known)
 t = make_tuner(params=p)
 check("numpy scalar param loads", abs(t.brake_gain_converged - 0.25) < 1e-9, f"{t.brake_gain_converged}")
-check("string param loads", abs(t.pedal_gain[1] - 1.25) < 1e-9, f"{t.pedal_gain[1]}")
+check("string param loads", abs(t.mode_seconds_loaded["S"] - 12.5) < 1e-9, f"{t.mode_seconds_loaded}")
 check("registry default of 0.0 means no day-one brake gain",
       make_tuner(params=FakeParams({"HondaDynamicTuningEnabled": True}, known)).brake_gain_converged == 0.0)
 
@@ -604,16 +583,7 @@ for tau_s, alpha in (("0.30 s (measured)", 0.033), ("0.50 s (pessimistic)", 0.02
         peak < 1.0 + BRAKE_POS_LIMIT - 0.05, f"peak={peak:.4f}")
 
 # Small commands carry no identifiable gain information -- at settled cruise the
-# residual is grade, not pedal gain (R^2 ~0.00 above 10 m/s in the logs).
-t = make_tuner()
-cc, cs = base(10.0, dt.LEARN_MIN_CMD - 0.05, -1.0)
-settle(t, cc, cs)
-before = list(t.pedal_gain)
-for _ in range(5000):
-  t.update_state(cc, cs)
-  t.update_pedal(cc, cs, 0.5)
-check("no pedal learning below the command floor", t.pedal_gain == before)
-
+# residual is grade, not brake gain.
 t = make_tuner()
 cc, cs = base(10.0, -(dt.LEARN_MIN_CMD - 0.05), 0.5)
 settle(t, cc, cs)
@@ -623,32 +593,8 @@ for _ in range(5000):
   t.brake_gain(cc, cs, 0.5)
 check("no brake learning below the command floor", abs(t.brake_pid.i - before) < 1e-9)
 
-t = make_tuner()
-cc, cs = base(10.0, dt.LEARN_MIN_CMD + 0.4, -1.0)
-settle(t, cc, cs)
-before = list(t.pedal_gain)
-for _ in range(5000):
-  t.update_state(cc, cs)
-  t.update_pedal(cc, cs, 0.5)
-check("pedal learning still runs above the command floor", t.pedal_gain != before)
-
 # The persisted estimate must never advance while the live value sits on a clamp,
 # no matter how long the excursion lasts.
-t = make_tuner()
-cc, cs = base(10.0, 3.0, -6.0)
-settle(t, cc, cs)
-for _ in range(6000):
-  t.update_state(cc, cs)
-  t.update_pedal(cc, cs, 0.5)
-check("pedal gain reached its rail", max(t.pedal_gain) >= PEDAL_GAIN_MAX - 1e-6)
-conv_at_rail = max(t.pedal_gain_converged)
-for _ in range(40000):
-  t.update_state(cc, cs)
-  t.update_pedal(cc, cs, 0.5)
-check("converged estimate does not creep while the live value is railed",
-      abs(max(t.pedal_gain_converged) - conv_at_rail) < 1e-6,
-      f"{conv_at_rail:.4f} -> {max(t.pedal_gain_converged):.4f}")
-
 t = make_tuner()
 cc, cs = base(15.0, -2.0, 0.5)
 settle(t, cc, cs)
@@ -667,19 +613,6 @@ for _ in range(80000):
 check("converged brake estimate stops advancing once railed",
       abs(t.brake_gain_converged - conv_at_rail) < 1e-9,
       f"{conv_at_rail:.6f} -> {t.brake_gain_converged:.6f}")
-
-# Sustained, in-range learning SHOULD persist (the old |err|<0.3 gate blocked
-# exactly this whenever a real bias was present).
-t = make_tuner()
-cc, cs = base(10.0, 1.0)
-settle(t, cc, cs)
-for _ in range(40000):
-  t.update_state(cc, cs)
-  cs.out.aEgo = cc.actuators.accel * 0.8 * t.pedal_gain_at(cs.out.vEgo)
-  t.update_pedal(cc, cs, 0.5)
-check("a real steady bias does reach the converged estimate",
-      t.pedal_gain_converged[3] > 1.05,
-      f"live={t.pedal_gain[3]:.3f} conv={t.pedal_gain_converged[3]:.3f}")
 
 
 # --- 14. third-review regressions --------------------------------------------
@@ -742,42 +675,37 @@ check("the gain is still applied while still moving in the stopping phase",
 
 # --- 15. drive-mode gating ----------------------------------------------------
 #
-# S holds lower gears, so the same interceptor command lands a different accel.
-# One set of tables pooled across modes converges on a blend that matches no
-# actual driving, which is worse than not learning.
+# S holds lower gears (more engine braking) and ECON remaps the throttle. One gain
+# pooled across modes converges on a blend that matches no actual driving, which is
+# worse than not learning -- so the brake learner learns in D with ECON off only.
 
 print("\n[15] drive-mode gating")
 
-GearShifter = structs.CarState.GearShifter
 
-
-def learn_in(gear, frames=6000):
+def learn_in(gear, econ=None, frames=3000):
   t = make_tuner()
-  cc, cs = base(10.0, 1.0, 0.7)
+  cc, cs = base(15.0, -1.5, -1.0)          # under-braking: the brake gain rises where it may
   cs.out.gearShifter = gear
+  cs.econ_on = econ
   settle(t, cc, cs)
   for _ in range(frames):
     t.update_state(cc, cs)
-    t.update_pedal(cc, cs, 0.5)
-    t.brake_gain(cc, cs, 0.0)
+    t.brake_gain(cc, cs, 0.5)
   return t
 
 
 t_d = learn_in(GearShifter.drive)
-check("learning runs in D", t_d.pedal_gain[3] > 1.0, f"{t_d.pedal_gain[3]:.4f}")
+check("learning runs in D", t_d.brake_pid_factor > 0.0, f"{t_d.brake_pid_factor:.4f}")
 t_s = learn_in(GearShifter.sport)
-check("learning is frozen in S",
-      all(g == 1.0 for g in t_s.pedal_gain), f"{[round(g, 4) for g in t_s.pedal_gain]}")
-check("and mode_ok reports why", not t_s.mode_ok and t_s.drive_mode == ("sport", None),
+check("and mode_ok reports why S is frozen", not t_s.mode_ok and t_s.drive_mode == ("sport", None),
       f"mode_ok={t_s.mode_ok} mode={t_s.drive_mode}")
-
-# ECON is not mapped on this car yet, so it must stay a no-op: mode is (gear, None)
-# and nothing gates on it. This pins the hook so wiring it later is a visible change.
-check("ECON is unmapped and gates nothing today",
-      t_d.drive_mode == ("drive", None) and dt.HondaDynamicTuner._econ_state(base(10.0)[1]) is None,
-      f"{t_d.drive_mode}")
-check("a mapped ECON would gate (LEARN_ECON is False-only)",
-      not dt.HondaDynamicTuner._mode_learnable(("drive", True))
+t_e = learn_in(GearShifter.drive, econ=True)
+check("learning is frozen in ECON (decoded on this car since 0x221 was mapped)",
+      t_e.brake_pid_factor == 0.0 and t_e.drive_mode == ("drive", True), f"{t_e.brake_pid_factor} {t_e.drive_mode}")
+check("ECON off learns", learn_in(GearShifter.drive, econ=False).brake_pid_factor > 0.0)
+check("ECON gating keys off CS.econ_on, and is inert where it is not decoded",
+      dt.HondaDynamicTuner._econ_state(base(10.0)[1]) is None
+      and not dt.HondaDynamicTuner._mode_learnable(("drive", True))
       and dt.HondaDynamicTuner._mode_learnable(("drive", False))
       and dt.HondaDynamicTuner._mode_learnable(("drive", None)))
 
@@ -785,7 +713,7 @@ check("a mapped ECON would gate (LEARN_ECON is False-only)",
 # and gating there would silently disable the whole feature on those platforms
 t_u = learn_in(GearShifter.unknown)
 check("unknown gear still learns (other Nidec platforms)",
-      t_u.pedal_gain[3] > 1.0 and t_u.mode_ok, f"{t_u.pedal_gain[3]:.4f} mode_ok={t_u.mode_ok}")
+      t_u.brake_pid_factor > 0.0 and t_u.mode_ok, f"{t_u.brake_pid_factor:.4f} mode_ok={t_u.mode_ok}")
 
 # brake channel is gated too
 t = make_tuner()
@@ -811,58 +739,18 @@ t.update_state(cc, cs)
 check("and again on the way back", t._settle == 0, f"{t._settle}")
 
 
-# --- 16. aero learner is confined to where it is identifiable ------------------
-#
-# Chained replay over the 13 engaged drives had wind_factor ending at the 1.500
-# clamp on 6 of them. The update is symmetric in form, but the accel error on this
-# car is not zero-mean (-0.34..-0.47 on gas), so it drifted one way -- against a
-# bias the pedal gain and pitch feedforward were already chasing.
+# --- 16. the hondadyn log line ------------------------------------------------
 
-print("\n[16] wind learner is disjoint from the pedal/brake learners")
-
-# in the pedal learner's region: wind must not move
-t = make_tuner()
-cc, cs = base(10.0, 1.0, 0.3)          # accel_target 1.0 >= LEARN_MIN_CMD
-settle(t, cc, cs)
-w0 = t.wind_factor
-for _ in range(20000):
-  t.update_state(cc, cs)
-  t.update_wind(cc, cs, 0.19)
-check("no aero learning where the pedal learner owns the command",
-      t.wind_factor == w0, f"{w0:.4f} -> {t.wind_factor:.4f}")
-
-# in the brake learner's region: also must not move
-t = make_tuner()
-cc, cs = base(10.0, -1.0, -0.5)
-settle(t, cc, cs)
-w0 = t.wind_factor
-for _ in range(20000):
-  t.update_state(cc, cs)
-  t.update_wind(cc, cs, 0.19)
-check("nor where the brake learner owns it", t.wind_factor == w0,
-      f"{w0:.4f} -> {t.wind_factor:.4f}")
-
-# near-zero command with a real error: this IS its region, it must still learn
-t = make_tuner()
-cc, cs = base(25.0, 0.1, -0.2)         # |target| < LEARN_MIN_CMD, err = +0.3
-settle(t, cc, cs)
-w0 = t.wind_factor
-for _ in range(20000):
-  t.update_state(cc, cs)
-  t.update_wind(cc, cs, 0.19)
-check("but it does learn in the cruise band", t.wind_factor > w0 + 1e-6,
-      f"{w0:.4f} -> {t.wind_factor:.4f}")
-
-# noise deadband: tiny errors must not ratchet
-t = make_tuner()
-cc, cs = base(25.0, 0.1, 0.1 - 0.02)   # err = +0.02, inside WIND_ERR_DEADBAND
-settle(t, cc, cs)
-w0 = t.wind_factor
-for _ in range(20000):
-  t.update_state(cc, cs)
-  t.update_wind(cc, cs, 0.19)
-check("sub-deadband error does not ratchet the aero term",
-      t.wind_factor == w0, f"{w0:.4f} -> {t.wind_factor:.4f} (deadband {dt.WIND_ERR_DEADBAND})")
+print("\n[16] hondadyn log line")
+lines = []
+with mock.patch.object(dt.carlog, "info", lambda msg, *a, **k: lines.append(msg)):
+  t = counted(GearShifter.drive, True, frames=600)
+  t.log_state(0)
+line = lines[-1] if lines else ""
+check("one line, tagged and carrying the gas law and the slot",
+      line.startswith("hondadyn gaslaw=v2 slot=ECON "), line[:80])
+check("per-mode lists in D, ECON, S order", all(f"{k}=[" in line for k in ("modesec", "modeadm", "modetot")), line)
+check("the retired fields are gone", "pedal=" not in line and "wind=" not in line, line)
 
 
 print("\n" + "=" * 60)

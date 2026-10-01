@@ -17,6 +17,7 @@ import math
 import sys
 import unittest
 from dataclasses import dataclass, field
+from unittest import mock
 
 import numpy as np
 
@@ -28,6 +29,7 @@ from opendbc.car.honda.values import CAR, DBC, CarControllerParams
 from opendbc.can.packer import CANPacker
 from opendbc.can.dbc import DBC as DBCFile
 from opendbc.sunnypilot.car.honda import dynamic_tuning as dt
+from opendbc.sunnypilot.car.honda import elesys_gas as eg
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
@@ -53,7 +55,7 @@ class FakeParams:
   bad_writes: list = field(default_factory=list)
 
   def _spec(self, key):
-    if key in ("HondaDynamicTuningEnabled",):
+    if key in ("HondaDynamicTuningEnabled", eg.GAS_LAW_PARAM):
       return None
     if key not in dt._PARAM_SPEC:
       raise KeyError(key)
@@ -74,10 +76,15 @@ class FakeParams:
     self.store[key] = val
 
 
-def build(tuning=True):
+def build(tuning=True, gas_law_v2=True):
   params = FakeParams()
   params.store["HondaDynamicTuningEnabled"] = tuning
+  params.store[eg.GAS_LAW_PARAM] = gas_law_v2
   dt._open_params = lambda: params
+  # the gas law reads its param through its own lazy import; pin it, so the law under test
+  # never depends on whatever Params the machine running this happens to have
+  # (started and never stopped: this whole script is one drive)
+  mock.patch.object(eg, "_open_params", lambda: params).start()
 
   CP = CarInterface.get_non_essential_params(PLATFORM)
   CP_SP = CarInterface.get_non_essential_params_sp(CP, PLATFORM)
@@ -893,6 +900,153 @@ else:
   check("a STALE matching nudge does NOT confirm", st == LaneChangeState.preLaneChange, f"{st}")
   st = run(True, -3000, True)
   check("a STALE opposing value does not confirm either", st == LaneChangeState.preLaneChange, f"{st}")
+
+
+# --- 16. the gas law, v1 and v2, through the real CarController ------------------
+#
+# HondaElesysGasLawV2 picks the law once, when CarController is built. Off must be the shipped
+# law bit for bit; on must be elesys_gas.elesys_pedal_v2. Either way the BRAKE side must not move:
+# v2 changes the pedal only.
+
+print("\n[16] gas law v1 / v2 through CarController")
+from opendbc.car.honda.carcontroller import compute_gb_honda_elesys
+
+LAW_SPEEDS = [0.0, 1.5, 3.0, 4.5, 6.0, 10.0, 15.0, 16.5, 17.5, 20.0, 25.0, 30.0, 33.0]
+LAW_ACCELS = [-2.0, -0.6, -0.25, -0.12, -0.05, -0.01, 0.0, 0.03, 0.2, 0.5, 1.0, 1.6]
+
+
+def law_trace(gas_law_v2, tuning=True):
+  cc_obj, _, _, params = build(tuning=tuning, gas_law_v2=gas_law_v2)
+  cs = CS()
+  rows = []
+  i = 0
+  for v in LAW_SPEEDS:
+    for a in LAW_ACCELS:
+      for _ in range(2):                       # the interceptor and 0x1FA run on even frames
+        cs.out.vEgo, cs.out.aEgo = v, 0.0
+        cc = make_cc(a)
+        cc_obj.update(cc, CC_SP, cs, i * int(1e7))
+        if i % 2 == 0:
+          # expected values from what actually reached the controller (capnp floats are float32)
+          v32, a32 = cs.out.vEgo, cc.actuators.accel
+          gas, brake = compute_gb_honda_elesys(a32, v32)
+          wb = float(np.interp(v32, [0.0, 2.3, 35.0], [0.001, 0.002, 0.15]))
+          rows.append({"v": v32, "a": a32, "gas": cc_obj.gas, "brake": cc_obj.apply_brake_last,
+                       "v1": eg.elesys_pedal_v1(v32, gas, brake, wb), "v2": eg.elesys_pedal_v2(v32, gas, brake, wb)})
+        i += 1
+  return cc_obj, params, rows
+
+
+cc_v1, _, rows_v1 = law_trace(False)
+cc_v2, params_v2, rows_v2 = law_trace(True)
+check("param off -> the law is v1", cc_v1.elesys_gas.law == "v1" and cc_v2.elesys_gas.law == "v2")
+bad = [r for r in rows_v1 if r["gas"] != r["v1"]]
+check("param off: every interceptor command is the shipped law, bit for bit", not bad, f"{bad[:2]}")
+bad = [r for r in rows_v2 if r["gas"] != r["v2"]]
+check("param on: every interceptor command is elesys_pedal_v2, bit for bit", not bad, f"{bad[:2]}")
+bad = [(a["v"], a["a"], a["brake"], b["brake"]) for a, b in zip(rows_v1, rows_v2, strict=True) if a["brake"] != b["brake"]]
+check("the brake command is identical under both laws", not bad, f"{bad[:3]}")
+bad = [(r["v"], r["a"], r["gas"], r["v1"]) for r in rows_v2 if r["v"] <= 3.0 and abs(r["gas"] - r["v1"]) > 1e-12]
+check("at or below 3 m/s v2 IS v1 (every launch unchanged)", not bad, f"{bad[:3]}")
+moved = [r for r in rows_v2 if r["v"] >= 6.0 and r["a"] >= 0.5 and r["gas"] < r["v1"] - 0.02]
+check("and above it v2 really does ask for less pedal per m/s^2", len(moved) > 10, f"{len(moved)}")
+check("the gas law tag reaches the tuner's log fields", cc_v2.dynamic_tuner.debug_values()["gas_law"] == "v2"
+      and cc_v1.dynamic_tuner.debug_values()["gas_law"] == "v1")
+
+params_v2.store[eg.GAS_LAW_PARAM] = False
+cs = CS()
+cs.out.vEgo = 20.0
+cc_v2.update(make_cc(1.0), CC_SP, cs, 0)
+check("the param is read once, at init: flipping it mid-drive changes nothing", cc_v2.elesys_gas.law == "v2")
+
+_, _, rows_off = law_trace(True, tuning=False)
+check("v2 does not depend on the dynamic tuner toggle",
+      all(a["gas"] == b["gas"] for a, b in zip(rows_v2, rows_off, strict=True)))
+
+# brake is 0 on the first 0x1FA after longActive drops (the panda's rule; the gas law must not
+# disturb it, and the brake path it shares a frame with is untouched)
+cc_obj, *_ = build()
+cs = CS()
+cs.out.vEgo, cs.out.aEgo = 15.0, -1.0
+for i in range(200):
+  cc_obj.update(make_cc(-2.0), CC_SP, cs, i * int(1e7))
+was = cc_obj.apply_brake_last
+cc_obj.update(make_cc(0.0, LongCtrlState.off, long_active=False), CC_SP, cs, 200 * int(1e7))
+check("braking hard, then longActive drops: the next 0x1FA carries brake 0 and gas 0",
+      was > 50 and cc_obj.apply_brake_last == 0 and cc_obj.gas == 0.0, f"{was} -> {cc_obj.apply_brake_last}, gas {cc_obj.gas}")
+
+
+# --- 17. CarController.update() never raises on odd inputs ------------------------
+#
+# An exception in update() means no 0x1FA: the VSA latches BRAKE_ERROR ~1 s later and the 0x1A6
+# stand-down stops -> ACC/CMBS fault. The gas law and the tuner hooks run inside it every frame,
+# so every input they read is fed garbage here, and 0x1FA must still go out every even frame.
+
+print("\n[17] update() never raises")
+NAN = float("nan")
+
+
+def brake_frames(sends):
+  return [m for m in sends if (m[0] if isinstance(m, tuple) else m.address) == 0x1FA]
+
+
+class OddEcon:
+  def __bool__(self):
+    raise ValueError("not a bool")
+
+
+cases = {
+  "NaN accel": dict(accel=NAN),
+  "inf accel": dict(accel=float("inf")),
+  "NaN aEgo": dict(a_ego=NAN),
+  "NaN pitch": dict(pitch=NAN),
+  "econ_on None": dict(econ=None),
+  "econ_on that will not bool()": dict(econ=OddEcon()),
+  "econ_on a string": dict(econ="on"),
+  "S then D every frame": dict(flip_gear=True),
+}
+for label, case in cases.items():
+  for law in (True, False):
+    raised, missing, bad_gas = None, [], []
+    try:
+      cc_obj, *_ = build(gas_law_v2=law)
+      cs = CS()
+      cs.out.vEgo, cs.out.aEgo = 12.0, case.get("a_ego", 0.0)
+      if "econ" in case:
+        cs.econ_on = case["econ"]
+      for i in range(120):
+        if case.get("flip_gear"):
+          cs.out.gearShifter = structs.CarState.GearShifter.sport if i % 2 else structs.CarState.GearShifter.drive
+        _, sends = cc_obj.update(make_cc(case.get("accel", 0.5), pitch=case.get("pitch", 0.0)), CC_SP, cs, i * int(1e7))
+        if i % 2 == 0 and not brake_frames(sends):
+          missing.append(i)
+        if not (math.isfinite(cc_obj.gas) and 0.0 <= cc_obj.gas <= 1.0):
+          bad_gas.append(cc_obj.gas)
+    except Exception as e:      # the point of the check
+      raised = e
+    tag = "v2" if law else "v1"
+    check(f"{label} ({tag}): no exception, 0x1FA every even frame, gas finite in [0, 1]",
+          raised is None and not missing and not bad_gas, f"raised={raised!r} missing={missing[:3]} gas={bad_gas[:3]}")
+
+# the param itself missing or unreadable: the controller is still built, with the default law
+class OddParams:
+  def __init__(self, value):
+    self.value = value
+
+  def get(self, key, block=False, return_default=False):
+    if isinstance(self.value, Exception):
+      raise self.value
+    return self.value
+
+
+for label, value in (("raises", KeyError("UnknownKeyName")), ("returns None", None), ("returns garbage", "maybe")):
+  try:
+    law = eg.ElesysGasLaw(OddParams(value)).law
+  except Exception as e:
+    law = repr(e)
+  check(f"a param read that {label} gives the registered default (v2)", law == "v2", law)
+with mock.patch.object(eg, "_open_params", lambda: None):
+  check("no openpilot Params at all gives the registered default (v2)", eg.ElesysGasLaw().law == "v2")
 
 
 class TestDynamicTuningIntegration(unittest.TestCase):

@@ -10,10 +10,16 @@ Ported from MVL's ACURA_MDX_3G dynamic branch, restructured for this fork:
 
   * The MDX 3G drives gas purely through the Nidec PCM, so MVL has a single set
     of gas learners that all learn against pcm_accel. This car has a comma pedal
-    interceptor, which owns the gas at every speed, so none of that is ported:
-    the gas learners here work on the interceptor command only. An earlier
-    revision crossfaded part of the request back to the PCM above ~30 km/h; that
-    is gone. See the note in carcontroller.py where the request is built.
+    interceptor, which owns the gas at every speed, so none of that is ported.
+    An earlier revision crossfaded part of the request back to the PCM above
+    ~30 km/h; that is gone. See the note in carcontroller.py where the request
+    is built.
+
+  * THERE IS NO GAS LEARNER ANY MORE (2026-10). The per-band pedal gain and the
+    aero ("wind") scale are retired -- see "Retired channels" below for why --
+    and the gas side is the measured, static law in elesys_gas.py. What is left
+    on the gas side here is bookkeeping: time and steady-pedal samples per drive
+    mode, so per-mode pedal tables can be fitted offline from routes.
 
   * MVL's per-5mph lateral latFactors are deliberately NOT ported. Longitudinal
     only, by request.
@@ -52,6 +58,7 @@ toggle off, callers get pass-through values identical to stock.
 
 import math
 import threading
+from collections import deque
 from queue import Empty, Queue
 
 import numpy as np
@@ -60,7 +67,10 @@ from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, structs
 from opendbc.car.carlog import carlog
 from opendbc.car.common.filter_simple import FirstOrderFilter
 from opendbc.car.common.pid import PIDController
-from opendbc.sunnypilot.car.honda.gas_interceptor import ELESYS_GAS_BP
+# Deliberately NOT gas_interceptor.py: that module is what imports this one's caller, and the old
+# `ELESYS_GAS_BP as PEDAL_GAIN_BP` import was a trap -- renaming the gas grid took out
+# CarController.__init__, i.e. the car's longitudinal control, for a rename.
+from opendbc.sunnypilot.car.honda.elesys_gas import DRIVE_MODE_SLOTS, drive_mode_slot, econ_state, gear_name
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
@@ -68,6 +78,11 @@ DT_CTRL = 0.01
 
 # --- dwell / lag compensation ------------------------------------------------
 # update_state() runs every control frame (100 Hz).
+#
+# 2026-10: the pedal and aero learners this ramp dwell was built for are RETIRED (see "Retired
+# channels" below). It now gates only the per-mode steady-pedal counter in observe_pedal(), and
+# accel_ref/accel_error are still logged. The history below is kept because it is why the brake
+# channel has a different dwell, and because it is what any future gas learner has to answer.
 #
 # The thing every learner here has to avoid is mistaking ACTUATOR LAG for a gain
 # error. The plant tracks the target late, so during any ramp aEgo sits below a
@@ -174,86 +189,112 @@ LEARN_MIN_CMD = 0.4         # m/s^2
 
 # --- drive-mode gating -------------------------------------------------------
 # The pedal -> accel map is NOT one curve. S holds lower gears, so the same
-# interceptor command lands a different accel; ECON, where fitted, remaps the
-# pedal outright. One set of tables averaged across modes is wrong in every mode,
-# and worse than not learning at all, because the error it converges on is a
-# blend that matches no actual driving.
+# interceptor command lands a different accel; ECON remaps the pedal outright.
+# One set of tables averaged across modes is wrong in every mode, and worse than
+# not learning at all, because the error it converges on is a blend that matches
+# no actual driving.
 #
-# The rule here is deliberately the cheap one: LEARN IN THE REFERENCE MODE ONLY,
-# and treat any mode change as a transient. That needs no extra params and cannot
-# mis-attribute a sample. Splitting into per-mode tables is the obvious next step,
-# but it doubles the param surface and needs logged time in the second mode to be
-# worth anything -- and there is none. Full census over all 14 routes, 2,510,684
-# frames of 0x188 (418.4 min): D 23,259 s, P 1,563 s, R 298 s, N 8 s, and S ZERO
-# seconds. GEAR never once reads 26, its Sport code. Under the clean-PID mask the
-# S sample count is 0 in every one of the six PEDAL_GAIN_BP bands, on every route
-# taken individually. (The 0.04% that decode as "S" from GEAR_SHIFTER == 0 are
-# between-detent transients, not Sport -- see the note in carstate.py.)
-# The D gearbox is a six-speed torque-converter auto and steady cruise sits in top
-# gear on every route, so there is no sustained low-gear map anywhere in this data.
+# The rule here is deliberately the cheap one: LEARN IN THE REFERENCE MODE ONLY
+# (D, ECON off), and treat any mode change as a transient. Since the gas learners
+# were retired this gates only the brake learner, which sees a different engine
+# braking in S and was never characterised outside D.
+#
+# MEASURED, all 86 routes logged to 2026-09 (1406 min, 0x188 and 0x221 decoded):
+#
+#   mode          moving     engaged    routes
+#   D, ECON off   65,085 s   33,808 s   most
+#   D, ECON on       467 s       87 s   be, bf, c0
+#   S                148 s       79 s   b1, dd, fc
+#   S + ECON           0 s        0 s   -
+#
+# S decodes through GEAR = 26 (16,164 frames; the 2,975 frames of raw-0 shift
+# transients read GEAR = 0, see carstate.py), and ECON through ECON_STATUS. The
+# brake learner was correctly frozen in ECON (modeok=0 on bf and c0). What the
+# data says about the modes, for whoever fits per-mode pedal tables next:
+#   * ECON delivers 0.35-0.48 m/s^2 LESS at the same speed and PCM pedal (>= 40
+#     counts), separately in be, bf and c0; achieved/D-predicted median 0.61,
+#     slope ratio 0.72-0.84. Same rpm per km/h as D, so the same gearing. Mostly
+#     manual driving, one day.
+#   * S runs 1.4-2.5x D's rpm per km/h (lower gears). Within 0.04 m/s^2 of D at
+#     light pedal (30-70 counts), +0.17..+0.57 at 70-100 counts (2-5 s per bin).
+#   * Neither has enough ENGAGED data to fit anything: a steady-pedal admission
+#     rule over the whole month collects ~11 s in ECON and ~28 s in S. So the
+#     per-mode multipliers in elesys_gas.py (MODE_K) are all 1.0, and this module
+#     logs per-mode time and samples (observe_pedal, the hondadyn line) so the
+#     tables can be fitted offline once there is data.
 #
 # UNKNOWN gear deliberately still learns. Gear is only decoded on this platform
 # (see the transmissionType note in interface.py); on any other Nidec car
 # gearShifter stays `unknown` and gating on it would silently disable the whole
 # feature there.
-#
-# ECON is NOT gated here because it is not observable yet: 0x221 is on the bus at
-# 25 Hz but carries no payload on this car -- across 4 routes it takes exactly 4
-# distinct values, 000003/000012/000021/000030, which is a 2-bit counter plus its
-# checksum and nothing else. If a real ECON bit is ever found, add it to
-# _drive_mode() and nothing else has to change.
 LEARN_GEARS = ("drive",)    # names from structs.CarState.GearShifter
 
-# ECON: MAPPED and live on HONDA_ELESYS as of the 0x221 definition in
-# honda_accord_au_2015_can.dbc. ECON_ON is bit 23 of a 3-BYTE ECON_STATUS -- not
-# the 6-byte frame the other Honda DBCs describe. carstate.py decodes it into
-# CS.econ_on; _econ_state() below reads it; everything else (dwell reset on
-# change, freezing learners outside the reference mode, the econ= log field)
-# already keys off _drive_mode().
+# ECON is decoded on HONDA_ELESYS from 0x221 (honda_accord_au_2015_can.dbc). ECON_ON
+# is bit 23 of a 3-BYTE ECON_STATUS -- not the 6-byte frame the other Honda DBCs
+# describe. carstate.py decodes it into CS.econ_on; _econ_state() below reads it;
+# the dwell reset on change, the reference-mode gate, the econ= log field and the
+# drive-mode slot all key off _drive_mode().
 #
 # Why it looked dead for so long, recorded so nobody re-runs the analysis: across
 # 628,053 logged bus-0 frames the message only ever took four values
 # (000003/000012/000021/000030) with bytes 0-1 always zero, because ECON was
-# simply OFF for the entire 7 hours. That is exactly the ambiguity flagged at the
-# time -- an all-zero data field cannot distinguish "no state here" from "state
-# that was off" -- and the owner settled it by pressing the button. With ECON on
-# the payloads are 000083-family, which the parser accepts as
-# 00008b/00009a/0000a9/0000b8 once the checksum is right.
+# simply OFF for the entire 7 hours. An all-zero data field cannot distinguish
+# "no state here" from "state that was off", and the owner settled it by pressing
+# the button. With ECON on the payloads are 000083-family, which the parser
+# accepts as 00008b/00009a/0000a9/0000b8 once the checksum is right.
 #
 # The ECON BUTTON is separate, at 0x37C bit 48, and is deliberately NOT used:
-# it is a momentary press, and what gates learning is the resulting STATE. 0x37C
-# is also CRUISE_PARAMS in the shared _nidec_common.dbc, so defining a signal
-# there would reach every Nidec Honda for no benefit here.
+# it is a momentary press, and what matters is the resulting STATE. 0x37C is
+# also CRUISE_PARAMS in the shared _nidec_common.dbc, so defining a signal there
+# would reach every Nidec Honda for no benefit here.
 LEARN_ECON = (False,)       # learn with ECON off only; ECON remaps the throttle
 
 
 def _econ_tag(econ) -> str:
-  """'-' while ECON is unmapped, so the log line reads the same either way."""
+  """'-' where ECON is not observable (every other platform), so the line reads the same."""
   return "-" if econ is None else ("on" if econ else "off")
 
 
-def _gear_names() -> dict:
-  """ordinal -> name for structs.CarState.GearShifter, whatever backs it."""
-  enum = structs.CarState.GearShifter
-  try:                                          # capnp
-    return {int(v): k for k, v in enum.schema.enumerants.items()}
-  except Exception:
-    pass
-  try:                                          # python Enum
-    return {int(m.value): m.name for m in enum}
-  except Exception:
-    return {}
+# --- retired channels (2026-10) ------------------------------------------------
+# The per-band PEDAL GAIN learner and the AERO ("wind") learner are gone. Measured
+# over ~50 tuner-on drives (9f..103), replaying this module over the logs:
+#
+#   * The pedal learner could not persist anything. The live gain moved 2e-4*err
+#     per admitted sample, the persisted estimate 3e-4 of the difference per
+#     sample, and every ignition reset live to persisted -- so each drive's
+#     progress was thrown away. Admitted pedal time was ~1.6% of engaged time;
+#     route 103 moved live by +0.0009 and persisted by 0.0000. Six weeks took the
+#     gains from [1,1,1,1.004,1.004,1] to [1,1,.996,.996,.999,.993].
+#   * And had it persisted, it would have learned the wrong way. Its gate read
+#     actuators.accel, which includes openpilot's own integrator: at 12-30 m/s the
+#     admitted frames were ones where the integrator had already lifted a ~0.36
+#     m/s^2 target over the 0.4 gate, so it read UNDER-delivery (+0.04..+0.12)
+#     where the car really OVER-delivers (-0.19..-0.33 gated on the planner's
+#     target). One multiplier was also being asked to fit both slope and offset.
+#   * The aero scale was a random walk: median 0.37 of its 0.7-1.5 range inside a
+#     drive, rails hit on b0/c8/ce (1.5) and de/fd (0.7), drift uncorrelated with
+#     speed mix (r = -0.09), consecutive drives drifting opposite ways. One scalar
+#     cannot fit the cruise pedal shape anyway (1.90 at 8-12 m/s, 0.66 at 21-27).
+#     It also scaled the brake-side credit, so it moved the brake-on point.
+#
+# What replaced them: the measured slope table in elesys_gas.py (HondaElesysGasLawV2),
+# a constant aero scale of 1.0 (wind_scale), and pedal gain fixed at 1.0. The
+# params HondaDynPedalGain0-5 and HondaDynWindFactor are no longer registered, read
+# or written; a device that had them keeps the files on disk, unread.
 
-
-_GEAR_NAMES = _gear_names()
-
-# --- pedal channel -----------------------------------------------------------
-# Same grid as elesys_gas_multiplier(), so the learned correction is a
-# multiplicative overlay on the shipped curve and the result stays continuous.
-PEDAL_GAIN_BP = ELESYS_GAS_BP
-PEDAL_GAIN_MIN = 0.5
-PEDAL_GAIN_MAX = 1.8
-PEDAL_LEARN_RATE = 2e-4
+# --- per-mode data, for fitting pedal tables offline -----------------------------
+# Counted only while the tuner is enabled, logged in the hondadyn line per drive,
+# and (seconds only) persisted as running totals so the UI can show how much there is.
+MODE_MOVING_SPEED = 1.0     # m/s; "engaged time" counts longActive frames above this
+# The steady-pedal admission rule the audit fitted its tables with: on top of the
+# ramp dwell, PID state and no driver/AEB override,
+ADMIT_MIN_SPEED = 3.0       # m/s
+ADMIT_WINDOW = 50           # interceptor frames (50 Hz) = 1 s of pedal history
+ADMIT_PEDAL_MIN = 0.02      # the whole window inside these: off the brake, off the top
+ADMIT_PEDAL_MAX = 0.9
+ADMIT_PEDAL_STD = 0.008     # and steady
+ADMIT_MAX_PITCH = 0.08      # rad, with a fresh pose
+MODE_SEC_MAX = 1e9          # clamp on a loaded total; a corrupt value cannot overflow the log
 
 # --- brake channel -----------------------------------------------------------
 # MVL runs k_i=2.0 / pos_limit=4.0, i.e. up to 5x the base brake command, on top
@@ -278,13 +319,6 @@ BRAKE_POS_LIMIT = 0.6
 BRAKE_NEG_LIMIT = 0.15        # gain floor 0.85x; ceiling stays 1.60x
 BRAKE_LEARN_MIN_SPEED = 1.0   # m/s below which the brake learner is frozen
 
-# --- shared aero -------------------------------------------------------------
-WIND_LEARN_SPEED = 1000.0
-WIND_FACTOR_MIN, WIND_FACTOR_MAX = 0.7, 1.5
-# m/s^2 of error below which the aero learner does nothing. The clamps were never
-# the problem -- the input was; see update_wind().
-WIND_ERR_DEADBAND = 0.05
-
 # --- pitch -------------------------------------------------------------------
 PITCH_RC = 0.5              # s, matches the spirit of toyota's filtered pitch
 PITCH_ACCEL_LIMIT = 1.5     # m/s^2, hard ceiling on the feedforward
@@ -303,17 +337,16 @@ LOG_TAG = "hondadyn"
 
 # key -> (default, lo, hi). Every load is re-clamped against this table.
 _PARAM_SPEC = {
-  "HondaDynPedalGain0": (1.0, PEDAL_GAIN_MIN, PEDAL_GAIN_MAX),
-  "HondaDynPedalGain1": (1.0, PEDAL_GAIN_MIN, PEDAL_GAIN_MAX),
-  "HondaDynPedalGain2": (1.0, PEDAL_GAIN_MIN, PEDAL_GAIN_MAX),
-  "HondaDynPedalGain3": (1.0, PEDAL_GAIN_MIN, PEDAL_GAIN_MAX),
-  "HondaDynPedalGain4": (1.0, PEDAL_GAIN_MIN, PEDAL_GAIN_MAX),
-  "HondaDynPedalGain5": (1.0, PEDAL_GAIN_MIN, PEDAL_GAIN_MAX),
-  "HondaDynWindFactor": (1.0, WIND_FACTOR_MIN, WIND_FACTOR_MAX),
   # starts at zero gain: flipping the toggle must not change braking until
   # something has actually been learned
   "HondaDynBrakeGain": (0.0, -BRAKE_NEG_LIMIT, BRAKE_POS_LIMIT),
+  # running totals of engaged, moving seconds per drive-mode slot -- counters, not learned
+  # values, so rule 2 (converged only) does not apply to them
+  "HondaDynModeSecD": (0.0, 0.0, MODE_SEC_MAX),
+  "HondaDynModeSecECON": (0.0, 0.0, MODE_SEC_MAX),
+  "HondaDynModeSecS": (0.0, 0.0, MODE_SEC_MAX),
 }
+MODE_SEC_KEYS = {slot: f"HondaDynModeSec{slot}" for slot in DRIVE_MODE_SLOTS}
 
 
 def _open_params():
@@ -361,24 +394,6 @@ class _ParamWriter:
           self.write_errors += 1
 
 
-def _bp_weights(v: float, bp: list[float]) -> list[tuple[int, float]]:
-  """Split a sample across the two breakpoints that bracket it, weighted by
-  distance. Avoids the discontinuities MVL's bucket-snapping latFactors have."""
-  n = len(bp)
-  if v <= bp[0]:
-    return [(0, 1.0)]
-  if v >= bp[-1]:
-    return [(n - 1, 1.0)]
-  for i in range(n - 1):
-    if bp[i] <= v <= bp[i + 1]:
-      span = bp[i + 1] - bp[i]
-      if span <= 0:
-        return [(i, 1.0)]
-      w = (v - bp[i]) / span
-      return [(i, 1.0 - w), (i + 1, w)]
-  return [(n - 1, 1.0)]
-
-
 def _finite(x, fallback: float = 0.0) -> float:
   """Params.get() may hand back a numpy scalar, a Decimal, or bytes depending on
   the build, so convert rather than isinstance-check -- an isinstance gate would
@@ -406,13 +421,15 @@ class HondaDynamicTuner:
 
     self._writer = _ParamWriter(self._params) if (self._params is not None and self.enabled) else None
 
-    # pedal channel
-    self.pedal_gain = [self._get_float(f"HondaDynPedalGain{i}") for i in range(len(PEDAL_GAIN_BP))]
-    self.pedal_gain_converged = list(self.pedal_gain)
-
-    # shared aero
-    self.wind_factor = self._get_float("HondaDynWindFactor")
-    self.wind_factor_converged = self.wind_factor
+    # per-mode data: this drive's engaged seconds and admitted steady-pedal samples per slot, and
+    # the running totals of seconds loaded from the params
+    self.slot = "D"
+    self.mode_seconds = dict.fromkeys(DRIVE_MODE_SLOTS, 0.0)
+    self.mode_admitted = dict.fromkeys(DRIVE_MODE_SLOTS, 0)
+    self.mode_seconds_loaded = {s: self._get_float(k) for s, k in MODE_SEC_KEYS.items()}
+    self._pedal_window: deque = deque(maxlen=ADMIT_WINDOW)
+    # which gas law the interceptor path is running ("v1"/"v2" on HONDA_ELESYS), for the log
+    self.gas_law = "-"
 
     # brake channel
     self.brake_pid = PIDController(k_p=0.0, k_i=BRAKE_KI, pos_limit=BRAKE_POS_LIMIT,
@@ -463,15 +480,14 @@ class HondaDynamicTuner:
   # --- param plumbing --------------------------------------------------------
 
   def _get_float(self, key: str) -> float:
-    # PEDAL_GAIN_BP is ELESYS_GAS_BP, which lives in another file. Growing that
-    # grid without adding the matching HondaDynPedalGain<n> here must not take
-    # out CarController.__init__ -- that is a car with no longitudinal control,
-    # for a typo. Fall back to a neutral value and let the writer's error count
-    # surface it instead.
+    # A key with no _PARAM_SPEC entry (a slot added to DRIVE_MODE_SLOTS without its
+    # HondaDynModeSec<slot>, say) must not take out CarController.__init__ -- that is
+    # a car with no longitudinal control, for a typo. Fall back to a neutral value
+    # and let the writer's error count surface it instead.
     spec = _PARAM_SPEC.get(key)
     if spec is None:
-      carlog.error(f"{LOG_TAG} no _PARAM_SPEC entry for {key}; using 1.0 and not learning it")
-      return 1.0
+      carlog.error(f"{LOG_TAG} no _PARAM_SPEC entry for {key}; using 0.0 and not learning it")
+      return 0.0
     default, lo, hi = spec
     if self._params is None or not self.enabled:
       return default
@@ -492,17 +508,21 @@ class HondaDynamicTuner:
       return False
 
   def persist(self, frame: int) -> None:
-    """Rule 2: writes the *converged* estimates, never the live ones. A value
+    """Rule 2: writes the *converged* brake estimate, never the live one. A value
     that railed during a transient is never written, so it cannot come back as
-    next drive's starting point."""
+    next drive's starting point. The per-mode seconds are counters, not learned
+    values, and are written as running totals."""
     if self._writer is None or not self.enabled or frame % PERSIST_INTERVAL != 0:
       return
-    values = {f"HondaDynPedalGain{i}": g for i, g in enumerate(self.pedal_gain_converged)}
-    values.update({
-      "HondaDynWindFactor": self.wind_factor_converged,
-      "HondaDynBrakeGain": self.brake_gain_converged,
-    })
+    values = {"HondaDynBrakeGain": self.brake_gain_converged}
+    # plain floats only: put_many() does float(v) in THIS thread, the control thread
+    values.update({key: self.mode_seconds_total(slot) for slot, key in MODE_SEC_KEYS.items()})
     self._writer.put_many(values)
+
+  def mode_seconds_total(self, slot: str) -> float:
+    """The running total for a slot: what was loaded at ignition plus this drive."""
+    total = _finite(self.mode_seconds_loaded.get(slot, 0.0)) + _finite(self.mode_seconds.get(slot, 0.0))
+    return float(min(max(total, 0.0), MODE_SEC_MAX))
 
   # --- per-frame bookkeeping -------------------------------------------------
 
@@ -544,6 +564,11 @@ class HondaDynamicTuner:
     # trivially) and that is exactly how the old telemetry read 88% while the
     # learner was getting ~1 s of real samples per drive.
     self.long_active = bool(CC.longActive)
+
+    # per-mode engaged time, the same slots the gas law uses (elesys_gas.drive_mode_slot)
+    self.slot = drive_mode_slot(*mode)
+    if self.enabled and self.long_active and _finite(CS.out.vEgo) > MODE_MOVING_SPEED:
+      self.mode_seconds[self.slot] = self.mode_seconds.get(self.slot, 0.0) + DT_CTRL
 
     # The dwell now watches JERK, not drift from the window start. A sustained
     # ramp is exactly what the lag model below is for, so admitting it is the
@@ -590,9 +615,8 @@ class HondaDynamicTuner:
     # the planner target, NOT the commanded value: the command-magnitude gates
     # (LEARN_MIN_CMD) are about what the planner asked for, not about grade
     self.accel_target = target
-    # Lag-compensated. Every learner reads this, so the correction lands on the
-    # pedal, brake and aero channels at once and they cannot disagree about
-    # what "error" means.
+    # Lag-compensated. The brake learner reads this (and the log line reports it);
+    # the pedal and aero channels that also read it are retired.
     self.accel_error = self.accel_ref - _finite(CS.out.aEgo)
 
     # Rule 5: NOTHING WOUND UP IN ONE ENGAGEMENT CROSSES INTO THE NEXT.
@@ -665,39 +689,17 @@ class HondaDynamicTuner:
 
   @staticmethod
   def _gear_name(CS):
-    """Gear as a plain name, or None if it cannot be determined.
-
-    gearShifter reaches us in three different shapes depending on who built the
-    message: a bare int from a direct assignment, a capnp _DynamicEnum from a
-    reader (str() gives the name, .raw the ordinal), or already a string. Getting
-    this wrong fails silently -- an unrecognised value would read as "not drive"
-    and freeze every learner forever -- so normalise all three explicitly.
-    """
-    gear = getattr(CS.out, "gearShifter", None)
-    if gear is None:
-      return None
-    raw = getattr(gear, "raw", None)
-    if raw is not None:
-      name = _GEAR_NAMES.get(int(raw))
-    elif isinstance(gear, bool):
-      return None
-    elif isinstance(gear, int):
-      name = _GEAR_NAMES.get(int(gear))
-    else:
-      name = str(gear).rsplit(".", 1)[-1]
-    return None if name in (None, "unknown") else name
+    """Gear as a plain name, or None if it cannot be determined. Shared with the gas law
+    (elesys_gas.gear_name), which needs the same slot; an unrecognised value would read as
+    "not drive" and freeze the brake learner forever, so it normalises every shape."""
+    return gear_name(CS)
 
   @staticmethod
   def _econ_state(CS):
-    """True/False where ECON is decoded, None where it is not observable.
-
-    Read off the CarState object rather than CS.out, because ECON is a
-    sunnypilot-only concept and CarState is a capnp struct we do not extend.
-    carstate.py sets self.econ_on from ECON_STATUS (0x221) on HONDA_ELESYS and
-    leaves it None everywhere else, so gating stays inert on other platforms.
-    """
-    econ = getattr(CS, "econ_on", None)
-    return None if econ is None else bool(econ)
+    """True/False where ECON is decoded, None where it is not observable (elesys_gas.econ_state).
+    carstate.py sets CS.econ_on from ECON_STATUS (0x221) on HONDA_ELESYS and leaves it None
+    everywhere else, so gating stays inert on other platforms."""
+    return econ_state(CS)
 
   @classmethod
   def _drive_mode(cls, CS) -> tuple:
@@ -718,11 +720,12 @@ class HondaDynamicTuner:
       return False
     return True
 
-  def _learn_ok(self, CC, CS) -> bool:
-    """Rule 1: no learning during transients, overrides, or non-PID states."""
+  def _learn_ok(self, CC, CS, reference_mode_only: bool = True) -> bool:
+    """Rule 1: no learning during transients, overrides, or non-PID states. The per-mode
+    data counter passes reference_mode_only=False: counting the other modes is its point."""
     return (self.enabled
             and CC.longActive
-            and self.mode_ok
+            and (self.mode_ok or not reference_mode_only)
             and self._settle >= SETTLE_FRAMES
             and CC.actuators.longControlState == LongCtrlState.pid
             and not CS.out.gasPressed
@@ -733,78 +736,50 @@ class HondaDynamicTuner:
   def _track(converged: float, live: float) -> float:
     return converged + CONVERGED_TAU * (live - converged)
 
-  # --- pedal channel ---------------------------------------------------------
+  # --- per-mode pedal data (the pedal learner is retired) ---------------------
 
-  def pedal_gain_at(self, v_ego: float) -> float:
-    """Learned multiplicative correction on elesys_gas_multiplier's output."""
-    if not self.enabled:
-      return 1.0
-    gain = float(np.interp(v_ego, PEDAL_GAIN_BP, self.pedal_gain))
-    return float(np.clip(_finite(gain, 1.0), PEDAL_GAIN_MIN, PEDAL_GAIN_MAX))
+  def observe_pedal(self, CC, CS, gas_cmd: float, law: str = "") -> None:
+    """Called once per interceptor frame (50 Hz) with the command actually sent. Learns
+    nothing: it counts, per drive-mode slot, the samples a steady-pedal plant fit could use,
+    so the hondadyn line says how much ECON/S data a drive collected. Runs inside
+    CarController.update(), so it never raises."""
+    try:
+      if law:
+        self.gas_law = str(law)
+      self._pedal_window.append(_finite(gas_cmd))
+      if self._admit_pedal_sample(CC, CS):
+        self.mode_admitted[self.slot] = self.mode_admitted.get(self.slot, 0) + 1
+    except Exception:
+      pass
 
-  def update_pedal(self, CC, CS, gas_cmd: float) -> None:
-    """gas_cmd is the final 0..1 interceptor command actually being sent."""
-    if not self._learn_ok(CC, CS):
-      return
-    if self.accel_target < LEARN_MIN_CMD:
-      return
+  def _admit_pedal_sample(self, CC, CS) -> bool:
+    """_learn_ok() minus the reference-mode gate (the point is to count the other modes), plus
+    the steady-pedal rule the offline tables were fitted with."""
+    if not self._learn_ok(CC, CS, reference_mode_only=False):
+      return False
+    if _finite(CS.out.vEgo) < ADMIT_MIN_SPEED:
+      return False
+    if self._pose_stale != 0 or not abs(self.pitch) < ADMIT_MAX_PITCH:
+      return False
+    window = self._pedal_window
+    if len(window) < ADMIT_WINDOW or min(window) < ADMIT_PEDAL_MIN or max(window) > ADMIT_PEDAL_MAX:
+      return False
+    return bool(float(np.std(window)) < ADMIT_PEDAL_STD)
 
-    err = self.accel_error
-    # Nothing to learn at the rails: the command cannot move further that way.
-    if gas_cmd >= 0.999 and err > 0.0:
-      return
-    if gas_cmd <= 0.001:
-      return
-
-    for i, w in _bp_weights(CS.out.vEgo, PEDAL_GAIN_BP):
-      adjusted = self.pedal_gain[i] * (1.0 + PEDAL_LEARN_RATE * err * w)
-      self.pedal_gain[i] = float(np.clip(adjusted, PEDAL_GAIN_MIN, PEDAL_GAIN_MAX))
-      railed = not (PEDAL_GAIN_MIN + 1e-6 < self.pedal_gain[i] < PEDAL_GAIN_MAX - 1e-6)
-      if not railed:
-        self.pedal_gain_converged[i] = self._track(self.pedal_gain_converged[i], self.pedal_gain[i])
-
-  # --- shared aero -----------------------------------------------------------
+  # --- aero (frozen) ------------------------------------------------------------
 
   def wind_scale(self) -> float:
-    """Learned scale on the aero term. 1.0 when disabled, so the stock wind_brake
-    value is used unchanged."""
-    if not self.enabled:
-      return 1.0
-    return float(np.clip(_finite(self.wind_factor, 1.0), WIND_FACTOR_MIN, WIND_FACTOR_MAX))
+    """The aero scale on wind_brake, which carcontroller.py applies to BOTH the interceptor
+    offset and the brake-side credit (apply_brake -= wind_brake * scale). FROZEN at 1.0 since
+    2026-10 (see "Retired channels"): the learner was a random walk on its 0.7-1.5 range, and
+    under the v2 gas law it would lose its lever on the cruise pedal and rail, moving the
+    brake-on point by up to +-50%. Persisted values were ~0.80, so with the tuner on the
+    brake-on point moves slightly later: about 5 counts less brake at 25 m/s for light requests."""
+    return 1.0
 
   def update_wind(self, CC, CS, wind_brake_ms2: float) -> None:
-    """Symmetric on purpose. MVL ratchets this up by restoring the pre-braking
-    value after any decrease, which drifts monotonically to the clamp even on a
-    zero-mean error and then silently deletes highway braking authority.
-
-    Symmetric in FORM is not enough on this car, though. Replaying the tuner with
-    persistence chained across all 13 engaged drives, wind_factor still ended at
-    the 1.500 clamp on 6 of them (range 0.815-1.500; the 0.7 floor is never
-    reached). The reason is the input, not the update: the accel error here is not
-    zero-mean (-0.34 to -0.47 m/s^2 on gas), so any sign-driven rule drifts one
-    way. Worse, it was drifting against a bias the pedal gain and the pitch
-    feedforward are already chasing -- three learners pulling on one residual.
-    So the aero term is confined to the command region where the other two are
-    silent by construction, which is also the only region where an aero term is
-    actually identifiable.
-    """
-    if not self._learn_ok(CC, CS) or CS.out.vEgo <= 0.0:
-      return
-    # disjoint from the pedal learner (accel_target >= LEARN_MIN_CMD) and the
-    # brake learner (accel_target < -LEARN_MIN_CMD)
-    if abs(self.accel_target) >= LEARN_MIN_CMD:
-      return
-    err = self.accel_error
-    # noise deadband: without it, near-zero error still ratchets one way
-    if abs(err) < WIND_ERR_DEADBAND:
-      return
-    if err == 0.0 or wind_brake_ms2 <= 0.0:
-      return
-    adjust = 1 + wind_brake_ms2 / WIND_LEARN_SPEED
-    self.wind_factor = float(np.clip(self.wind_factor * (adjust if err > 0 else 1.0 / adjust),
-                                     WIND_FACTOR_MIN, WIND_FACTOR_MAX))
-    if WIND_FACTOR_MIN + 1e-6 < self.wind_factor < WIND_FACTOR_MAX - 1e-6:
-      self.wind_factor_converged = self._track(self.wind_factor_converged, self.wind_factor)
+    """Retired (see wind_scale). Kept so carcontroller.py's call needs no upstream edit."""
+    return
 
   # --- brake channel ---------------------------------------------------------
 
@@ -886,14 +861,19 @@ class HondaDynamicTuner:
     watch convergence, or to work out after the fact why a learn went wrong."""
     if not self.enabled or frame % LOG_INTERVAL != 0:
       return
-    v = self.debug_values()
     try:
-      pedal = ",".join(f"{g:.3f}" for g in v["pedal_gain"])
-      pedalc = ",".join(f"{g:.3f}" for g in v["pedal_gain_converged"])
+      v = self.debug_values()
+      # lists in [...] in DRIVE_MODE_SLOTS order (D, ECON, S), so parse_hondadyn.py reads them as
+      # float lists: modesec = engaged moving seconds this drive, modeadm = steady-pedal samples
+      # (50 Hz) this drive, modetot = running total of seconds, as persisted
+      sec = ",".join(f"{v['mode_seconds'][s]:.1f}" for s in DRIVE_MODE_SLOTS)
+      adm = ",".join(f"{v['mode_admitted'][s]:d}" for s in DRIVE_MODE_SLOTS)
+      tot = ",".join(f"{v['mode_seconds_total'][s]:.0f}" for s in DRIVE_MODE_SLOTS)
       carlog.info(
-        f"{LOG_TAG} pedal=[{pedal}] pedalc=[{pedalc}] " +
+        f"{LOG_TAG} gaslaw={v['gas_law']} slot={v['slot']} " +
+        f"modesec=[{sec}] modeadm=[{adm}] modetot=[{tot}] " +
         f"brake={v['brake_gain']:.3f} brakec={v['brake_gain_converged']:.3f} " +
-        f"wind={v['wind_factor']:.3f} pitch={v['pitch']:+.4f} " +
+        f"pitch={v['pitch']:+.4f} " +
         f"settle={self._settle} settles={self._settle_steady} eng={int(v['long_active'])} " +
         f"aref={v['accel_ref']:+.3f} aerr={v['accel_error']:+.3f} " +
         f"stale={v['pose_stale']} werr={v['write_errors']} " +
@@ -905,9 +885,11 @@ class HondaDynamicTuner:
   def debug_values(self) -> dict:
     return {
       "enabled": self.enabled,
-      "pedal_gain": list(self.pedal_gain),
-      "pedal_gain_converged": list(self.pedal_gain_converged),
-      "wind_factor": self.wind_factor,
+      "gas_law": self.gas_law,
+      "slot": self.slot,
+      "mode_seconds": {s: float(self.mode_seconds.get(s, 0.0)) for s in DRIVE_MODE_SLOTS},
+      "mode_admitted": {s: int(self.mode_admitted.get(s, 0)) for s in DRIVE_MODE_SLOTS},
+      "mode_seconds_total": {s: self.mode_seconds_total(s) for s in DRIVE_MODE_SLOTS},
       # BOTH as gains. brake_gain_converged is stored as an OFFSET (the param
       # defaults to 0.0 so the toggle changes nothing until something is learned),
       # but reporting the offset next to a gain made the log unreadable: a settled

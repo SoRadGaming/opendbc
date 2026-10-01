@@ -370,7 +370,12 @@ class TestElesysGasMultiplier(unittest.TestCase):
   with actuatorsOutput.gas never reaching 0.9 on any of the 13 engaged routes -- so nothing
   physical was capping it. The top three breakpoints were raised ~1.25x, one measured step
   rather than the full ratio, because the PI and the pitch feedforward close part of the rest.
-  Previous golden was [0.55, 0.85, 1.10, 1.25, 1.55, 2.20]."""
+  Previous golden was [0.55, 0.85, 1.10, 1.25, 1.55, 2.20].
+
+  2026-10: this is now the v1 law -- what runs with HondaElesysGasLawV2 off -- and inside v2 it
+  only supplies the 0-3 m/s gain and the offset below ~16.9 m/s. v2's slope comes from the
+  measured k table (elesys_gas.py, tested in test_elesys_gas.py), which is NOT monotonic; the
+  monotonic and mid-band tests below are about this curve only."""
   GOLD_MULT_BP = [0., 3., 6., 10., 15., 20.]
   GOLD_MULT_V = [0.55, 0.85, 1.20, 1.55, 1.95, 2.75]
 
@@ -392,6 +397,17 @@ class TestElesysGasMultiplier(unittest.TestCase):
     for v in (6.0, 8.0, 10.0, 12.0):
       old = float(np.interp(v, [0., 10., 15., 20.], [0.5, 1.0, 1.4, 2.1]))
       self.assertGreater(elesys_gas_multiplier(v), old, msg=f'v={v}')
+
+  def test_v2_slope_is_deliberately_not_this_curve(self):
+    # The measured pedal response (k = 6.8 m/s^2 per unit at 6 m/s against 5.65 at 3) means v2
+    # asks for LESS pedal per m/s^2 at 6 m/s than at 3, and less than this curve at 6-20 m/s:
+    # the car over-delivered under it. Do not "fix" v2 to be monotonic like the curve above.
+    from opendbc.sunnypilot.car.honda.elesys_gas import elesys_ff_gm
+    self.assertLess(elesys_ff_gm(6.0), elesys_ff_gm(3.0))
+    for v in (6.0, 10.0, 15.0, 20.0):
+      self.assertLess(elesys_ff_gm(v), elesys_gas_multiplier(v), msg=f'v={v}')
+    for v in (0.0, 1.5, 3.0):
+      self.assertEqual(elesys_ff_gm(v), elesys_gas_multiplier(v), msg=f'v={v}')
 
 
 class TestBrakeCommandUnitsBit(unittest.TestCase):
