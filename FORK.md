@@ -27,7 +27,7 @@ The full merge guide and the per-area documents live in the sunnypilot repo, und
 | fork HEAD | `8bd6e314` (upstream `f95f996f` merged into the fork's `c61cfd9b`), then the review-fix commit. That becomes `sp-master` and sunnypilot's pinned pointer. |
 | upstream commits not in the fork | 0 on 2026-09-27 |
 | fork commits since the fork point | 40 at `8bd6e314` (39 excluding merges). A merge keeps history, so this counts every fork commit since `b9712d20`; use the diff to see what the fork carries. |
-| files changed | 31, plus this file |
+| files changed | 31, plus this file, at `8bd6e314`; 32 since the 2026-10 lateral batch (`torque_data/override.toml`) |
 
 **Branches.** This fork's GitHub default branch is `master` (`fe144714`), not `sp-master`. The submodule clone in the
 Windows checkout (`S:/OP/sp-live/opendbc_repo`) fetches only `master`
@@ -44,7 +44,7 @@ git rev-list --count HEAD..refs/upstream/master                     # 0 on 2026-
 git diff --name-status refs/upstream/master HEAD                    # the 31 files and this one
 MB=$(git merge-base HEAD refs/upstream/master)
 git rev-list --count $MB..refs/upstream/master -- <file>            # conflict risk of one file
-git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 31 markers (18 before the sync)
+git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 36 markers since the 2026-10 lateral batch (31 after the sync, 18 before)
 ```
 
 ## Files by area
@@ -172,7 +172,8 @@ the 2026-09 merge.
   `diff _honda_common.dbc _honda_elesys_base.dbc` is drift from upstream; there was none at `f95f996f`.
 * **Shared** DBC fragments that other Nidec cars also use: `_nidec_common.dbc` (read-only `CMBS_BRAKE`,
   `CMBS_DISABLED`, `AEB_REQ_3`) and `_nidec_scm_group_a.dbc` (read-only `CMBS_BUTTON`), both 0.
-* Tests: `opendbc/car/honda/tests/test_elesys.py`, `opendbc/sunnypilot/car/honda/test_dynamic_tuning.py`,
+* Tests: `opendbc/car/honda/tests/test_elesys.py` (since 2026-10 also the torque prior, offset seed, reported torque,
+  2560 scale and steering delay), `opendbc/sunnypilot/car/honda/test_dynamic_tuning.py`,
   `test_dynamic_tuning_integration.py`.
 
 ## Merging upstream: the short version
@@ -211,7 +212,7 @@ complete steps, checks and on-car verification are in the sunnypilot `docs/fork/
 Run from this directory with `PYTHONPATH=.` (in the sunnypilot venv, which has opendbc's dependencies):
 
 ```bash
-python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 53 tests (52 in test_elesys)
+python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 70 tests (69 in test_elesys)
 python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 942 run, OK (skipped=69)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
 python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 23 tests, including the integration script
