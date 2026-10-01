@@ -119,7 +119,9 @@ the 2026-09 merge.
   * `steerActuatorDelay` 0.18 (0.38 until 2026-10), `steerAtStandstill`. The car's delay is ~0.38 s; both readers of
     the bare value (lagd's `initial_lag` and the LagdToggle-off path) add 0.2, so 0.18 lands them on 0.38, not 0.58;
   * `lateralTuning.torque.latAccelOffset = -0.43`, the seed torqued and the torque controllers start from (the
-    sunnypilot `torqued.py` FORK hunk reads it). `configure_torque_tune()` sets 0.0 for every other car;
+    sunnypilot `torqued.py` FORK hunk reads it, and sunnypilot's `interfaces.py` FORK hunk keeps it when
+    EnforceTorqueControl or NNLC re-runs `configure_torque_tune()`). `configure_torque_tune()` sets 0.0 for every
+    other car;
   * the stand-down safety parameter;
   * `minEnableSpeed` 19 mph, and in `_get_params_sp()` the exemption that keeps it: upstream `4455464a` sets `-1` for
     every gas-interceptor car, `candidate not in HONDA_ELESYS` keeps this one at 19 mph.

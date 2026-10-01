@@ -110,11 +110,13 @@ legend = ["LAT_ACCEL_FACTOR", "MAX_LAT_ACCEL_MEASURED", "FRICTION"]
 # torque 1.0 = 2560 on 0x0E4 = 160 serial counts at board authority 160 (GW_OP_FULL_SCALE 2560,
 # GW_LIN_AUTHORITY 160) - a different steering system and scale from the 2018+ Accord, whose 1.689
 # (via substitute.toml until 2026-10) held torqued at or just above its 1.18 floor on routes ed to 103.
-# Measured: logged raw factor 0.94-1.28 and friction 0.17-0.19 on routes fc/fd/103; openpilot's own
-# TorqueEstimator replayed over nine authority-160 routes learns a raw factor of 0.76 (town, ~60 km/h) to 1.44
-# (highway) and friction 0.16-0.23. FACTOR_SANITY 0.3 around 1.1 gives 0.77-1.43, that span to within
-# 0.01 (HONDA_ACCORD's window was 1.18-2.20); friction 0.18 gives 0.09-0.27. Live learning stays on:
-# this is the prior, not a pin.
+# Measured: logged raw factor 0.94-1.28 and friction 0.17-0.19 on routes fc/fd/103. openpilot's own
+# TorqueEstimator replayed over nine authority-160 routes sees a raw factor of 0.67 (town, ~60 km/h) to
+# 1.47 (highway), settles at a filtered 0.79-1.35, and learns friction 0.16-0.23. FACTOR_SANITY 0.3
+# around 1.1 gives 0.77-1.43 (HONDA_ACCORD's window was 1.18-2.20): it holds every filtered value, but
+# its floor clips up to ~24% of a town route's raw samples and its ceiling ~1% of a highway route's.
+# No +-30% window holds 0.67-1.47 (a ratio of 2.2 against 1.86), so 1.1 is the compromise. Friction
+# 0.18 gives 0.09-0.27. Live learning stays on: this is the prior, not a pin.
 # ANY change of the board's GW_LIN_AUTHORITY or full scale changes what torque 1.0 means, so it must
 # change this prior too: the prior is part of torqued's restore key, and changing it is the only thing
 # that discards points learned at the old scale. The offset seed (-0.43) is in honda/interface.py.

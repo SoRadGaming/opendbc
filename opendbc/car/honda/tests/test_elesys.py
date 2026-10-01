@@ -592,16 +592,19 @@ class TestElesysTorquePrior(unittest.TestCase):
     self.assertTrue('HONDA_ACCORD_9G_AU' in self._toml('override.toml'))
     self.assertNotIn('HONDA_ACCORD_9G_AU', self._toml('params.toml'))
 
-  def test_learnable_window_covers_the_measured_values(self):
-    # torqued clips the factor to (1 +- FACTOR_SANITY 0.3) * prior and friction to (1 +- 0.5) * prior.
-    # Logged raw factor on fc/fd/103 (current firmware) was 0.944-1.281, the TorqueEstimator replay
-    # 0.76-1.44 end to end; friction learned 0.16-0.23.
+  def test_learnable_window_holds_the_filtered_values(self):
+    # torqued clips the raw factor to (1 +- FACTOR_SANITY 0.3) * prior and friction to (1 +- 0.5) * prior.
+    # Checked here: the logged raw factor on fc/fd/103 (current firmware), 0.944-1.281, and the FILTERED
+    # factor of the real TorqueEstimator replayed over nine authority-160 routes, 0.793 (town first) to
+    # 1.347 (highway first); friction learned 0.16-0.23.
+    # Deliberately NOT checked: that replay's raw factor spans 0.667-1.471, which no +-30% window holds
+    # (2.2 against 1.86). The 0.77 floor clips up to ~24% of a town route's raw samples, 1.43 ~1%.
     from opendbc.car.interfaces import get_torque_params
     p = get_torque_params()['HONDA_ACCORD_9G_AU']
     lo, hi = 0.7 * p['LAT_ACCEL_FACTOR'], 1.3 * p['LAT_ACCEL_FACTOR']
     self.assertAlmostEqual(lo, 0.77)
     self.assertAlmostEqual(hi, 1.43)
-    for factor in (0.944, 1.0, 1.09, 1.19, 1.281, 1.354):
+    for factor in (0.793, 0.944, 1.0, 1.09, 1.19, 1.281, 1.347):
       self.assertTrue(lo <= factor <= hi, msg=f"{factor} outside {lo}-{hi}")
     for friction in (0.14, 0.16, 0.18, 0.193, 0.23):
       self.assertTrue(0.5 * p['FRICTION'] <= friction <= 1.5 * p['FRICTION'], msg=f"{friction}")
@@ -828,14 +831,20 @@ class TestElesysSteerDelay(unittest.TestCase):
     self.assertAlmostEqual(CP.steerActuatorDelay, 0.18, places=6)
     self.assertAlmostEqual(CP.steerActuatorDelay + self.LAGD_FALLBACK_ADD, 0.38, places=6)
 
-  def test_other_hondas_keep_their_delay(self):
-    # upstream's 0.1 (base) or 0.15 (torque-tuned branches); only the Elesys block sets anything else
-    from opendbc.car.honda.interface import CarInterface
+  def test_only_the_elesys_block_moves_the_delay(self):
+    # With the Elesys gate emptied every car gets upstream's chain. Against that: HONDA_ELESYS differs, and every
+    # other Honda is identical - whatever upstream's values are after a merge, not a re-typed 0.1 / 0.15.
+    from unittest.mock import patch
+    import opendbc.car.honda.interface as honda_interface
+    get = honda_interface.CarInterface.get_non_essential_params
+    with patch.object(honda_interface, 'HONDA_ELESYS', frozenset()):
+      generic = {car: get(car).steerActuatorDelay for car in CAR}
     for car in CAR:
+      delay = get(car).steerActuatorDelay
       if car in HONDA_ELESYS:
-        continue
-      delay = CarInterface.get_non_essential_params(car).steerActuatorDelay
-      self.assertTrue(abs(delay - 0.1) < 1e-6 or abs(delay - 0.15) < 1e-6, msg=f"{car}: {delay}")
+        self.assertNotAlmostEqual(delay, generic[car], places=6, msg=str(car))
+      else:
+        self.assertEqual(delay, generic[car], msg=str(car))
 
 
 class TestElesysTorqueScale(unittest.TestCase):
@@ -867,12 +876,30 @@ class TestElesysTorqueScale(unittest.TestCase):
       self.assertEqual(d[2] & 0x0F, 0)
       self.assertEqual(d[2] & 0x80, 0x80)   # STEER_TORQUE_REQUEST
 
-  def test_brake_release_step_in_serial_counts(self):
-    # the carcontroller comment: 1/BRAKE_RELEASE_FRAMES of full scale is 128 CAN counts = 8 serial counts
-    # at authority 160, inside the board's 40-count step toward zero
+  GW_LIN_AUTHORITY = 160   # the board's serial counts at openpilot's full scale (this class's docstring)
+
+  def test_brake_release_steps_on_the_wire(self):
+    # the carcontroller comment: under the brake the command is withdrawn by STEER_MAX / BRAKE_RELEASE_FRAMES on
+    # 0x0E4 per frame (128 of 2560), which at the board's authority is 8 serial counts per frame - under the 10
+    # SP-PROTOCOL-V3 allows and the board's own 40-count step toward zero - and reaches 0 in BRAKE_RELEASE_FRAMES
     from opendbc.car.honda.carcontroller import BRAKE_RELEASE_FRAMES
-    self.assertEqual(2560 // BRAKE_RELEASE_FRAMES, 128)
-    self.assertEqual(160 // BRAKE_RELEASE_FRAMES, 8)
+    from opendbc.car.honda.values import CarControllerParams
+    cc_obj = _controller(ELESYS_CAR)
+    steer_max = CarControllerParams(cc_obj.CP).STEER_MAX
+    cs = _FakeCS()
+    wire = []
+    for i in range(60 + BRAKE_RELEASE_FRAMES + 5):
+      cs.out.brakePressed = i >= 60
+      _, sends = cc_obj.update(_cc(1.0), structs_CC_SP(), cs, i * int(1e7))
+      d = next(d for a, d, _ in map(_as_tuple, sends) if a == 0xE4)
+      wire.append(abs(int.from_bytes(d[0:2], "big", signed=True)))
+    release = wire[59:]                     # the last full-scale frame, then the brake
+    self.assertEqual(release[0], steer_max)
+    self.assertEqual(release[BRAKE_RELEASE_FRAMES], 0)
+    self.assertEqual(release[BRAKE_RELEASE_FRAMES - 1], steer_max // BRAKE_RELEASE_FRAMES)
+    steps = [a - b for a, b in zip(release, release[1:], strict=False)][:BRAKE_RELEASE_FRAMES]
+    self.assertTrue(all(abs(s - steer_max / BRAKE_RELEASE_FRAMES) <= 1 for s in steps), msg=f"{steps}")
+    self.assertLessEqual(max(steps) * self.GW_LIN_AUTHORITY / steer_max, 8.1)
 
 
 if __name__ == "__main__":

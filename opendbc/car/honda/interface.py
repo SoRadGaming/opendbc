@@ -281,7 +281,8 @@ class CarInterface(CarInterfaceBase):
       # controllers start from it too. Without the seed the feedforward loses ~0.43 m/s^2 (~60
       # serial counts) until torqued is valid again (23-58 min of driving in the replays), more
       # than the 0.25 the integrator may carry into a takeover (LINBUS_I_CARRY_MAX).
-      # Not applied when sunnypilot re-runs configure_torque_tune() (EnforceTorqueControl or NNLC on).
+      # sunnypilot's re-run of configure_torque_tune() (EnforceTorqueControl or NNLC on) would reset
+      # it to 0.0; its interfaces.py keeps it (FORK hunk there, 2026-10).
       if ret.lateralTuning.which() == 'torque':
         ret.lateralTuning.torque.latAccelOffset = -0.43
 
