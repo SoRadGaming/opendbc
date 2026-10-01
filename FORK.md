@@ -27,7 +27,7 @@ The full merge guide and the per-area documents live in the sunnypilot repo, und
 | fork HEAD | `8bd6e314` (upstream `f95f996f` merged into the fork's `c61cfd9b`), then the review-fix commit. That becomes `sp-master` and sunnypilot's pinned pointer. |
 | upstream commits not in the fork | 0 on 2026-09-27 |
 | fork commits since the fork point | 40 at `8bd6e314` (39 excluding merges). A merge keeps history, so this counts every fork commit since `b9712d20`; use the diff to see what the fork carries. |
-| files changed | 31, plus this file (33 since the 2026-10 gas law: `elesys_gas.py` and `test_elesys_gas.py` are new) |
+| files changed | 31, plus this file (35 since the 2026-10 longitudinal work: `elesys_gas.py`, `test_elesys_gas.py`, `elesys_stop.py` and `test_elesys_stop.py` are new) |
 
 **Branches.** This fork's GitHub default branch is `master` (`fe144714`), not `sp-master`. The submodule clone in the
 Windows checkout (`S:/OP/sp-live/opendbc_repo`) fetches only `master`
@@ -44,7 +44,7 @@ git rev-list --count HEAD..refs/upstream/master                     # 0 on 2026-
 git diff --name-status refs/upstream/master HEAD                    # the 31 files and this one
 MB=$(git merge-base HEAD refs/upstream/master)
 git rev-list --count $MB..refs/upstream/master -- <file>            # conflict risk of one file
-git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 37 markers since the 2026-10 gas law (31 after the sync, 18 before it)
+git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 44 since the 2026-10 soft final stop (37 after the gas law, 31 after the sync, 18 before it)
 ```
 
 ## Files by area
@@ -122,6 +122,14 @@ the 2026-09 merge.
   * dynamic-tuner hooks (`hill_accel`/`adjust_accel`, `brake_gain`, `wind_scale` (a constant 1.0 since 2026-10)) and
     the 32-count brake release.
     These are gated by the tuner (toggle on, and Nidec with openpilot longitudinal), not by `HONDA_ELESYS`;
+  * the soft final stop (2026-10): `self.soft_stop = ElesysSoftStop()` only for `HONDA_ELESYS` with the tuner on, and
+    `apply_brake = self.soft_stop.update(...)` between the learned brake gain and the 32-count release, all
+    `FORK(HONDA_ACCORD_9G_AU)`. Every other car, and this one with the toggle off, never builds it;
+  * a NaN-`vEgo` guard in the Nidec brake block (2026-10): a non-finite `vEgo` made the `int()` raise, which means no
+    0x1FA and a `BRAKE_ERROR` a second later; it now falls back to the brake without the aero credit. Finite values are
+    untouched;
+  * a `FORK(HONDA_ACCORD_9G_AU)` decision comment above `pcm_override = True`: `CRUISE_OVERRIDE` stays the constant 1
+    (sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` 7.7). Nothing on the wire changed;
   * `SCM_BUTTONS` re-sent on `CAN.camera` every 4th frame, only when `openpilotLongitudinalControl`;
   * `pcm_accel` computed from `adjust_accel` (pitch feed-forward, 0 with the tuner off), and a `FORK:` comment
     explaining why there is no PCM crossfade (history in sunnypilot `CHANGELOG-elesys.md` section 14). No upstream code
@@ -144,8 +152,15 @@ the 2026-09 merge.
 * `opendbc/sunnypilot/car/honda/dynamic_tuning.py` (0): `HondaDynamicTuner`. Its params are `HondaDynamicTuningEnabled`,
   `HondaDynBrakeGain` and the per-drive-mode totals `HondaDynModeSecD`/`ECON`/`S`. The pedal-gain and aero learners
   (`HondaDynPedalGain0`–`5`, `HondaDynWindFactor`) were retired in 2026-10: `wind_scale()` is 1.0, `update_wind()` a
-  no-op, and `observe_pedal()` only counts per-mode data for the `hondadyn` line. `_is_applicable()` limits it to
+  no-op, and `observe_pedal()` only counts per-mode data for the `hondadyn` line. `filtered_pitch()` (2026-10) hands
+  the filtered pitch to the soft final stop. `_is_applicable()` limits it to
   `openpilotLongitudinalControl and carFingerprint not in HONDA_BOSCH`.
+* `opendbc/sunnypilot/car/honda/elesys_stop.py` (new, 2026-10): the soft final stop. `soft_stop_ceiling()` holds the
+  brake at `max(125 + ~17/deg downhill, the command at entry)` while the car still rolls in the stopping state, and
+  rises at 250 counts/s 0.55 s after the wheels read zero (or on the wheels turning again, weak deceleration after
+  0.3 s at the ceiling, or 1.9 s of rolling), so the hold is today's 189. It only lowers the command. `ElesysSoftStop`
+  wraps it for `CarController`: reads `CC`/`CS` and `HondaDynamicTuner.filtered_pitch()`, logs one `hondastop` line per
+  stop, never raises. Design and numbers: sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` 7.8.
 * `opendbc/sunnypilot/car/honda/elesys_gas.py` (new, 2026-10): this car's gas law. v1 is the previous law
   (`ELESYS_GAS_BP`/`ELESYS_GAS_V`, `elesys_gas_multiplier()`); v2 (`ELESYS_FF_*`, `elesys_pedal_v2()`) uses the measured
   pedal response, keeps v1 below 3 m/s and v1's offset below ~16.9 m/s; `HondaElesysGasLawV2` (read once, default on)
@@ -168,7 +183,7 @@ the 2026-09 merge.
 * **Shared** DBC fragments that other Nidec cars also use: `_nidec_common.dbc` (read-only `CMBS_BRAKE`,
   `CMBS_DISABLED`, `AEB_REQ_3`) and `_nidec_scm_group_a.dbc` (read-only `CMBS_BUTTON`), both 0.
 * Tests: `opendbc/car/honda/tests/test_elesys.py`, `opendbc/sunnypilot/car/honda/test_dynamic_tuning.py`,
-  `test_dynamic_tuning_integration.py`, `test_elesys_gas.py`.
+  `test_dynamic_tuning_integration.py` (C: sections 1-6, 9, 16-19 and 17b), `test_elesys_gas.py`, `test_elesys_stop.py`.
 
 ## Merging upstream: the short version
 
@@ -208,12 +223,13 @@ Run from this directory with `PYTHONPATH=.` (in the sunnypilot venv, which has o
 ```bash
 python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 56 tests (55 in test_elesys)
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                            # 31 tests: the gas law
+python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 25 tests: the soft final stop
 python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 942 run, OK (skipped=69)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
-python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 54 tests, including the integration script
+python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 79 tests, including the integration script
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning.py
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning_integration.py                      # §15 SKIPs without openpilot on PYTHONPATH
-python -m unittest discover                                                                 # 9493 run, OK (skipped=1268) after the sync
+python -m unittest discover                                                                 # 9552 run, OK (skipped=1268) with the 2026-10 work
 ./test.sh                                                                                   # uv lock check, then ruff, ty, codespell, cpplint, MISRA, unittest-parallel
 ```
 
