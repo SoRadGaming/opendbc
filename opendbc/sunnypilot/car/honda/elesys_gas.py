@@ -353,4 +353,8 @@ class ElesysGasLaw:
         pedal = elesys_pedal_v1(CS.out.vEgo, gas, brake, wind_brake) if CC.longActive else 0.0
       except Exception:
         pedal = 0.0
-    return pedal if (isinstance(pedal, float) and math.isfinite(pedal)) else 0.0
+    if not (isinstance(pedal, float) and math.isfinite(pedal)):
+      return 0.0
+    # an identity on every value either law produces (both are clipped already); it only catches
+    # a crossfade blend whose weights summed to a hair over 1
+    return min(max(pedal, 0.0), 1.0)
