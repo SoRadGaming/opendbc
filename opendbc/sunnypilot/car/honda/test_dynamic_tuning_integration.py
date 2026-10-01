@@ -620,8 +620,8 @@ check("brake: the command shrinks every frame", all(abs(b) <= abs(a) + 1 for a, 
 check("brake: zero within 20 frames (0.20 s)", ramp[19] == 0, f"frame 20 = {ramp[19]}, ramp={ramp[:21]}")
 # The ceiling walks down 1/BRAKE_RELEASE_FRAMES of full scale per frame, so the withdrawal is
 # an exact linear ramp: 2560/20 = 128 CAN counts, which the board scales by authority/2560 to
-# 4 serial counts at authority 80 -- under the stock camera's p99 of 5 and the 10 that
-# SP-PROTOCOL-V3 section 3 allows, and far under the 16 the stock camera has ever stepped.
+# 8 serial counts at authority 160 -- under the 10 that SP-PROTOCOL-V3 section 3 allows, under
+# the 16 the stock camera has ever stepped, and far under the board's own 40 toward zero.
 check("brake: the withdrawal is a linear ramp of 128 CAN counts per frame (+-1 for rounding)",
       max(steps) <= 2560 // BRAKE_RELEASE_FRAMES + 1, f"max step {max(steps)}, steps={steps[:6]}")
 check("brake: it stays at zero while the brake is held", steer_torque(cc12, cs12, 400) == 0)

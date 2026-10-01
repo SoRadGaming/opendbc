@@ -243,18 +243,20 @@ class CarInterface(CarInterfaceBase):
       # FORK(HONDA_ELESYS): the steering request does not go out on CAN to a camera-fed EPS.
       # It goes to the gateway board, which retimes it onto the car's 9600-baud LKAS serial
       # link at the camera's own cadence, and the EPS then runs its own torque loop on it.
-      # That whole chain is measured, not guessed: openpilot's own delay learner (liveDelay)
-      # converged to 0.383 s on route 000000d3 and 0.377 s on 000000d4, both "estimated",
-      # calPerc 100, 5 valid blocks, estimate std 0.003 s. The 0.15 s the Honda default
-      # leaves here is the camera-CAN number and is 2.5x short.
+      # That whole chain is measured, not guessed: openpilot's own delay learner (lateralDelay)
+      # converged to 0.383 s on route 000000d3 and 0.377 s on 000000d4, and to 0.342 s (12
+      # blocks) by route fd; while it was unestimated its running estimate sat at 0.36-0.39.
       #
-      # lagd normally overrides this frame by frame, so on a warm device this line changes
-      # nothing. It is load-bearing in the two places lagd is not. Before the learner has
-      # blocks (and with no usable cache) lagd publishes this PLUS 0.2 s, i.e. 0.58 s, not
-      # 0.38; upstream's lagd VERSION 1 also discards any cache written before it, and only
-      # learns above 50 mph. And with the LagdToggle off, LagdToggle.update() returns
-      # CP.steerActuatorDelay + the user's offset verbatim.
-      ret.steerActuatorDelay = 0.38
+      # So the car's delay is ~0.38 s, and this line is 0.18 because nothing reads it bare:
+      # lagd normally overrides it frame by frame, and both places it does not add 0.2 s.
+      # Before the learner has blocks (no usable cache) lagd publishes initial_lag =
+      # steerActuatorDelay + 0.2; with the LagdToggle off, LagdToggle.update() returns
+      # steerActuatorDelay + LagdToggleDelay (default 0.2). With 0.38 here both fallbacks were
+      # 0.58, and lagd sat at 0.580 "unestimated" from route d7 to partway through fd (about
+      # 5 h: it learns only above 50 mph). 0.18 lands both on the measured 0.38. lagd's cache
+      # key is fingerprint + VERSION, so this does not discard a learned value. The only other
+      # readers are the UI's delay display and the torque extension's first-frame jerk timing.
+      ret.steerActuatorDelay = 0.18
 
       # FORK(HONDA_ELESYS): keep lateral alive at a stop so the cluster keeps its
       # lane graphic, which is what the stock camera does. controlsd computes
@@ -269,6 +271,20 @@ class CarInterface(CarInterfaceBase):
       # inhibit, target is zero by construction, and 0x704 reports STANDSTILL.
       # This only keeps openpilot's REQUEST alive so the graphic can follow it.
       ret.steerAtStandstill = True
+
+      # FORK(HONDA_ELESYS): seed the torque controller's lateral-accel offset with the value this
+      # car learns, instead of configure_torque_tune()'s 0.0. On routes f2/fc/fd/103 the logged
+      # feedforward is exactly desired - roll*g - offset, and torqued's offset sits at -0.42 to -0.50
+      # (replay: -0.39 to -0.47): it cancels about 0.4 m/s^2 of road crossfall in the device roll.
+      # torqued starts its offset from this value (FORK hunk in torqued.py) whenever it has no valid
+      # cache - which the HONDA_ACCORD_9G_AU prior in override.toml forces once - and the torque
+      # controllers start from it too. Without the seed the feedforward loses ~0.43 m/s^2 (~60
+      # serial counts) until torqued is valid again (23-58 min of driving in the replays), more
+      # than the 0.25 the integrator may carry into a takeover (LINBUS_I_CARRY_MAX).
+      # sunnypilot's re-run of configure_torque_tune() (EnforceTorqueControl or NNLC on) would reset
+      # it to 0.0; its interfaces.py keeps it (FORK hunk there, 2026-10).
+      if ret.lateralTuning.which() == 'torque':
+        ret.lateralTuning.torque.latAccelOffset = -0.43
 
     if candidate == CAR.ACURA_RDX_3G_MMR:
       CarControllerParams.BOSCH_GAS_LOOKUP_V = [0, 2000] # alpha longitudinal pedal tuning

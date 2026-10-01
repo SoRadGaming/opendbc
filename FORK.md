@@ -27,7 +27,7 @@ The full merge guide and the per-area documents live in the sunnypilot repo, und
 | fork HEAD | `8bd6e314` (upstream `f95f996f` merged into the fork's `c61cfd9b`), then the review-fix commit. That becomes `sp-master` and sunnypilot's pinned pointer. |
 | upstream commits not in the fork | 0 on 2026-09-27 |
 | fork commits since the fork point | 40 at `8bd6e314` (39 excluding merges). A merge keeps history, so this counts every fork commit since `b9712d20`; use the diff to see what the fork carries. |
-| files changed | 31, plus this file (35 since the 2026-10 longitudinal work: `elesys_gas.py`, `test_elesys_gas.py`, `elesys_stop.py` and `test_elesys_stop.py` are new) |
+| files changed | 31, plus this file (36 since the 2026-10 batch: `elesys_gas.py`, `test_elesys_gas.py`, `elesys_stop.py`, `test_elesys_stop.py` and `torque_data/override.toml` are new to the list) |
 
 **Branches.** This fork's GitHub default branch is `master` (`fe144714`), not `sp-master`. The submodule clone in the
 Windows checkout (`S:/OP/sp-live/opendbc_repo`) fetches only `master`
@@ -44,7 +44,7 @@ git rev-list --count HEAD..refs/upstream/master                     # 0 on 2026-
 git diff --name-status refs/upstream/master HEAD                    # the 31 files and this one
 MB=$(git merge-base HEAD refs/upstream/master)
 git rev-list --count $MB..refs/upstream/master -- <file>            # conflict risk of one file
-git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 44 since the 2026-10 soft final stop (37 after the gas law, 31 after the sync, 18 before it)
+git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 49 since the 2026-10 batch (31 after the sync, 18 before it)
 ```
 
 ## Files by area
@@ -71,6 +71,11 @@ the 2026-09 merge.
 * **`opendbc/car/honda/carcontroller.py`** (0):
   * `BRAKE_RELEASE_FRAMES` / `brake_release_scale()`, the brake-release ceiling;
   * `serial_gateway` LDW bits on `0x0E4`;
+  * the reported torque (2026-10): `linbus_gateway_actuating(CS)`, and after `new_actuators.torque = self.last_torque`
+    a `FORK(HONDA_ELESYS)` hunk that reports `0.0` while `CS.out_sp.linbusGateway.actuating` is False. torqued, the
+    `steer_limited_by_safety` check in controlsd and the torque bar read it; `last_torque`, the rate limiter,
+    `torqueOutputCan` and `0x0E4` are untouched. A missing or odd `out_sp` answers "actuating", i.e. the old report,
+    so `update()` cannot raise on it;
   * `SP_HUD_STATUS` sent on bus 0 with `lat_ready = CC_SP.mads.enabled or CC.latActive` and `op_state`;
   * `LKAS_HUD` is not sent. The board's Stage 10 image owns `0x33D` on bus 0 (board `df42a0d`), and openpilot reads `LKAS_PROBLEM` back from it.
 * **`opendbc/car/honda/hondacan.py`** (0): `create_steering_control(..., serial_gateway, ldw_left, ldw_right)`,
@@ -111,7 +116,12 @@ the 2026-09 merge.
   * `longitudinalActuatorDelay` 0.6, `stopAccel` -0.8. **No `vEgoStopping`**: upstream deprecated it (assigning it
     raises), and the car's 0.8 m/s stopping speed now lives in sunnypilot's
     `openpilot/sunnypilot/selfdrive/controls/lib/stopping_tune.py`;
-  * `steerActuatorDelay` 0.38, `steerAtStandstill`;
+  * `steerActuatorDelay` 0.18 (0.38 until 2026-10), `steerAtStandstill`. The car's delay is ~0.38 s; both readers of
+    the bare value (lagd's `initial_lag` and the LagdToggle-off path) add 0.2, so 0.18 lands them on 0.38, not 0.58;
+  * `lateralTuning.torque.latAccelOffset = -0.43`, the seed torqued and the torque controllers start from (the
+    sunnypilot `torqued.py` FORK hunk reads it, and sunnypilot's `interfaces.py` FORK hunk keeps it when
+    EnforceTorqueControl or NNLC re-runs `configure_torque_tune()`). `configure_torque_tune()` sets 0.0 for every
+    other car;
   * the stand-down safety parameter;
   * `minEnableSpeed` 19 mph, and in `_get_params_sp()` the exemption that keeps it: upstream `4455464a` sets `-1` for
     every gas-interceptor car, `candidate not in HONDA_ELESYS` keeps this one at 19 mph.
@@ -146,7 +156,13 @@ the 2026-09 merge.
 * `opendbc/car/honda/radar_interface.py` (0): Elesys radar parser and fault states.
 * `opendbc/car/car_helpers.py` (0): the `skip_fw_query` argument on `fingerprint()` and `get_car()`.
 * `opendbc/car/tests/routes.py` (0): test route `15646e8515eda1a7/00000019--dd0700eac9`.
-* `opendbc/car/torque_data/substitute.toml` (0): `HONDA_ACCORD_9G_AU = HONDA_ACCORD`.
+* `opendbc/car/torque_data/override.toml` (0): the car's own torqued prior, `"HONDA_ACCORD_9G_AU" = [1.1, 1.1, 0.18]`
+  (2026-10). Torque 1.0 = 2560 on `0x0E4` = 160 serial counts at board authority 160; **any change of the board's
+  authority or full scale must change this prior too**, because the prior is torqued's cache key.
+* `opendbc/car/torque_data/substitute.toml` (0): a `FORK` comment where `HONDA_ACCORD_9G_AU = HONDA_ACCORD` used to be.
+  The substitute pinned torqued at its 1.18 floor; `test_elesys.py` fails if a merge brings it back. sunnypilot's NNLC
+  model lookup (`nnlc/helpers.py`) also reads this file as a fallback. Without the line it still picks
+  `HONDA_ACCORD.json` (fuzzy, by name similarity), the same model as before; NNLC is off on this car anyway.
 * `opendbc/sunnypilot/car/car_list.json` (0): `"Honda Accord 2013-15"`. Regenerate it with
   `python opendbc/sunnypilot/car/platform_list.py`.
 * `opendbc/sunnypilot/car/honda/dynamic_tuning.py` (0): `HondaDynamicTuner`. Its params are `HondaDynamicTuningEnabled`,
@@ -183,7 +199,8 @@ the 2026-09 merge.
   `diff _honda_common.dbc _honda_elesys_base.dbc` is drift from upstream; there was none at `f95f996f`.
 * **Shared** DBC fragments that other Nidec cars also use: `_nidec_common.dbc` (read-only `CMBS_BRAKE`,
   `CMBS_DISABLED`, `AEB_REQ_3`) and `_nidec_scm_group_a.dbc` (read-only `CMBS_BUTTON`), both 0.
-* Tests: `opendbc/car/honda/tests/test_elesys.py`, `opendbc/sunnypilot/car/honda/test_dynamic_tuning.py`,
+* Tests: `opendbc/car/honda/tests/test_elesys.py` (since 2026-10 also the torque prior, offset seed, reported torque,
+  2560 scale and steering delay), `opendbc/sunnypilot/car/honda/test_dynamic_tuning.py`,
   `test_dynamic_tuning_integration.py` (C: sections 1-6, 9, 16-19 and 17b), `test_elesys_gas.py`, `test_elesys_stop.py`.
 
 ## Merging upstream: the short version
@@ -222,9 +239,9 @@ complete steps, checks and on-car verification are in the sunnypilot `docs/fork/
 Run from this directory with `PYTHONPATH=.` (in the sunnypilot venv, which has opendbc's dependencies):
 
 ```bash
-python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 56 tests (55 in test_elesys)
+python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 73 tests (72 in test_elesys)
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                            # 31 tests: the gas law
-python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 25 tests: the soft final stop
+python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 28 tests: the soft final stop
 python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 942 run, OK (skipped=69)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
 python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 79 tests, including the integration script

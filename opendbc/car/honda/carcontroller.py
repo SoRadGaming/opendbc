@@ -237,6 +237,24 @@ def brake_release_scale(brake_pressed: bool, frames: int) -> tuple[float, int]:
   return 1.0 - frames / BRAKE_RELEASE_FRAMES, frames
 
 
+# FORK(HONDA_ELESYS): is anything following 0x0E4? On this car the EPS takes torque only through the
+# gateway board, and CarStateSP.linbusGateway.actuating (0x704: engaged, not a dry run, and fresh) is
+# the board saying it is putting openpilot's command on the serial line. It already includes the EPS's
+# ack (the board drops ENGAGED 500 ms after a missing ack and at once on an EPS error).
+# Keyed on actuating, not on 0x70B grantValid/epsAck (0x70B is valid only ~87% of the time) and not on
+# the EPS's STEER_CONTROL_ACTIVE (it holds its ack for 0.6-6.7 s after LKAS_ON falls).
+# Used only to choose what is REPORTED; it must never raise inside CarController.update(), so anything
+# missing or odd answers True, which reports exactly what was reported before this existed.
+def linbus_gateway_actuating(CS) -> bool:
+  try:
+    gw = getattr(getattr(CS, "out_sp", None), "linbusGateway", None)
+    if gw is None:
+      return True
+    return bool(getattr(gw, "actuating", True))
+  except Exception:
+    return True
+
+
 class CarController(CarControllerBase, MadsCarController, GasInterceptorCarController, IntelligentCruiseButtonManagementInterface):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
@@ -297,9 +315,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # Applied as a CEILING on the magnitude, not as a gain. A gain would compound with the
     # rate limiter above -- which keeps pulling back toward the full request -- and make the
     # first steps of the withdrawal bigger than the last. A ceiling that walks down linearly
-    # makes the withdrawal linear too: 1/20 of full scale per frame, which at the board's
-    # authority of 80 is 4 serial counts per frame, just under the stock camera's p99 of 5
-    # and well inside the 10 that SP-PROTOCOL-V3 section 3 allows.
+    # makes the withdrawal linear too: 1/20 of full scale per frame (128 of 2560 on 0x0E4),
+    # which at the board's authority of 160 is 8 serial counts per frame - under the 10 that
+    # SP-PROTOCOL-V3 section 3 allows, under the 16 the stock camera has stepped, and well
+    # inside the board's own 40-count limit toward zero (GW_LIN_MAX_STEP_DOWN).
     # It can only ever REDUCE the command: clip(x, -c, c) with c in [0, 1] never grows |x|.
     # Skipped entirely at c == 1.0 so a non-braking frame is bit-identical to before.
     if self.CP.carFingerprint in HONDA_ELESYS:
@@ -554,6 +573,14 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     new_actuators.gas = self.gas
     new_actuators.brake = self.brake
     new_actuators.torque = self.last_torque
+    # FORK(HONDA_ELESYS): report torque only while the board is actuating. carOutput's reported torque
+    # is what torqued fits (a 0 is dropped by its STEER_MIN_THRESHOLD), what controlsd compares to
+    # decide steer_limited_by_safety (freezes the integrator, blocks the saturation alert) and what the
+    # torque bar draws. While the board is not steering nothing follows 0x0E4, so 0.0 is the truth.
+    # Only the report changes: last_torque, the rate limiter, apply_torque, torqueOutputCan and 0x0E4
+    # are untouched, so the wire is bit-identical and the ramp resumes from where it was.
+    if self.CP.carFingerprint in HONDA_ELESYS and not linbus_gateway_actuating(CS):
+      new_actuators.torque = 0.0
     new_actuators.torqueOutputCan = apply_torque
 
     self.dynamic_tuner.persist(self.frame)
