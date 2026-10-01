@@ -427,6 +427,13 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           else:
             pump_on, self.last_pump_ts = brake_pump_hysteresis(apply_brake, self.apply_brake_last, self.last_pump_ts, ts)
 
+          # FORK(HONDA_ACCORD_9G_AU) decision, no change: CRUISE_OVERRIDE (0x1FA bit 20, byte 2 bit 4) stays the constant
+          # 1 upstream has sent on every Nidec since openpilot v0.2. No measured effect on VSA braking or BRAKE_ERROR in
+          # the short post-disengage tails we have with it at 0 (CB 4 for at most 1.74 s, higher commands only in release
+          # ramps of <= 4 frames); every BRAKE_ERROR since June was a ~1 s 0x1FA gap, not this bit. It has NEVER been
+          # tested at 0 during sustained braking, so do not read this as permission to send 0. Panda never reads it.
+          # MVL does use it (`pcm_override = CC.longActive or CS.out.stockAeb`, which ran on this car in June-July 2026);
+          # the stock Elesys radar sets it on 94.8% of its braking frames. See CAR-HONDA-ACCORD-9G-AU.md 7.7.
           pcm_override = True
           can_sends.append(hondacan.create_brake_command(self.packer, self.CAN, apply_brake, pump_on,
                                                          pcm_override, pcm_cancel_cmd, alert_fcw,

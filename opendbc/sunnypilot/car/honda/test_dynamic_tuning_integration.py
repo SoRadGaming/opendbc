@@ -1095,6 +1095,91 @@ for tuning, cbs in nan_runs.items():
         f"{finite} -> {cbs[100:103]}..{cbs[-1]}")
 
 
+# --- 18. CRUISE_OVERRIDE stays 1; brake 0 when longActive drops; one frame at most after a pedal ---
+#
+# 0x1FA byte 2 bit 4 (DBC 20|1), a FORK decision to keep upstream's constant: CAR-HONDA-ACCORD-9G-AU.md
+# 7.7. The VSA latches BRAKE_ERROR ~1.0 s after the last 0x1FA it receives (b5-b8: 1.02-1.07 s), and
+# panda DROPS any nonzero brake once longitudinal is not allowed -- brake pressed, or gas pressed on
+# its previous frame -- so every nonzero BRAKE_COMMAND after a pedal edge is a frame the car never
+# gets (drive 84: a forced minimum brake, dropped for ~1 s, was the whole fault). openpilot sees the
+# pedal a frame late, so ONE such frame is unavoidable; a second would be the start of a hole.
+
+print("\n[18] CRUISE_OVERRIDE is 1 on every BRAKE_COMMAND; brake 0 after a disengage or a pedal")
+
+
+def brake_cmd(dat):
+  return (dat[0] << 2) | (dat[1] >> 6)
+
+
+def frame_bytes(m):
+  return bytes(m[1] if isinstance(m, tuple) else m.dat)
+
+
+for tuning in (True, False):
+  tag = "tuner on" if tuning else "tuner off"
+  cc_obj, *_ = build(tuning=tuning)
+  cs = CS()
+  co, braking, after = [], 0, []
+  script = [(-3.5, True)] * 300 + [(0.0, False)] * 150 + [(0.6, True)] * 200 + [(0.0, False)] * 50
+  for i, (accel, active) in enumerate(script):
+    cs.out.vEgo, cs.out.aEgo = 12.0, accel
+    state = LongCtrlState.pid if active else LongCtrlState.off
+    _, sends = cc_obj.update(make_cc(accel, state, active), CC_SP, cs, i * int(1e7))
+    for m in brake_frames(sends):
+      dat = frame_bytes(m)
+      co.append((dat[2] >> 4) & 1)
+      braking += brake_cmd(dat) > 0
+      if 300 <= i < 450:
+        after.append(brake_cmd(dat))
+  check(f"{tag}: BRAKE_COMMAND sent while braking, cruising and disengaged", len(co) == 350 and braking > 100,
+        f"{len(co)}/{braking}")
+  check(f"{tag}: CRUISE_OVERRIDE is 1 on every BRAKE_COMMAND", all(co), f"{co.count(0)} frames with 0")
+  check(f"{tag}: brake is 0 on the first BRAKE_COMMAND after longActive drops, and stays 0",
+        after[:1] == [0] and not any(after), f"{after[:5]}")
+
+
+def pedal_edge(tuning, pedal, edge, lead_in):
+  """Brake firmly (or sit capped in a soft stop), press `pedal` at frame `edge` with longActive still
+  true (openpilot's one-frame lag), drop longActive the frame after. Returns the commanded brake of
+  every BRAKE_COMMAND from the edge on, and whether a soft-stop ceiling was binding just before it
+  (None where the controller has no soft stop)."""
+  cc_obj, *_ = build(tuning=tuning)
+  cs = CS()
+  soft = getattr(cc_obj, "soft_stop", None)      # the soft final stop (section 19), where it exists
+  out, capped = [], (False if soft is not None else None)
+  for i in range(edge + 100):
+    pressed = i >= edge
+    active = i <= edge
+    if lead_in == "braking" or i < edge - 60:
+      cs.out.vEgo, cs.out.vEgoRaw, cs.out.aEgo = 12.0, 12.0, -2.0
+      cc = make_cc(-3.5 if active else 0.0, LongCtrlState.pid if active else LongCtrlState.off, active)
+    else:                       # soft stop: the last 0.6 s rolling at 0.6 m/s in the stopping state
+      cs.out.vEgo, cs.out.vEgoRaw, cs.out.aEgo = 0.6, 0.6, -0.6
+      cc = make_cc(-0.8 if active else 0.0, LongCtrlState.stopping if active else LongCtrlState.off, active)
+    cs.out.brakePressed = pressed and pedal == "brake"
+    cs.out.gasPressed = pressed and pedal == "gas"
+    _, sends = cc_obj.update(cc, CC_SP, cs, i * int(1e7))
+    if i == edge - 1 and soft is not None and soft.state is not None:
+      st = soft.state
+      capped = st.armed and not st.rising and cc_obj.apply_brake_last == int(st.ceiling)
+    if i >= edge:
+      out += [brake_cmd(frame_bytes(m)) for m in brake_frames(sends)]
+  return out, capped
+
+
+for tuning in (True, False):
+  for lead_in in ("braking", "soft stop"):
+    for pedal in ("brake", "gas"):
+      for edge in (300, 301):       # the edge on a BRAKE_COMMAND frame, and between two
+        cbs, capped = pedal_edge(tuning, pedal, edge, lead_in)
+        nonzero = sum(cb > 0 for cb in cbs)
+        label = f"tuner {'on' if tuning else 'off'}, {lead_in}, {pedal} pressed at frame {edge}"
+        check(f"{label}: at most one nonzero BRAKE_COMMAND after the edge, then 0",
+              nonzero <= 1 and cbs[nonzero:] == [0] * (len(cbs) - nonzero) and len(cbs) >= 49, f"{cbs[:4]}")
+        if lead_in == "soft stop" and capped is not None:
+          check(f"  (and the soft-stop ceiling was binding when the {pedal} came down)", capped)
+
+
 class TestDynamicTuningIntegration(unittest.TestCase):
   """The checks above run when the module loads. This is what lets unittest discovery (lefthook's
   unittest-parallel) report them as a test; a sys.exit(1) at import only showed up as a module
