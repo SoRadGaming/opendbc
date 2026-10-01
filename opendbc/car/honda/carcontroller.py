@@ -11,6 +11,7 @@ from opendbc.sunnypilot.car.honda.mads import MadsCarController
 from opendbc.sunnypilot.car.honda.gas_interceptor import GasInterceptorCarController
 from opendbc.sunnypilot.car.honda.icbm import IntelligentCruiseButtonManagementInterface
 from opendbc.sunnypilot.car.honda.dynamic_tuning import HondaDynamicTuner
+from opendbc.sunnypilot.car.honda.elesys_stop import ElesysSoftStop  # FORK(HONDA_ACCORD_9G_AU): soft final stop
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -248,6 +249,9 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.tja_control = bool(CP.flags & HondaFlags.BOSCH_TJA_CONTROL)
     # FORK: self-learning longitudinal tuning. Inert unless HondaDynamicTuningEnabled is set.
     self.dynamic_tuner = HondaDynamicTuner(CP, CP_SP)
+    # FORK(HONDA_ACCORD_9G_AU): the soft final stop (elesys_stop.py), on the tuner's toggle like the stopping
+    # debounce and the 32-count release limiter. Never built on another car or with the toggle off.
+    self.soft_stop = ElesysSoftStop() if (CP.carFingerprint in HONDA_ELESYS and self.dynamic_tuner.enabled) else None
 
     self.braking = False
     self.brake_steady = 0.
@@ -415,6 +419,12 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           brake_gain = self.dynamic_tuner.brake_gain(CC, CS, float(apply_brake))
           apply_brake = int(np.clip(apply_brake * brake_gain * self.params.NIDEC_BRAKE_MAX,
                                     0, self.params.NIDEC_BRAKE_MAX - 1))
+          # FORK(HONDA_ACCORD_9G_AU): soft final stop. A ceiling on the brake while the car is still rolling in the
+          # stopping state, so longcontrol's ramp does not reach the full standstill hold (189) before the wheels
+          # have stopped; it rises to the hold 0.55 s after they read zero (elesys_stop.py). It can only LOWER the
+          # command, and sits before the release limiter so that still smooths any release.
+          if self.soft_stop is not None:
+            apply_brake = self.soft_stop.update(CC, CS, apply_brake, self.dynamic_tuner)
           # FORK: limit brake release to 32 counts/frame to match factory -- this is what stops
           # the lurch as it lets go at a stop. Applied before the pump hysteresis so the ELESYS
           # anchor tracks exactly what goes on the wire. Bypassed on disengage or driver

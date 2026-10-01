@@ -1180,6 +1180,210 @@ for tuning in (True, False):
           check(f"  (and the soft-stop ceiling was binding when the {pedal} came down)", capped)
 
 
+# --- 19. the soft final stop (elesys_stop.py) through the real CarController ------------------
+#
+# test_elesys_stop.py pins the ceiling itself. This checks the seam: where it sits in the brake block,
+# that it only ever lowers what the reference controller sends, that the hold after it is today's byte
+# for byte, the gate (HONDA_ELESYS with the tuner on, nothing else), that the learners never see it,
+# and that nothing it reads can make update() raise.
+
+print("\n[19] soft final stop through CarController")
+from opendbc.car.honda import carcontroller as ccmod
+from opendbc.car.honda.values import HONDA_BOSCH, HONDA_ELESYS
+from opendbc.sunnypilot.car.honda import elesys_stop as es
+
+
+def stop_drive(cc_obj, pitch=0.0, hold_s=4.0, mutate=None, orientation=None):
+  """An open-loop stop: PID braking from 3 m/s at 0.6 m/s^2, the stopping state from 0.62 m/s with
+  longcontrol's ramp toward stopAccel (-0.8 at 0.8 m/s^3), the wheels (XMISSION_SPEED) reading zero
+  below 0.3 m/s, the car stopped 0.5 s later, then the hold. Returns one row per BRAKE_COMMAND."""
+  cs = CS()
+  v, state, accel, ramp = 3.0, LongCtrlState.pid, -0.6, -0.14
+  rows = []
+  for i in range(int((3.0 / 0.6 + hold_s) / 0.01)):
+    if state == LongCtrlState.pid and v <= 0.62:
+      state = LongCtrlState.stopping
+    if state == LongCtrlState.stopping:
+      ramp = max(-0.8, ramp - 0.8 * 0.01)
+      accel = ramp
+    v = max(0.0, v - 0.6 * 0.01)
+    v_raw = v if v >= 0.3 else 0.0
+    cs.out.vEgo, cs.out.vEgoRaw, cs.out.aEgo = v, v_raw, (-0.6 if v > 0.0 else 0.0)
+    cs.out.standstill = v_raw == 0.0
+    cc_b = structs.CarControl.new_message()
+    cc_b.enabled = cc_b.longActive = True
+    cc_b.orientationNED = [0.0, pitch, 0.0] if orientation is None else orientation
+    cc_b.actuators.accel = accel
+    cc_b.actuators.longControlState = state
+    cc_b.hudControl.speedVisible = True
+    cc_b.hudControl.setSpeed = 30.0
+    if mutate is not None:
+      mutate(i, cs, cc_b)
+    _, sends = cc_obj.update(cc_b.as_reader(), CC_SP, cs, i * int(1e7))
+    for m in brake_frames(sends):
+      dat = frame_bytes(m)
+      rows.append({"i": i, "v": v, "wz": v_raw == 0.0, "stopping": state == LongCtrlState.stopping,
+                   "cb": brake_cmd(dat), "dat": dat, "gas": cc_obj.gas})
+  return rows
+
+
+def build_ref(**kw):
+  cc_obj, *_ = build(**kw)
+  cc_obj.soft_stop = None       # the controller as it was before the soft stop
+  return cc_obj
+
+
+soft = build()[0]
+check("HONDA_ELESYS with the tuner on builds the soft stop", isinstance(soft.soft_stop, es.ElesysSoftStop))
+with mock.patch.object(es.carlog, "info") as info:
+  rows_soft = stop_drive(soft)
+  stop_lines = [c.args[0] for c in info.call_args_list if str(c.args[0]).startswith(es.LOG_TAG)]
+rows_ref = stop_drive(build_ref())
+check("both drives send the same BRAKE_COMMAND frames", [r["i"] for r in rows_soft] == [r["i"] for r in rows_ref])
+check("it only ever lowers the brake the reference controller sends",
+      all(s["cb"] <= r["cb"] for s, r in zip(rows_soft, rows_ref, strict=True)))
+wz = next(k for k, r in enumerate(rows_soft) if r["stopping"] and r["wz"])
+entry = next(k for k, r in enumerate(rows_soft) if r["stopping"])
+print(f"        entry cb {rows_ref[entry]['cb']}; at wheel-zero: reference {rows_ref[wz]['cb']}, " +
+      f"soft {rows_soft[wz]['cb']}; hold {rows_ref[-1]['cb']}")
+check("the reference ramp is well past the cap when the wheels read zero", rows_ref[wz]["cb"] >= 150, f"{rows_ref[wz]['cb']}")
+check("rolling in the stopping state, the soft stop holds the cap",
+      max(r["cb"] for r in rows_soft[entry:wz + 1]) == int(es.SOFT_STOP_ROLL_CB), f"{[r['cb'] for r in rows_soft[entry:wz + 1]]}")
+first_up = next(k for k in range(wz, len(rows_soft)) if rows_soft[k]["cb"] > int(es.SOFT_STOP_ROLL_CB))
+check("and keeps it for >= 0.5 s after the wheels read zero",
+      (rows_soft[first_up]["i"] - rows_soft[wz]["i"]) * 0.01 >= 0.5, f"{(rows_soft[first_up]['i'] - rows_soft[wz]['i']) * 0.01:.2f} s")
+hold = rows_ref[-1]["cb"]
+reach = next(k for k in range(first_up, len(rows_soft)) if rows_soft[k]["cb"] == hold)
+check("then rises to today's hold within 0.3 s", (rows_soft[reach]["i"] - rows_soft[first_up]["i"]) * 0.01 <= 0.3)
+late = [(s["i"], s["dat"].hex(), r["dat"].hex()) for s, r in zip(rows_soft, rows_ref, strict=True)
+        if s["i"] >= rows_soft[wz]["i"] + 150 and s["dat"] != r["dat"]]
+check("from 1.5 s after wheel-zero the hold is today's, byte for byte (pump bit, checksum, all)", not late, f"{late[:2]}")
+check("PID braking before the stop is untouched", all(s["dat"] == r["dat"] for s, r in zip(rows_soft[:entry], rows_ref[:entry], strict=True)))
+check("no gas while the brake is commanded", all(r["gas"] == 0.0 for r in rows_soft if r["cb"] > 0))
+check("one hondastop line for the stop, and it says settle", len(stop_lines) == 1 and " rise=settle " in stop_lines[0] + " ",
+      f"{stop_lines}")
+t_soft, t_ref = soft.dynamic_tuner, build_ref()
+stop_drive(t_ref)
+t_ref = t_ref.dynamic_tuner
+check("the learners never see it: brake gain, its integrator and the per-mode counts match the reference",
+      (t_soft.brake_pid.i, t_soft.brake_pid_factor, t_soft.brake_gain_converged, t_soft.mode_admitted) ==
+      (t_ref.brake_pid.i, t_ref.brake_pid_factor, t_ref.brake_gain_converged, t_ref.mode_admitted))
+
+# a 2.5 deg downhill: the cap carries ~42 more counts (the tuner's filtered pitch has long converged).
+# Read it during the settle, where the reference is on its way to the hold and only the cap holds it.
+for deg, cap in ((-2.5, 167), (2.5, 125)):
+  rows_g, rows_gr = stop_drive(build()[0], pitch=math.radians(deg)), stop_drive(build_ref(), pitch=math.radians(deg))
+  wz_g = next(k for k, r in enumerate(rows_g) if r["stopping"] and r["wz"])
+  entry_g = next(k for k, r in enumerate(rows_g) if r["stopping"])
+  settle = range(entry_g, wz_g + 25)          # to 0.5 s after wheel-zero
+  check(f"{deg:+.1f} deg: the ceiling through the roll and the settle is {cap}",
+        max(rows_g[k]["cb"] for k in settle) == cap and max(rows_gr[k]["cb"] for k in settle) > cap + 10,
+        f"soft {max(rows_g[k]['cb'] for k in settle)}, reference {max(rows_gr[k]['cb'] for k in settle)}")
+
+
+# disengaging while the ceiling binds: brake 0 on the very next BRAKE_COMMAND
+def drop_at(k):
+  def mutate(i, cs, cc_b):
+    if i >= k:
+      cc_b.enabled = cc_b.longActive = False
+      cc_b.actuators.longControlState = LongCtrlState.off
+  return mutate
+
+
+k_drop = rows_soft[wz]["i"] - 10
+rows_drop = stop_drive(build()[0], mutate=drop_at(k_drop))
+after = [r["cb"] for r in rows_drop if r["i"] >= k_drop]
+check("longActive dropping while the ceiling binds: brake 0 on the next BRAKE_COMMAND, and after",
+      not any(after), f"{after[:4]}")
+
+# the gate: the tuner off, or any other car, never builds it -- so their BRAKE_COMMAND is untouched
+OTHER_NIDEC = next(c for c in CAR if c not in HONDA_BOSCH and c not in HONDA_ELESYS)
+
+
+def build_platform(platform, tuning):
+  params = FakeParams()
+  params.store["HondaDynamicTuningEnabled"] = tuning
+  setattr(dt, "_open_params", lambda: params)    # noqa: B010 -- ty rejects the plain assignment
+  CP = CarInterface.get_non_essential_params(platform)
+  CP_SP = CarInterface.get_non_essential_params_sp(CP, platform)
+  CP.openpilotLongitudinalControl = True
+  CP_SP.enableGasInterceptor = True
+  return CarController(platform.config.dbc_dict, CP, CP_SP)
+
+
+class NeverBuilt:
+  def __init__(self, *a, **kw):
+    raise AssertionError("ElesysSoftStop built where it must not be")
+
+
+for label, platform, tuning in ((f"{PLATFORM} with the tuner off", PLATFORM, False),
+                                (f"{OTHER_NIDEC} (Nidec) with the tuner on", OTHER_NIDEC, True),
+                                (f"{OTHER_NIDEC} (Nidec) with the tuner off", OTHER_NIDEC, False)):
+  try:
+    with mock.patch.object(ccmod, "ElesysSoftStop", NeverBuilt):
+      gated = build_platform(platform, tuning)
+      rows_gated = stop_drive(gated)
+    rows_plain = stop_drive(build_platform(platform, tuning))
+    ok = gated.soft_stop is None and [r["dat"] for r in rows_gated] == [r["dat"] for r in rows_plain]
+    detail = ""
+  except Exception as e:      # the point of the check
+    ok, detail = False, repr(e)
+  check(f"{label}: never built, BRAKE_COMMAND bit-identical", ok, detail)
+
+# the tuner's filtered pitch, as the cap reads it
+tuner = build()[0].dynamic_tuner
+check("filtered_pitch() is None before any pose", tuner.filtered_pitch() is None)
+cs = CS()
+for _ in range(300):
+  tuner.update_state(make_cc(0.0, pitch=-0.04), cs)
+check("filtered_pitch() follows the pose", abs(tuner.filtered_pitch() + 0.04) < 1e-3, f"{tuner.filtered_pitch()}")
+cc_b = structs.CarControl.new_message()
+cc_b.longActive = True
+for _ in range(dt.PITCH_STALE_FRAMES):
+  tuner.update_state(cc_b.as_reader(), cs)
+check("and is None once the pose has been missing for PITCH_STALE_FRAMES", tuner.filtered_pitch() is None)
+check("and None with the tuner off", build(tuning=False)[0].dynamic_tuner.filtered_pitch() is None)
+
+
+# never raises: every input it reads, through a whole stop (and the NaN vEgo of 17b, here mid-stop)
+def odd(field, value, every=1):
+  def mutate(i, cs, cc_b):
+    if i % every == 0:
+      if field == "vEgoRaw":
+        cs.out.vEgoRaw = value
+      elif field == "aEgo":
+        cs.out.aEgo = value
+      elif field == "vEgo":
+        cs.out.vEgo = value
+      elif field == "standstill":
+        cs.out.standstill = value
+  return mutate
+
+
+cases = {
+  "NaN pitch": dict(pitch=NAN),
+  "inf pitch": dict(pitch=float("inf")),
+  "no orientation at all": dict(orientation=[]),
+  "a 2-element orientation": dict(orientation=[0.0, 0.0]),
+  "NaN vEgoRaw": dict(mutate=odd("vEgoRaw", NAN)),
+  "NaN aEgo": dict(mutate=odd("aEgo", NAN)),
+  "NaN vEgo every 3rd frame": dict(mutate=odd("vEgo", NAN, every=3)),
+  "NaN vEgo throughout": dict(mutate=odd("vEgo", NAN)),
+  "inf vEgo throughout": dict(mutate=odd("vEgo", float("inf"))),
+}
+for label, kw in cases.items():
+  for tuning in (True, False):
+    raised, rows = None, []
+    try:
+      rows = stop_drive(build(tuning=tuning)[0], **kw)
+    except Exception as e:      # the point of the check
+      raised = e
+    n_expect = int((3.0 / 0.6 + 4.0) / 0.01) // 2
+    check(f"{label} (tuner {'on' if tuning else 'off'}): no exception, 0x1FA every even frame, brake in range",
+          raised is None and len(rows) == n_expect and all(0 <= r["cb"] <= PARAMS.NIDEC_BRAKE_MAX - 1 for r in rows),
+          f"raised={raised!r} frames={len(rows)}/{n_expect}")
+
+
 class TestDynamicTuningIntegration(unittest.TestCase):
   """The checks above run when the module loads. This is what lets unittest discovery (lefthook's
   unittest-parallel) report them as a test; a sys.exit(1) at import only showed up as a module

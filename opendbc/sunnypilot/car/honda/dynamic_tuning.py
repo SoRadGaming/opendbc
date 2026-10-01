@@ -687,6 +687,17 @@ class HondaDynamicTuner:
     fade = float(np.interp(_finite(CS.out.vEgo), [PITCH_FADE_MIN_SPEED, PITCH_FADE_FULL_SPEED], [0.0, 1.0]))
     return float(np.clip(accel * fade, -PITCH_ACCEL_LIMIT, PITCH_ACCEL_LIMIT))
 
+  def filtered_pitch(self):
+    """The filtered pitch in radians (nose-up positive) for a consumer outside the PID state --
+    the soft final stop's grade-aware cap (elesys_stop.py) -- or None when there is no usable pose:
+    the tuner is off, no pose has arrived yet, or it has been stale for PITCH_STALE_FRAMES (the
+    filter is then decaying toward 0, which is not a measurement). update_state() advances it, so
+    read it after that call in the same frame."""
+    if not self.enabled or self._pose_stale >= PITCH_STALE_FRAMES:
+      return None
+    p = _finite(self.pitch, float("nan"))
+    return p if math.isfinite(p) else None
+
   @staticmethod
   def _gear_name(CS):
     """Gear as a plain name, or None if it cannot be determined. Shared with the gas law
