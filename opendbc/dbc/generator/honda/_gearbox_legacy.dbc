@@ -28,9 +28,10 @@ Accord (HONDA_ELESYS). That is why 0 has no VAL entry here: a decoder that maps 
 to Sport emits a phantom Sport on every single shift. Measured over 473k frames, every 0 run
 in that recording was a transient -- 47 of them, median 3 frames (30 ms), max 520 ms, all
 below 0.5 m/s -- because Sport was never selected during it. Only DURATION separates the two
-cases, so carstate.py resolves it with a 1.0 s dwell (see update_gear_elesys). GEAR (36|5) is
-documented as carrying 26 for Sport and is used as a fast path, but that value has never been
-observed on this car, so the dwell is what is actually relied on.";
+cases, so carstate.py resolves it with a 1.0 s dwell (see update_gear_elesys). GEAR (36|5)
+carries 26 for Sport and is the fast path: measured over 86 routes (1406 min), the frames with
+GEAR_SHIFTER 0 read GEAR 26 on 16,164 frames (the S selections) and GEAR 0 on 2,975 (the shift
+transients), so the dwell is only the fallback.";
 
 CM_ SG_ 401 CVT_UNKNOWN_1 "Probably measured/actual CVT ratio";
 CM_ SG_ 401 CVT_UNKNOWN_2 "Probably target/commanded CVT ratio";

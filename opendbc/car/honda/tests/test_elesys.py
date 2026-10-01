@@ -441,7 +441,9 @@ class TestElesysGearDecode(unittest.TestCase):
   """GEARBOX_AUTO raw 0 means BOTH Sport and between-detents on this car, so only
   time separates them. Across 473k logged frames every 0 run was a shift transient:
   47 of them, median 3 frames (30 ms), max 520 ms, all below 0.5 m/s -- S was never
-  selected during the recording."""
+  selected during that recording. Since then S has been driven (routes b1, dd, fc), and
+  GEAR read 26 on those frames (16,164) against 0 on the transients (2,975), so the
+  GEAR == 26 fast path is what fires in practice; the dwell is the fallback."""
 
   @staticmethod
   def _name(gear):
@@ -501,6 +503,30 @@ class TestElesysGearDecode(unittest.TestCase):
   def test_dwell_is_clear_of_the_longest_observed_transient(self):
     cs = self._cs()
     self.assertGreater(cs.SPORT_DWELL * 0.01, 0.52 * 1.5)
+
+  def test_a_gearbox_message_without_gear_does_not_raise(self):
+    # Fuzz seed 7944551990633456218, example 21: a fingerprint with 0x191 and no 0x188 makes
+    # this car's gearbox message GEARBOX_CVT, which has no GEAR signal, and CarState.update()
+    # raised KeyError('GEAR'). The real car always has 0x188, but update() must never raise --
+    # a message without GEAR takes upstream's decode instead.
+    from opendbc.car import gen_empty_fingerprint
+    from opendbc.car.honda.interface import CarInterface
+    fp = gen_empty_fingerprint()
+    fp[0][0x191] = 8
+    CP = CarInterface.get_params(CAR.HONDA_ACCORD_9G_AU, fp, [], False, False, False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.HONDA_ACCORD_9G_AU, fp, [], False, False, False)
+    self.assertEqual(str(CP.transmissionType), 'cvt')
+    ci = CarInterface(CP, CP_SP)
+    for i in range(5):
+      ret, _ = ci.update([((i + 1) * int(1e7), [])])
+    self.assertIn(self._name(ret.gearShifter), ('unknown', 'park', 'reverse', 'neutral', 'drive', 'sport', 'low'))
+
+  def test_the_real_gearbox_still_takes_the_elesys_decode(self):
+    # and the guard must not divert the real car's GEARBOX_AUTO, which does have GEAR
+    from opendbc.can import CANParser
+    p = CANParser(DBC[ELESYS_CAR][Bus.pt], [], 0)
+    self.assertIn("GEAR", p.vl["GEARBOX_AUTO"])
+    self.assertNotIn("GEAR", p.vl["GEARBOX_CVT"])
 
 
 class TestElesysStockAeb(unittest.TestCase):

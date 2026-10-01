@@ -180,24 +180,30 @@ class CarState(CarStateBase, CarStateExt):
 
     if self.CP.transmissionType == TransmissionType.manual:
       ret.gearShifter = GearShifter.reverse if bool(cp.vl[self.car_state_scm_msg]["REVERSE_LIGHT"]) else GearShifter.drive
-    elif self.CP.carFingerprint in HONDA_ELESYS:
+    elif self.CP.carFingerprint in HONDA_ELESYS and "GEAR" in cp.vl[self.gearbox_msg]:
       # FORK(HONDA_ELESYS): 0x188 codes the lever one-hot -- P=1, R=2, N=4, D=8 -- and raw 0 means
       # BOTH "Sport" AND "between detents", confirmed by the owner. The signal cannot tell them
       # apart on its own, so it needs time: across 473k logged frames every 0 run was a shift
       # transient, 47 of them, median 3 frames (30 ms) and max 520 ms, all below 0.5 m/s and none
-      # while engaged -- because S was simply never selected during the recording. A held S is by
-      # definition sustained, so anything past SPORT_DWELL is the mode and anything shorter is the
-      # lever passing through.
+      # while engaged. A held S is by definition sustained, so anything past SPORT_DWELL is the
+      # mode and anything shorter is the lever passing through.
       #
       # Without the dwell, taking the VAL table at face value emits a phantom GearShifter.sport on
       # every single shift, which trips wrongGear, suppresses always-on DM, and freezes the dynamic
-      # tuner's learners for the duration.
+      # tuner's brake learner for the duration.
       #
-      # GEAR (36|5) is supposed to carry 26 for Sport, which would make this instant -- but that
-      # value has never been observed on this car, so it is used as a fast path only and the dwell
-      # remains the thing that is actually relied on.
-      ret.gearShifter = self.update_gear_elesys(int(cp.vl[self.gearbox_msg]["GEAR_SHIFTER"]),
-                                                int(cp.vl[self.gearbox_msg]["GEAR"]))
+      # GEAR (36|5) carries 26 for Sport, and that is now MEASURED, not just documented. Across all
+      # 86 routes logged to 2026-09 (1406 min), the frames with GEAR_SHIFTER = 0 split cleanly:
+      # GEAR = 26 on 16,164 frames -- the S selections, on routes b1, dd and fc (148 s moving,
+      # 79 s engaged) -- and GEAR = 0 on 2,975 frames, the shift transients. So the fast path is
+      # what fires in practice, and the dwell stays as the fallback for a frame where it does not.
+      #
+      # The `"GEAR" in` guard: a fingerprint without 0x188 but with 0x191 makes this car's
+      # gearbox_msg GEARBOX_CVT, which has no GEAR (and different GEAR_SHIFTER codes). The real car
+      # always has 0x188 (interface.py), but CarState.update() must not raise on any fingerprint
+      # (fuzz seed 7944551990633456218, example 21) -- such a message takes upstream's decode below.
+      gearbox = cp.vl[self.gearbox_msg]
+      ret.gearShifter = self.update_gear_elesys(int(gearbox["GEAR_SHIFTER"]), int(gearbox["GEAR"]))
     else:
       gear_position = self.shifter_values.get(cp.vl[self.gearbox_msg]["GEAR_SHIFTER"], None)
       ret.gearShifter = self.parse_gear_shifter(gear_position)
