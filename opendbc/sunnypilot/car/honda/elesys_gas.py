@@ -198,7 +198,7 @@ def gear_name(CS):
 
   gearShifter reaches us in three different shapes depending on who built the message: a bare
   int from a direct assignment, a capnp _DynamicEnum from a reader (str() gives the name, .raw
-  the ordinal), or already a string. Getting this wrong fails silently, so normalise all three.
+  the ordinal), or already a string. Getting this wrong fails silently, so normalize all three.
   """
   try:
     gear = getattr(CS.out, "gearShifter", None)

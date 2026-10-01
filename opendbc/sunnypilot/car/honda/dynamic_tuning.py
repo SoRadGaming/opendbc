@@ -197,7 +197,7 @@ LEARN_MIN_CMD = 0.4         # m/s^2
 # The rule here is deliberately the cheap one: LEARN IN THE REFERENCE MODE ONLY
 # (D, ECON off), and treat any mode change as a transient. Since the gas learners
 # were retired this gates only the brake learner, which sees a different engine
-# braking in S and was never characterised outside D.
+# braking in S and was never characterized outside D.
 #
 # MEASURED, all 86 routes logged to 2026-09 (1406 min, 0x188 and 0x221 decoded):
 #
@@ -691,7 +691,7 @@ class HondaDynamicTuner:
   def _gear_name(CS):
     """Gear as a plain name, or None if it cannot be determined. Shared with the gas law
     (elesys_gas.gear_name), which needs the same slot; an unrecognised value would read as
-    "not drive" and freeze the brake learner forever, so it normalises every shape."""
+    "not drive" and freeze the brake learner forever, so it normalizes every shape."""
     return gear_name(CS)
 
   @staticmethod
