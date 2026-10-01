@@ -71,6 +71,11 @@ the 2026-09 merge.
 * **`opendbc/car/honda/carcontroller.py`** (0):
   * `BRAKE_RELEASE_FRAMES` / `brake_release_scale()`, the brake-release ceiling;
   * `serial_gateway` LDW bits on `0x0E4`;
+  * the reported torque (2026-10): `linbus_gateway_actuating(CS)`, and after `new_actuators.torque = self.last_torque`
+    a `FORK(HONDA_ELESYS)` hunk that reports `0.0` while `CS.out_sp.linbusGateway.actuating` is False. torqued, the
+    `steer_limited_by_safety` check in controlsd and the torque bar read it; `last_torque`, the rate limiter,
+    `torqueOutputCan` and `0x0E4` are untouched. A missing or odd `out_sp` answers "actuating", i.e. the old report,
+    so `update()` cannot raise on it;
   * `SP_HUD_STATUS` sent on bus 0 with `lat_ready = CC_SP.mads.enabled or CC.latActive` and `op_state`;
   * `LKAS_HUD` is not sent. The board's Stage 10 image owns `0x33D` on bus 0 (board `df42a0d`), and openpilot reads `LKAS_PROBLEM` back from it.
 * **`opendbc/car/honda/hondacan.py`** (0): `create_steering_control(..., serial_gateway, ldw_left, ldw_right)`,

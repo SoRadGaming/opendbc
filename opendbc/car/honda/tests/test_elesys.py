@@ -623,5 +623,234 @@ class TestElesysTorquePrior(unittest.TestCase):
         self.assertEqual(CP.lateralTuning.torque.latAccelOffset, 0.0, msg=str(car))
 
 
+def _as_tuple(m):
+  return (m[0], bytes(m[1]), m[2]) if isinstance(m, tuple) else (m.address, bytes(m.dat), m.src)
+
+
+def _controller(car):
+  from opendbc.car.honda.carcontroller import CarController
+  from opendbc.car.honda.interface import CarInterface
+  CP = CarInterface.get_non_essential_params(car)
+  CP_SP = CarInterface.get_non_essential_params_sp(CP, car)
+  return CarController(car.config.dbc_dict, CP, CP_SP)
+
+
+def _cc(torque, lat_active=True):
+  from opendbc.car import structs
+  cc = structs.CarControl.new_message()
+  cc.enabled = True
+  cc.latActive = lat_active
+  cc.actuators.torque = torque
+  cc.hudControl.speedVisible = True
+  cc.hudControl.setSpeed = 30.0
+  return cc.as_reader()
+
+
+def structs_CC_SP():
+  from opendbc.car import structs
+  return structs.CarControlSP()
+
+
+class _FakeCS:
+  """What CarController.update() reads from CS (the integration script's double, plus out_sp)."""
+
+  def __init__(self, actuating=True, with_out_sp=True):
+    from opendbc.car import structs
+    self.out = structs.CarState.new_message()
+    self.out.vEgo = 25.0
+    self.out.cruiseState.speed = 30.0
+    self.out.cruiseState.available = True
+    self.v_cruise_factor = 1.0
+    self.stock_brake = {"CHIME": 0, "AEB_REQ_1": 0, "AEB_REQ_2": 0, "AEB_STATUS": 0}
+    self.acc_hud = {"FCM_OFF": 0, "FCM_OFF_2": 0, "FCM_PROBLEM": 0, "ICONS": 0}
+    self.lkas_hud = {}
+    self.scm_buttons = {"CRUISE_BUTTONS": 0, "CRUISE_SETTING": 0}
+    self.is_metric = True
+    self.econ_on = False
+    if with_out_sp:
+      self.out_sp = structs.CarStateSP()
+      self.set_actuating(actuating)
+
+  def set_actuating(self, actuating):
+    gw = self.out_sp.linbusGateway
+    gw.present = True
+    gw.engaged = gw.valid = gw.actuating = actuating
+
+
+class TestElesysReportedTorque(unittest.TestCase):
+  """carOutput's reported torque (new_actuators.torque) is 0.0 while the gateway board is not actuating.
+
+  Only the REPORT changes: torqued fits it, controlsd's steer_limited_by_safety compares against it, the
+  torque bar draws it. last_torque, the rate limiter, torqueOutputCan and 0x0E4 must be bit-identical."""
+
+  STEP = 0.03   # STEER_DELTA_UP / DOWN 3 at 100 Hz, every Honda
+
+  def _run(self, car, actuating, requests, cs=None):
+    cc_obj = _controller(car)
+    cs = cs if cs is not None else _FakeCS()
+    out = []
+    for i, (act, req) in enumerate(zip(actuating, requests, strict=True)):
+      if act is not None:
+        cs.set_actuating(act)
+      acts, sends = cc_obj.update(_cc(req), structs_CC_SP(), cs, i * int(1e7))
+      e4 = [d for a, d, _ in map(_as_tuple, sends) if a in (0xE4, 0x194)]   # STEERING_CONTROL (0x194 on older Nidecs)
+      self.assertEqual(len(e4), 1)
+      out.append((acts.torque, acts.torqueOutputCan, e4[0], cc_obj.last_torque))
+    return out
+
+  def test_not_actuating_reports_zero_and_the_wire_is_unchanged(self):
+    n = 120
+    req = [1.0] * 60 + [-0.4] * 60
+    on = self._run(ELESYS_CAR, [True] * n, req)
+    off = self._run(ELESYS_CAR, [False] * n, req)
+    for i, (a, b) in enumerate(zip(on, off, strict=True)):
+      self.assertEqual(b[0], 0.0, msg=f"frame {i}")
+      self.assertAlmostEqual(a[0], a[3], places=6, msg=f"frame {i}: actuating reports last_torque (Float32)")
+      self.assertEqual(a[1], b[1], msg=f"frame {i}: torqueOutputCan")
+      self.assertEqual(a[2], b[2], msg=f"frame {i}: 0x0E4 bytes")
+      self.assertEqual(a[3], b[3], msg=f"frame {i}: last_torque")
+    self.assertTrue(any(abs(a[0]) > 0.5 for a in on))
+    self.assertTrue(any(abs(a[1]) > 1000 for a in off))   # the command still went out
+
+  def test_resume_continues_from_the_limited_value(self):
+    # 10 frames dark while the ramp runs, then the board takes over: the report picks up the ramp
+    # where it is (0.33), it does not restart from 0, and the ramp itself never steps by more than 0.03
+    seq = [False] * 10 + [True] * 10
+    out = self._run(ELESYS_CAR, seq, [1.0] * 20)
+    self.assertTrue(all(o[0] == 0.0 for o in out[:10]))
+    self.assertAlmostEqual(out[10][0], 11 * self.STEP, places=6)
+    self.assertAlmostEqual(out[10][0], out[10][3], places=6)
+    for prev, cur in zip(out, out[1:], strict=False):
+      self.assertLessEqual(abs(cur[3] - prev[3]), self.STEP + 1e-9)
+
+  def test_default_gateway_state_reports_zero(self):
+    # CarStateSP() as it is before the first 0x704: present/valid/actuating all False
+    from opendbc.car import structs
+    cs = _FakeCS()
+    cs.out_sp = structs.CarStateSP()
+    out = self._run(ELESYS_CAR, [None] * 20, [0.5] * 20, cs=cs)
+    self.assertTrue(all(o[0] == 0.0 for o in out))
+    self.assertGreater(abs(out[-1][3]), 0.4)
+
+  def test_other_hondas_are_unaffected(self):
+    for car in (CAR.HONDA_CIVIC, CAR.HONDA_ACCORD, CAR.HONDA_CRV):
+      out = self._run(car, [False] * 30, [0.6] * 30)
+      self.assertTrue(all(abs(o[0] - o[3]) < 1e-6 for o in out), msg=str(car))
+      self.assertGreater(abs(out[-1][0]), 0.5, msg=str(car))
+
+  def test_missing_or_odd_gateway_state_behaves_as_before(self):
+    # update() must never raise: a CS without out_sp, or with something odd in it, reports last_torque
+    class Boom:
+      def __bool__(self):
+        raise ValueError("odd")
+
+    cases = []
+    cs = _FakeCS(with_out_sp=False)
+    cases.append(cs)
+    cs = _FakeCS(with_out_sp=False)
+    cs.out_sp = None
+    cases.append(cs)
+    cs = _FakeCS(with_out_sp=False)
+    cs.out_sp = SimpleNamespace()
+    cases.append(cs)
+    cs = _FakeCS(with_out_sp=False)
+    cs.out_sp = SimpleNamespace(linbusGateway=SimpleNamespace(actuating=Boom()))
+    cases.append(cs)
+    for cs in cases:
+      out = self._run(ELESYS_CAR, [None] * 20, [0.5] * 20, cs=cs)
+      self.assertTrue(all(abs(o[0] - o[3]) < 1e-6 for o in out))
+      self.assertGreater(abs(out[-1][0]), 0.4)
+
+
+class TestElesysReportedTorqueSeam(unittest.TestCase):
+  """The same rule through the real CarInterface: 0x704 GW_ACTIVE frames -> carstate_ext -> CarController."""
+
+  def setUp(self):
+    from opendbc.can import CANPacker
+    from opendbc.car.honda.interface import CarInterface
+    CP = CarInterface.get_non_essential_params(ELESYS_CAR)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, ELESYS_CAR)
+    self.CI = CarInterface(CP, CP_SP)
+    self.packer = CANPacker(DBC[ELESYS_CAR][Bus.pt])
+    self.i = 0
+
+  def _step(self, gw=None, torque=0.5):
+    self.i += 1
+    frames = [] if gw is None else [_as_tuple(self.packer.make_can_msg("GW_ACTIVE", 0, gw))]
+    _, cs_sp = self.CI.update([(self.i * int(1e7), frames)])
+    acts, _ = self.CI.apply(_cc(torque), structs_CC_SP(), self.i * int(1e7))
+    return cs_sp.linbusGateway, acts.torque, self.CI.CC.last_torque
+
+  def _hold(self, gw, frames=40):
+    out = None
+    for _ in range(frames):
+      out = self._step(gw)
+    return out
+
+  def test_present_valid_engaged_dry_run_and_stale(self):
+    # no 0x704 has ever arrived: present (it is, on every Elesys car), not valid, so not actuating
+    gw, reported, last = self._hold(None, frames=5)
+    self.assertTrue(gw.present)
+    self.assertFalse(gw.valid or gw.actuating)
+    self.assertEqual(reported, 0.0)
+    self.assertGreater(last, 0.1)
+
+    gw, reported, last = self._hold({"ENGAGED": 1, "DRY_RUN": 0})
+    self.assertTrue(gw.valid and gw.actuating)
+    self.assertAlmostEqual(reported, last, places=6)
+    self.assertGreater(reported, 0.4)
+
+    gw, reported, last = self._hold({"ENGAGED": 1, "DRY_RUN": 1})
+    self.assertTrue(gw.valid and not gw.actuating)
+    self.assertEqual(reported, 0.0)
+
+    gw, reported, last = self._hold({"ENGAGED": 0, "DRY_RUN": 0})
+    self.assertFalse(gw.actuating)
+    self.assertEqual(reported, 0.0)
+
+    self._hold({"ENGAGED": 1, "DRY_RUN": 0})
+    gw, reported, last = self._hold(None, frames=60)  # the board goes quiet: stale, so not valid
+    self.assertFalse(gw.valid or gw.actuating)
+    self.assertEqual(reported, 0.0)
+    self.assertGreater(last, 0.4)                     # the command itself never stopped
+
+
+class TestElesysTorqueScale(unittest.TestCase):
+  """Item 7: openpilot's full scale is the board's full scale. torque 1.0 = 2560 on 0x0E4 = 160 serial counts
+  (GW_OP_FULL_SCALE 2560, GW_LIN_AUTHORITY 160); the board clamps at 160 anyway, and openpilot's anti-windup
+  and saturation logic are only right if its 1.0 is that 160. A generic branch would give 3840."""
+
+  def test_torque_table_is_2560(self):
+    from opendbc.car.honda.interface import CarInterface
+    from opendbc.car.honda.values import CarControllerParams
+    CP = CarInterface.get_non_essential_params(ELESYS_CAR)
+    self.assertEqual(list(CP.lateralParams.torqueBP), [0, 2560])
+    self.assertEqual(list(CP.lateralParams.torqueV), [0, 2560])
+    params = CarControllerParams(CP)
+    self.assertEqual(params.STEER_MAX, 2560)
+    self.assertEqual(params.STEER_DELTA_UP, 3)
+    self.assertEqual(params.STEER_DELTA_DOWN, 3)
+
+  def test_full_scale_on_the_wire_and_the_domain_bit(self):
+    # byte 2 bit 2 is the board's SERIAL_DOMAIN flag; it must stay clear (bits 3:0 are SET_ME_X00_3)
+    for req, want in ((1.0, -2560), (-1.0, 2560)):
+      cc_obj = _controller(ELESYS_CAR)
+      cs = _FakeCS()
+      for i in range(60):
+        _, sends = cc_obj.update(_cc(req), structs_CC_SP(), cs, i * int(1e7))
+      d = next(d for a, d, _ in map(_as_tuple, sends) if a == 0xE4)
+      self.assertEqual(int.from_bytes(d[0:2], "big", signed=True), want)
+      self.assertEqual(d[2] & 0x04, 0)
+      self.assertEqual(d[2] & 0x0F, 0)
+      self.assertEqual(d[2] & 0x80, 0x80)   # STEER_TORQUE_REQUEST
+
+  def test_brake_release_step_in_serial_counts(self):
+    # the carcontroller comment: 1/BRAKE_RELEASE_FRAMES of full scale is 128 CAN counts = 8 serial counts
+    # at authority 160, inside the board's 40-count step toward zero
+    from opendbc.car.honda.carcontroller import BRAKE_RELEASE_FRAMES
+    self.assertEqual(2560 // BRAKE_RELEASE_FRAMES, 128)
+    self.assertEqual(160 // BRAKE_RELEASE_FRAMES, 8)
+
+
 if __name__ == "__main__":
   unittest.main()
