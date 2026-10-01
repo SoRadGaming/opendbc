@@ -38,8 +38,8 @@ class Episode:
     if entry is not None:
       self.step(entry, **kw)
 
-  def step(self, cmd, wheels_zero=False, a_ego=-0.5, pitch=0.0, stopping=True):
-    o, self.st = es.soft_stop_ceiling(stopping, wheels_zero, a_ego, pitch, cmd, self.st)
+  def step(self, cmd, wheels_zero=False, a_ego=-0.5, pitch=0.0, stopping=True, v_ego=0.6):
+    o, self.st = es.soft_stop_ceiling(stopping, wheels_zero, v_ego, a_ego, pitch, cmd, self.st)
     self.out.append(o)
     self.ceilings.append(None if self.st is None else self.st.ceiling)
     self.rising.append(self.st is not None and self.st.rising)
@@ -196,6 +196,40 @@ class TestSoftStop(unittest.TestCase):
     self.assertLessEqual((done + 1) * DT, es.SOFT_STOP_MAX_ROLL + (255 - CAP) / es.SOFT_STOP_RISE + 2 * DT)
     self.assertFalse(ep.st.armed)
 
+  def test_max_roll_counts_from_entry_not_rolling_time(self):
+    # rolling 1.6 s, then the wheels read zero: the settle would end 2.15 s after entry, but MAX_ROLL
+    # is absolute, so the rise starts 1.9 s after entry, during the settle
+    ep = Episode()
+    ep.run(frames(1.6) - 1, 189, a_ego=-0.6)
+    self.assertIsNone(ep.first_rise())
+    ep.run(frames(0.8), 189, wheels_zero=True)
+    first = ep.first_rise()
+    self.assertEqual(ep.st.reason, "max_roll")
+    self.assertAlmostEqual((first + 1) * DT, es.SOFT_STOP_MAX_ROLL, delta=DT / 2)
+    self.assertLess(ep.st.still_t, es.SOFT_STOP_SETTLE + 0.3)
+    # and the settle reason still wins when it comes first (every replayed stop: at most 1.82 s)
+    ep = Episode()
+    ep.run(frames(1.2) - 1, 189, a_ego=-0.6)
+    ep.run(frames(0.8), 189, wheels_zero=True)
+    self.assertEqual(ep.st.reason, "settle")
+
+  def test_entry_speed_bound(self):
+    # above 1.2 m/s (measured entries reach 1.08) the stop is today's: no ceiling, never armed
+    for v in (1.21, 2.5, float("nan"), float("inf"), None, "fast"):
+      with self.subTest(v=v):
+        ep = Episode(v_ego=v)
+        out = ep.run(frames(2.0), 189, a_ego=-0.8, v_ego=0.5)   # later frames do not re-arm it
+        self.assertEqual(ep.out[0], ENTRY)
+        self.assertEqual(set(out), {189})
+        self.assertFalse(ep.st.armed)
+        self.assertEqual(ep.st.skip, "speed")
+    ep = Episode(v_ego=es.SOFT_STOP_MAX_ENTRY_V)                # at the bound: armed
+    self.assertEqual(set(ep.run(10, 189, v_ego=3.0)), {CAP})    # and a later speed does not disarm it
+    self.assertTrue(ep.st.armed)
+    self.assertEqual(ep.st.skip, "")
+    ep = Episode(v_ego=2.0, wheels_zero=True)                   # at standstill it is not a speed skip
+    self.assertEqual(ep.st.skip, "")
+
   def test_rising_is_monotone(self):
     ep = Episode()
     ep.run(frames(0.3), 180)
@@ -209,9 +243,9 @@ class TestSoftStop(unittest.TestCase):
 
   def test_invariants_on_random_episodes(self):
     # Whatever the inputs: never above the command, never below min(command, entry command), the
-    # ceiling never falls, and the whole soft phase ends inside MAX_ROLL + SETTLE + the rise.
+    # ceiling never falls, and the whole soft phase ends inside MAX_ROLL (from entry) + the rise.
     rng = random.Random(20261001)
-    bound = es.SOFT_STOP_MAX_ROLL + es.SOFT_STOP_SETTLE + (255 - CAP) / es.SOFT_STOP_RISE + 2 * DT
+    bound = es.SOFT_STOP_MAX_ROLL + (255 - CAP) / es.SOFT_STOP_RISE + 2 * DT
     for _ in range(400):
       ep = Episode(entry=None)
       entry = None
@@ -276,6 +310,16 @@ class TestElesysSoftStop(unittest.TestCase):
     self.assertEqual(set(h.run(frames(0.5), cs(v_raw=0.0, v_ego=0.0))), {CAP})   # still settling
     self.assertTrue(h.ss.state.wheels_zero_seen)
     self.assertGreater(max(h.run(frames(0.3), cs(v_raw=0.0, v_ego=0.0))), CAP)
+
+  def test_the_entry_speed_is_vego(self):
+    # XMISSION_SPEED is not the entry speed: vEgo is. And an unknown vEgo means no ceiling.
+    self.assertEqual(set(Harness(c_s=cs(v_raw=0.9, v_ego=1.3)).run(5, cs())), {180})
+    self.assertEqual(set(Harness(c_s=cs(v_raw=1.3, v_ego=0.9)).run(5, cs())), {CAP})
+    for v in (float("nan"), float("inf")):
+      with self.subTest(v=v):
+        self.assertEqual(set(Harness(c_s=cs(v_ego=v)).run(5, cs())), {180})
+    missing = SimpleNamespace(out=SimpleNamespace(vEgoRaw=0.6, standstill=False, aEgo=-0.5, gasPressed=False, brakePressed=False))
+    self.assertEqual(set(Harness(c_s=missing).run(5, cs())), {180})
 
   def test_what_reads_as_the_wheels_at_zero(self):
     self.assertTrue(es.wheels_read_zero(cs(v_raw=0.2, standstill=True)))
@@ -344,6 +388,11 @@ class TestElesysSoftStop(unittest.TestCase):
       h = Harness(c_s=cs(v_raw=0.0))                       # entered at standstill: nothing to say
       h.run(frames(1.0), cs(v_raw=0.0))
       self.assertEqual(info.call_args_list, [])
+      h = Harness(c_s=cs(v_raw=1.5))                       # entered too fast: one skip line, no ceiling
+      self.assertEqual(set(h.run(frames(1.0), cs(v_raw=0.5))), {180})
+      lines = [c.args[0] for c in info.call_args_list]
+      self.assertEqual(lines, ["hondastop skip=speed v=1.50 entry=60"])
+      info.reset_mock()
     with mock.patch.object(es.carlog, "info", side_effect=RuntimeError("log down")):
       h = Harness()
       h.run(frames(0.3), cs(v_raw=0.5))

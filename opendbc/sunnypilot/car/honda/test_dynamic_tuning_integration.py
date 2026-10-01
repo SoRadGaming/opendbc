@@ -1193,7 +1193,7 @@ from opendbc.car.honda.values import HONDA_BOSCH, HONDA_ELESYS
 from opendbc.sunnypilot.car.honda import elesys_stop as es
 
 
-def stop_drive(cc_obj, pitch=0.0, hold_s=4.0, mutate=None, orientation=None):
+def stop_drive(cc_obj, pitch=0.0, hold_s=4.0, mutate=None, orientation=None, entry_v=0.62):
   """An open-loop stop: PID braking from 3 m/s at 0.6 m/s^2, the stopping state from 0.62 m/s with
   longcontrol's ramp toward stopAccel (-0.8 at 0.8 m/s^3), the wheels (XMISSION_SPEED) reading zero
   below 0.3 m/s, the car stopped 0.5 s later, then the hold. Returns one row per BRAKE_COMMAND."""
@@ -1201,7 +1201,7 @@ def stop_drive(cc_obj, pitch=0.0, hold_s=4.0, mutate=None, orientation=None):
   v, state, accel, ramp = 3.0, LongCtrlState.pid, -0.6, -0.14
   rows = []
   for i in range(int((3.0 / 0.6 + hold_s) / 0.01)):
-    if state == LongCtrlState.pid and v <= 0.62:
+    if state == LongCtrlState.pid and v <= entry_v:
       state = LongCtrlState.stopping
     if state == LongCtrlState.stopping:
       ramp = max(-0.8, ramp - 0.8 * 0.01)
@@ -1279,6 +1279,21 @@ for deg, cap in ((-2.5, 167), (2.5, 125)):
   check(f"{deg:+.1f} deg: the ceiling through the roll and the settle is {cap}",
         max(rows_g[k]["cb"] for k in settle) == cap and max(rows_gr[k]["cb"] for k in settle) > cap + 10,
         f"soft {max(rows_g[k]['cb'] for k in settle)}, reference {max(rows_gr[k]['cb'] for k in settle)}")
+
+# the entry-speed bound: stopping entered above 1.2 m/s (faster than any measured stop) gets no
+# ceiling, so the whole stop is the reference controller's, byte for byte -- and one skip line says so
+with mock.patch.object(es.carlog, "info") as info:
+  rows_fast = stop_drive(build()[0], entry_v=1.5)
+  fast_lines = [c.args[0] for c in info.call_args_list if str(c.args[0]).startswith(es.LOG_TAG)]
+rows_fast_ref = stop_drive(build_ref(), entry_v=1.5)
+check("stopping entered at 1.5 m/s: no ceiling, BRAKE_COMMAND identical to the reference",
+      [r["dat"] for r in rows_fast] == [r["dat"] for r in rows_fast_ref])
+check("  and one 'hondastop skip=speed' line", len(fast_lines) == 1 and fast_lines[0].startswith("hondastop skip=speed v=1.4"),
+      f"{fast_lines}")
+rows_slow = stop_drive(build()[0], entry_v=1.15)
+rows_slow_ref = stop_drive(build_ref(), entry_v=1.15)
+check("stopping entered at 1.15 m/s: the ceiling still applies",
+      any(s["cb"] < r["cb"] for s, r in zip(rows_slow, rows_slow_ref, strict=True)))
 
 
 # disengaging while the ceiling binds: brake 0 on the very next BRAKE_COMMAND
