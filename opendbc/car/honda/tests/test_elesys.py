@@ -553,7 +553,7 @@ class TestElesysStockAeb(unittest.TestCase):
 class TestElesysTorquePrior(unittest.TestCase):
   """The car's own torqued prior (override.toml) and the offset seed (interface.py).
 
-  The substitute to HONDA_ACCORD (LAF 1.689) held torqued at its 1.18 floor on this car, where torque
+  The substitute to HONDA_ACCORD (factor 1.689) held torqued at its 1.18 floor on this car, where torque
   1.0 = 2560 on 0x0E4 = 160 serial counts. The prior is also torqued's cache restore key, so these
   numbers only change together with the board's authority / full scale."""
 
@@ -589,20 +589,20 @@ class TestElesysTorquePrior(unittest.TestCase):
     # a merge that brings the substitute back would silently restore the 1.689 prior (or, with the
     # override entry, make the loader raise "defined twice")
     self.assertNotIn('HONDA_ACCORD_9G_AU', self._toml('substitute.toml'))
-    self.assertIn('HONDA_ACCORD_9G_AU', self._toml('override.toml'))
+    self.assertTrue('HONDA_ACCORD_9G_AU' in self._toml('override.toml'))
     self.assertNotIn('HONDA_ACCORD_9G_AU', self._toml('params.toml'))
 
   def test_learnable_window_covers_the_measured_values(self):
     # torqued clips the factor to (1 +- FACTOR_SANITY 0.3) * prior and friction to (1 +- 0.5) * prior.
-    # Logged raw LAF on fc/fd/103 (current firmware) was 0.944-1.281, the TorqueEstimator replay
+    # Logged raw factor on fc/fd/103 (current firmware) was 0.944-1.281, the TorqueEstimator replay
     # 0.76-1.44 end to end; friction learned 0.16-0.23.
     from opendbc.car.interfaces import get_torque_params
     p = get_torque_params()['HONDA_ACCORD_9G_AU']
     lo, hi = 0.7 * p['LAT_ACCEL_FACTOR'], 1.3 * p['LAT_ACCEL_FACTOR']
     self.assertAlmostEqual(lo, 0.77)
     self.assertAlmostEqual(hi, 1.43)
-    for laf in (0.944, 1.0, 1.09, 1.19, 1.281, 1.354):
-      self.assertTrue(lo <= laf <= hi, msg=f"{laf} outside {lo}-{hi}")
+    for factor in (0.944, 1.0, 1.09, 1.19, 1.281, 1.354):
+      self.assertTrue(lo <= factor <= hi, msg=f"{factor} outside {lo}-{hi}")
     for friction in (0.14, 0.16, 0.18, 0.193, 0.23):
       self.assertTrue(0.5 * p['FRICTION'] <= friction <= 1.5 * p['FRICTION'], msg=f"{friction}")
 
@@ -748,13 +748,13 @@ class TestElesysReportedTorque(unittest.TestCase):
     cs = _FakeCS(with_out_sp=False)
     cases.append(cs)
     cs = _FakeCS(with_out_sp=False)
-    cs.out_sp = None
+    cs.out_sp = None  # ty: ignore[invalid-assignment]
     cases.append(cs)
     cs = _FakeCS(with_out_sp=False)
-    cs.out_sp = SimpleNamespace()
+    cs.out_sp = SimpleNamespace()  # ty: ignore[invalid-assignment]
     cases.append(cs)
     cs = _FakeCS(with_out_sp=False)
-    cs.out_sp = SimpleNamespace(linbusGateway=SimpleNamespace(actuating=Boom()))
+    cs.out_sp = SimpleNamespace(linbusGateway=SimpleNamespace(actuating=Boom()))  # ty: ignore[invalid-assignment]
     cases.append(cs)
     for cs in cases:
       out = self._run(ELESYS_CAR, [None] * 20, [0.5] * 20, cs=cs)

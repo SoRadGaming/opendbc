@@ -239,7 +239,7 @@ def brake_release_scale(brake_pressed: bool, frames: int) -> tuple[float, int]:
 # FORK(HONDA_ELESYS): is anything following 0x0E4? On this car the EPS takes torque only through the
 # gateway board, and CarStateSP.linbusGateway.actuating (0x704: engaged, not a dry run, and fresh) is
 # the board saying it is putting openpilot's command on the serial line. It already includes the EPS's
-# acknowledgement (the board drops ENGAGED 500 ms after a missing ack and at once on an EPS error).
+# ack (the board drops ENGAGED 500 ms after a missing ack and at once on an EPS error).
 # Keyed on actuating, not on 0x70B grantValid/epsAck (0x70B is valid only ~87% of the time) and not on
 # the EPS's STEER_CONTROL_ACTIVE (it holds its ack for 0.6-6.7 s after LKAS_ON falls).
 # Used only to choose what is REPORTED; it must never raise inside CarController.update(), so anything
