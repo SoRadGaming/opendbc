@@ -59,6 +59,15 @@ BO_ 420 VSA_STATUS: 8 VSA
  SG_ BRAKE_HOLD_ENABLED : 45|1@0+ (1,0) [0|1] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
+ SG_ VSA_FAULT_LIVE_B2_2 : 18|1@0+ (1,0) [0|1] "" EON
+ SG_ VSA_FAULT_LIVE_B2_3 : 19|1@0+ (1,0) [0|1] "" EON
+ SG_ VSA_FAULT_LAMP_B3_3 : 27|1@0+ (1,0) [0|1] "" EON
+ SG_ VSA_FAULT_LAMP_B3_5 : 29|1@0+ (1,0) [0|1] "" XXX
+ SG_ VSA_FAULT_LAMP_B3_6 : 30|1@0+ (1,0) [0|1] "" EON
+ SG_ VSA_FAULT_LAMP_B3_7 : 31|1@0+ (1,0) [0|1] "" EON
+ SG_ VSA_FAULT_STORED_B4_0 : 32|1@0+ (1,0) [0|1] "" EON
+ SG_ VSA_FAULT_LAMP_B4_1 : 33|1@0+ (1,0) [0|1] "" XXX
+ SG_ VSA_FAULT_LAMP_B6_0 : 48|1@0+ (1,0) [0|1] "" EON
 
 BO_ 427 STEER_MOTOR_TORQUE: 3 EPS
  SG_ CONFIG_VALID : 7|1@0+ (1,0) [0|1] "" EON
@@ -86,6 +95,7 @@ BO_ 490 VEHICLE_DYNAMICS: 8 VSA
  SG_ LONG_ACCEL : 23|16@0- (0.0015,0) [-20|20] "m/s2" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|3] "" EON
+ SG_ VSA_FAULT_INERTIAL_INVALID : 50|1@0+ (1,0) [0|1] "" EON
 
 BO_ 547 BRAKE_HOLD_HYBRID_ALT: 6 XXX
  SG_ BRAKE_HOLD_FAULT_BIT : 33|1@0+ (1,0) [0|1] "" XXX
@@ -208,6 +218,16 @@ CM_ BO_ 304 "Seems to be platform-agnostic";
 CM_ BO_ 316 "Should exist on Nidec";
 CM_ SG_ 420 BRAKE_HOLD_RELATED "On when Brake Hold engaged";
 CM_ SG_ 490 LONG_ACCEL "wheel speed derivative, noisy and zero snapping";
+CM_ SG_ 420 VSA_FAULT_LIVE_B2_2 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL, named from timing only (incident 2026-10-01, Honda DTC 32-11): set with b2.3 (byte 2 0x00 -> 0x0C) in the VSA's live-fault onset frame, routes 110 and 112; never set on any other of 166 logged routes. Read by opendbc/sunnypilot/car/honda/vsa_fault.py";
+CM_ SG_ 420 VSA_FAULT_LIVE_B2_3 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: see VSA_FAULT_LIVE_B2_2";
+CM_ SG_ 420 VSA_FAULT_LAMP_B3_3 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: a VSA fault-lamp bit, 20 ms after a live onset and from 2.26 s after key-on on a stored-fault start; never in the start-up bulb check or on any other route. Read by vsa_fault.py";
+CM_ SG_ 420 VSA_FAULT_LAMP_B3_5 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: on in the fault state, in the bulb check, and together with VSA_FAULT_LAMP_B4_1 for minutes on 45 earlier routes while the VSA acknowledged openpilot's braking - another lamp state. NOT read";
+CM_ SG_ 420 VSA_FAULT_LAMP_B3_6 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: a VSA fault-lamp bit; also lit by the start-up bulb check (b3.4-b3.7, up to 3.08 s after the first frame). Read by vsa_fault.py after its start-up window";
+CM_ SG_ 420 VSA_FAULT_LAMP_B3_7 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: see VSA_FAULT_LAMP_B3_6";
+CM_ SG_ 420 VSA_FAULT_STORED_B4_0 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: set only on a stored-fault start (byte 4 = 0x01 from the second frame, 0x03 after the bulb check), never on a live onset; cleared with the stored fault (route 113 t=36.877). Read by vsa_fault.py";
+CM_ SG_ 420 VSA_FAULT_LAMP_B4_1 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: on in the fault state, and with VSA_FAULT_LAMP_B3_5 in another lamp state where braking worked. NOT read";
+CM_ SG_ 420 VSA_FAULT_LAMP_B6_0 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: see VSA_FAULT_LAMP_B3_3";
+CM_ SG_ 490 VSA_FAULT_INERTIAL_INVALID "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: the VSA marks its own acceleration data invalid (and zeroes it) in the live-onset frame, and throughout a stored fault from the second frame after key-on. Read by vsa_fault.py, as a live fault only with BRAKE_ERROR";
 CM_ SG_ 773 PASS_AIRBAG_ON "Might just be indicator light";
 CM_ SG_ 773 PASS_AIRBAG_OFF "Might just be indicator light";
 CM_ SG_ 780 CRUISE_SPEED "255 = no speed";

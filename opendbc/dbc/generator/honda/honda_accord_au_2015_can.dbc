@@ -13,4 +13,19 @@ BO_ 545 ECON_STATUS: 3 SCM
  SG_ COUNTER : 21|2@0+ (1,0) [0|3] "" EON
  SG_ CHECKSUM : 19|4@0+ (1,0) [0|15] "" EON
 
+BO_ 426 VSA_1AA: 8 XXX
+ SG_ VSA_FAULT_LIVE_B2_0 : 16|1@0+ (1,0) [0|1] "" XXX
+ SG_ VSA_FAULT_LIVE_B2_1 : 17|1@0+ (1,0) [0|1] "" XXX
+ SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" XXX
+ SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" XXX
 
+BO_ 985 VSA_3D9: 3 XXX
+ SG_ VSA_FAULT_LAMP_B1_0 : 8|1@0+ (1,0) [0|1] "" XXX
+ SG_ VSA_FAULT_LAMP_B1_2 : 10|1@0+ (1,0) [0|1] "" XXX
+ SG_ COUNTER : 21|2@0+ (1,0) [0|3] "" XXX
+ SG_ CHECKSUM : 19|4@0+ (1,0) [0|15] "" XXX
+
+CM_ BO_ 426 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: sender unknown, 50 Hz, changes in the same 20 ms frame as the VSA's own. Checksum and counter checked on 7.6 million logged frames (0 checksum failures). NOT read by carstate";
+CM_ SG_ 426 VSA_FAULT_LIVE_B2_0 "PROVISIONAL: set with B2_1 (byte 2 -> 0x03) in the VSA's live-fault onset frame, routes 110 and 112; never on another route";
+CM_ SG_ 426 VSA_FAULT_LIVE_B2_1 "PROVISIONAL: see B2_0. Alone it also flickers for a few frames on three earlier routes, so it is no fault signal by itself";
+CM_ BO_ 985 "FORK(HONDA_ACCORD_9G_AU), PROVISIONAL: sender unknown, 5 Hz, 3 bytes. Byte 1 is 0x80 normally, 0x81 in the start-up bulb check, 0x85 while the VSA holds a fault (live: 140 ms after the onset; stored: from 0.44 s after key-on). Checksum and counter checked on 0.76 million logged frames. NOT read by carstate";

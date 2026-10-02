@@ -11,6 +11,7 @@ from opendbc.car.carlog import carlog
 from opendbc.car.honda.values import HONDA_ELESYS, STEER_THRESHOLD
 from opendbc.can.parser import CANParser
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+from opendbc.sunnypilot.car.honda.vsa_fault import VsaFaultMonitor  # FORK(HONDA_ACCORD_9G_AU)
 
 # GW_ACTIVE is low priority on the board and has been observed dropping, so the window is
 # 500 ms rather than the 300 ms used for SP_HUD_STATUS in the other direction. carstate runs
@@ -70,6 +71,8 @@ class CarStateExt:
     self._steer_torque_held = 0
     self._eps_lin_stale = EPS_LIN_RAW_STALE_FRAMES
     self._eps_lin_ts = 0
+    self._vsa_fault = VsaFaultMonitor()      # FORK(HONDA_ACCORD_9G_AU)
+    self._vsa_fault_error_logged = False
 
   def update(self, ret: structs.CarState, ret_sp: structs.CarStateSP,
              can_parsers: dict[StrEnum, CANParser]) -> None:
@@ -82,6 +85,7 @@ class CarStateExt:
       self._update_linbus_firmware(ret_sp, cp)
       self._update_driver_torque_validity(ret, ret_sp, cp)
       ret.fuelGauge = min(cp.vl["SCM_BUTTONS"]["FUEL_LEVEL"] / FUEL_LEVEL_FULL, 1.0)
+      self._update_vsa_fault(ret, ret_sp, cp)
 
     if self.CP_SP.flags & HondaFlagsSP.NIDEC_HYBRID:
       ret.accFaulted = bool(cp.vl["HYBRID_BRAKE_ERROR"]["BRAKE_ERROR_1"] or cp.vl["HYBRID_BRAKE_ERROR"]["BRAKE_ERROR_2"])
@@ -95,6 +99,29 @@ class CarStateExt:
       # Same threshold as panda, equivalent to 1e-5 with previous DBC scaling
       gas = (cp.vl["GAS_SENSOR"]["INTERCEPTOR_GAS"] + cp.vl["GAS_SENSOR"]["INTERCEPTOR_GAS2"]) // 2
       ret.gasPressed = gas > 492
+
+  def _update_vsa_fault(self, ret: structs.CarState, ret_sp: structs.CarStateSP, cp: CANParser) -> None:
+    """FORK(HONDA_ACCORD_9G_AU): the VSA's own fault into carStateSP.vsaFault / vsaStoredFault (vsa_fault.py).
+
+    Called last in the HONDA_ELESYS block, after upstream's CarState.update() has set accFaulted: on this car that
+    is 0x1B0 BRAKE_ERROR_1/2, which the monitor needs. VSA_STATUS is already registered by upstream's own reads (ESP_DISABLED, ...); VEHICLE_DYNAMICS
+    is registered liveness-exempt in get_can_parsers(). This must never raise: an exception here stops card, and
+    with it openpilot's 0x1FA - the VSA sets BRAKE_ERROR a second later. Anything unexpected reads as no fault,
+    logged once.
+    """
+    try:
+      vsa = cp.vl["VSA_STATUS"]
+      dyn = cp.vl["VEHICLE_DYNAMICS"]
+      live, stored = self._vsa_fault.update(cp.ts_nanos["VSA_STATUS"]["VSA_FAULT_LIVE_B2_2"], vsa,
+                                            cp.ts_nanos["VEHICLE_DYNAMICS"]["VSA_FAULT_INERTIAL_INVALID"], dyn,
+                                            bool(ret.accFaulted))
+    except Exception:
+      live, stored = False, False
+      if not self._vsa_fault_error_logged:
+        self._vsa_fault_error_logged = True
+        carlog.exception("VSA fault monitor raised; reporting no VSA fault")
+    ret_sp.vsaFault = bool(live)
+    ret_sp.vsaStoredFault = bool(stored)
 
   def _update_driver_torque_validity(self, ret: structs.CarState, ret_sp: structs.CarStateSP, cp: CANParser) -> None:
     """Refuse to read driver intent out of a latched STEER_TORQUE_SENSOR.

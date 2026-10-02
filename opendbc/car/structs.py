@@ -176,6 +176,11 @@ class CarStateSP:
   # HONDA_ELESYS: steeringTorque is latched while the EPS is under LKAS control, so no
   # consumer may read driver intent out of it. See docs/SP_GATEWAY_FIRMWARE.md.
   driverTorqueStale: bool = auto_field()
+  # FORK(HONDA_ACCORD_9G_AU): the VSA's own fault, from provisional bits (opendbc/sunnypilot/car/honda/vsa_fault.py).
+  # False on every other car. The names must match cereal/custom.capnp CarStateSP (card splats this dataclass into
+  # custom.CarStateSP.new_message(**dict)); sunnypilot's test_vsa_fault_alert.py checks they do.
+  vsaFault: bool = auto_field()
+  vsaStoredFault: bool = auto_field()
   linbusGateway: 'CarStateSP.LinbusGateway' = field(default_factory=lambda: CarStateSP.LinbusGateway())
 
   @auto_dataclass
