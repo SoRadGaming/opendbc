@@ -6,9 +6,10 @@ and grouped exactly as the panda delivered them, one entry per `can` message; 52
 
   * a live onset (route 110 episode A, route 112 episode B) sets vsaFault on the very frame
     accFaulted first is, and keeps it;
-  * a stored fault at key-on (routes 111, 113) sets vsaStoredFault once the start-up window is
-    over, never vsaFault, and route 113's clear at 35.3 km/h clears it;
-  * a clean start's bulb check (route 10f) sets nothing;
+  * a stored fault at key-on (routes 111, 113) sets vsaStoredFault half a second after b4.0 first
+    appears (the VSA's second frame), never vsaFault, and route 113's clear at 35.3 km/h clears it;
+  * a clean start's bulb check (route 10f) sets nothing, nor does one stretched past the longest
+    of 143 clean starts;
   * the other lamp state, b3.5 + b4.1 for minutes with braking working (comma_logs route 69),
     sets nothing;
   * no other Honda reports either flag, and no other Honda registers anything new;
@@ -31,7 +32,8 @@ from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.values import CAR, DBC
 from opendbc.sunnypilot.car.honda import vsa_fault
 from opendbc.sunnypilot.car.honda.vsa_fault import VsaFaultMonitor, STARTUP_WINDOW_FRAMES, STORED_SET_FRAMES, \
-  STORED_CLEAR_FRAMES, VSA_SILENT_FRAMES, LIVE_SIGNALS, LAMP_SIGNALS, INERTIAL_INVALID
+  STORED_CLEAR_FRAMES, VSA_SILENT_FRAMES, LIVE_SIGNALS, LAMP_SIGNALS, FAULT_ONLY_LAMP_SIGNALS, BULB_LAMP_SIGNALS, \
+  INERTIAL_INVALID
 
 FIXTURE = Path(__file__).parent / "fixtures" / "vsa_fault_frames.json.gz"
 ELESYS = CAR.HONDA_ACCORD_9G_AU
@@ -77,11 +79,12 @@ def make_ci(platform=ELESYS):
   return CarInterface(CP, CP_SP)
 
 
-def replay(name: str, platform=ELESYS) -> list[tuple[float, bool, bool, bool]]:
+def replay(name: str, platform=ELESYS, batches=None) -> list[tuple[float, bool, bool, bool]]:
   """Feed a scenario at 100 Hz from its first batch on, delivering each real batch in the 10 ms slot it arrived
   in (an empty update where none did, as card does). Returns (t_s, accFaulted, vsaFault, vsaStoredFault) per
   update; t_s is route time, seconds from the first message of segment 0."""
-  batches = SCENARIOS[name]["batches"]
+  if batches is None:
+    batches = SCENARIOS[name]["batches"]
   ci = make_ci(platform)
   out = []
   t = batches[0][0]
@@ -123,8 +126,7 @@ class TestRealFrames(unittest.TestCase):
     # the property the alert text depends on: no frame has accFaulted without vsaFault
     self.assertTrue(all(r[2] for r in rows if r[1]), "accFaulted on a frame where vsaFault was not yet set")
     self.assertEqual(live, [(acc[0][0], rows[-1][0])], "vsaFault: exactly one span, from the onset frame to the end")
-    # the lamp bits follow 20 ms later; this CarState started inside the window, so they count from
-    # STARTUP_WINDOW_FRAMES after its first VSA frame
+    # the lamp bits follow 20 ms later (b3.3 and b6.0 count at once, so 0.5 s after them)
     stored = spans(rows, 3)
     self.assertEqual(len(stored), 1, stored)
     self.assertEqual(stored[0][1], rows[-1][0])
@@ -137,13 +139,24 @@ class TestRealFrames(unittest.TestCase):
 
   def test_stored_start_route_111_never_clears_parked(self):
     rows = replay("111_stored_start")
-    first_vsa = SCENARIOS["111_stored_start"]["batches"][0][0] / 1000.0
+    vsa = [(t, bytes.fromhex(h)) for t, fr in SCENARIOS["111_stored_start"]["batches"] for a, h in fr if a == 0x1A4]
+    first_b4_0 = next(t for t, b in vsa if b[4] & 0x01) / 1000.0
+    self.assertAlmostEqual(first_b4_0 - vsa[0][0] / 1000.0, 0.02, delta=0.005, msg="b4.0 from the VSA's second frame")
     self.assertFalse(any(r[2] for r in rows), "a stored fault is not a live one")
     stored = spans(rows, 3)
     self.assertEqual(len(stored), 1, stored)
-    expected = first_vsa + (STARTUP_WINDOW_FRAMES + STORED_SET_FRAMES - 1) * DT_MS / 1000.0
-    self.assertAlmostEqual(stored[0][0], expected, delta=0.03)
+    # b4.0 is never in a bulb check, so it counts from its first frame: STORED_SET_FRAMES later
+    self.assertAlmostEqual(stored[0][0], first_b4_0 + (STORED_SET_FRAMES - 1) * DT_MS / 1000.0, delta=0.02)
     self.assertEqual(stored[0][1], rows[-1][0], "parked, it never clears")
+
+  def test_stored_start_with_card_starting_late(self):
+    """On the car card starts about 2.1 s after key-on: the stored fault is flagged half a second after its first frame."""
+    batches = SCENARIOS["113_stored_start_and_clear"]["batches"]
+    start = batches[0][0] + 2100.0
+    rows = replay("113_stored_start_and_clear", batches=[b for b in batches if b[0] >= start])
+    stored = spans(rows, 3)
+    self.assertEqual(len(stored), 1, stored)
+    self.assertAlmostEqual(stored[0][0], rows[0][0] + (STORED_SET_FRAMES - 1) * DT_MS / 1000.0, delta=0.02)
 
   def test_stored_start_and_the_clear_at_35_kph_route_113(self):
     rows = replay("113_stored_start_and_clear")
@@ -158,10 +171,28 @@ class TestRealFrames(unittest.TestCase):
     rows = replay("10f_clean_start")
     self.assertFalse(any(r[2] or r[3] for r in rows))
 
-  def test_clean_start_bulb_check_with_the_longest_bulb_check_seen(self):
-    # 10f's bulb check ends 2.0 s after the VSA's first frame; the longest of 143 clean starts was 3.08 s.
-    # The window has to outlast it from the first frame on, whatever card's start time.
-    self.assertGreater(STARTUP_WINDOW_FRAMES * DT_MS / 1000.0, 3.08 + 1.0)
+  def test_clean_start_bulb_check_stretched_past_the_longest_seen(self):
+    """10f's bulb check ends 2.0 s after the VSA's first frame; the longest of 143 clean starts was 3.08 s. Hold 10f's
+    bulb-check byte 3 (0xF6: b3.4-b3.7 among others) for 3.08 s + 1 s from the first frame, real counters, checksums
+    redone: nothing is set."""
+    batches = SCENARIOS["10f_clean_start"]["batches"]
+    t0 = next(t for t, fr in batches for a, _ in fr if a == 0x1A4)
+    stretched, n = [], 0
+    for t, fr in batches:
+      out = []
+      for a, h in fr:
+        if a == 0x1A4 and t - t0 <= 4080.0:
+          d = bytearray.fromhex(h)
+          d[3] = 0xF6
+          d[-1] &= 0xF0
+          d[-1] |= honda_checksum(a, bytes(d))
+          h = d.hex()
+          n += 1
+        out.append([a, h])
+      stretched.append([t, out])
+    self.assertGreater(n, 200)
+    rows = replay("10f_clean_start", batches=stretched)
+    self.assertFalse(any(r[2] or r[3] for r in rows))
 
   def test_the_other_lamp_state_is_not_a_fault_comma_route_69(self):
     """b3.5 + b4.1 on for 1250 s of this drive while the VSA acknowledged 12,172 frames of braking."""
@@ -234,6 +265,26 @@ class TestDbc(unittest.TestCase):
 
 
 class TestParserRegistration(unittest.TestCase):
+  def test_vehicle_dynamics_counter_never_costs_can_valid(self):
+    """0x1EA's counter is not checked (a broken one must not set counters_valid False); its checksum still is."""
+    ci = make_ci()
+    with quiet_carlog():
+      ci.update([(int(1e9), [])])
+    cp = ci.can_parsers[Bus.pt]
+    st = cp.message_states[0x1EA]
+    self.assertTrue(st.ignore_counter)
+    self.assertFalse(st.ignore_checksum)
+    self.assertFalse(cp.message_states[0x1A4].ignore_counter, "only 0x1EA: VSA_STATUS keeps upstream's counter check")
+    d = bytearray.fromhex("000000000000040b")   # route 110's onset frame, counter 0
+    with quiet_carlog():
+      for i in range(20):   # the same counter every time: 20 counter breaks
+        ci.update([(int((i + 2) * 1e9), [(0x1EA, bytes(d), 0)])])
+        self.assertEqual(cp.ts_nanos["VEHICLE_DYNAMICS"][INERTIAL_INVALID], int((i + 2) * 1e9), "a good frame was dropped")
+      self.assertEqual(st.counter_fail, 0)
+      bad = bytes(d[:-1]) + bytes([d[-1] ^ 0x01])
+      ci.update([(int(30e9), [(0x1EA, bad, 0)])])
+    self.assertEqual(cp.ts_nanos["VEHICLE_DYNAMICS"][INERTIAL_INVALID], int(21e9), "a bad checksum must still be dropped")
+
   def test_vehicle_dynamics_is_liveness_exempt_on_this_car_only(self):
     ci = make_ci()
     st = ci.can_parsers[Bus.pt].message_states[0x1EA]
@@ -326,16 +377,32 @@ class Feed:
 
 class TestMonitorTiming(unittest.TestCase):
   LAMPS = {s: 1 for s in LAMP_SIGNALS}
+  BULB = {s: 1 for s in BULB_LAMP_SIGNALS}
 
-  def test_lamps_inside_the_window_never_count(self):
+  def test_the_lamp_bits_split(self):
+    self.assertEqual(set(FAULT_ONLY_LAMP_SIGNALS), {"VSA_FAULT_LAMP_B3_3", "VSA_FAULT_LAMP_B6_0", "VSA_FAULT_STORED_B4_0"})
+    self.assertEqual(set(BULB_LAMP_SIGNALS), {"VSA_FAULT_LAMP_B3_6", "VSA_FAULT_LAMP_B3_7"})
+
+  def test_bulb_lamps_inside_the_window_never_count(self):
     f = Feed()
-    out = f.run(STARTUP_WINDOW_FRAMES - 1, self.LAMPS) + f.run(1, {})
+    out = f.run(STARTUP_WINDOW_FRAMES - 1, self.BULB) + f.run(1, {})
     self.assertFalse(any(s for _, s in out))
 
-  def test_lamps_after_the_window_count_after_the_debounce(self):
-    out = Feed().run(STARTUP_WINDOW_FRAMES + STORED_SET_FRAMES + 10, self.LAMPS)
+  def test_bulb_lamps_after_the_window_count_after_the_debounce(self):
+    out = Feed().run(STARTUP_WINDOW_FRAMES + STORED_SET_FRAMES + 10, self.BULB)
     first = next(i for i, (_, s) in enumerate(out) if s)
     self.assertEqual(first, STARTUP_WINDOW_FRAMES + STORED_SET_FRAMES - 2)
+
+  def test_fault_only_lamps_count_from_the_first_frame(self):
+    for sig in FAULT_ONLY_LAMP_SIGNALS:
+      out = Feed().run(STORED_SET_FRAMES + 10, {sig: 1})
+      first = next(i for i, (_, s) in enumerate(out) if s)
+      self.assertEqual(first, STORED_SET_FRAMES - 1, sig)
+
+  def test_a_short_fault_only_blip_inside_the_window_is_ignored(self):
+    f = Feed()
+    out = f.run(STORED_SET_FRAMES - 1, {s: 1 for s in FAULT_ONLY_LAMP_SIGNALS}) + f.run(5, {})
+    self.assertFalse(any(s for _, s in out))
 
   def test_a_short_lamp_blip_after_the_window_is_ignored(self):
     f = Feed()
@@ -360,7 +427,7 @@ class TestMonitorTiming(unittest.TestCase):
     self.assertTrue(out[-2][1], "still stored one frame before the silence counts")
     self.assertEqual(out[-1], (False, False))
     # it comes back with a bulb check: not counted, the window starts again
-    out = f.run(STARTUP_WINDOW_FRAMES - 1, self.LAMPS)
+    out = f.run(STARTUP_WINDOW_FRAMES - 1, self.BULB)
     self.assertFalse(any(s for _, s in out))
 
   def test_never_received_is_false(self):

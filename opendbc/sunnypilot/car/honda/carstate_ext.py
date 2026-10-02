@@ -85,7 +85,7 @@ class CarStateExt:
       self._update_linbus_firmware(ret_sp, cp)
       self._update_driver_torque_validity(ret, ret_sp, cp)
       ret.fuelGauge = min(cp.vl["SCM_BUTTONS"]["FUEL_LEVEL"] / FUEL_LEVEL_FULL, 1.0)
-      self._update_vsa_fault(ret, ret_sp, cp)
+      self._update_vsa_fault(ret, ret_sp, cp)  # FORK(HONDA_ACCORD_9G_AU)
 
     if self.CP_SP.flags & HondaFlagsSP.NIDEC_HYBRID:
       ret.accFaulted = bool(cp.vl["HYBRID_BRAKE_ERROR"]["BRAKE_ERROR_1"] or cp.vl["HYBRID_BRAKE_ERROR"]["BRAKE_ERROR_2"])

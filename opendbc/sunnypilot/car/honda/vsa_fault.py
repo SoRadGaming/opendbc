@@ -34,12 +34,16 @@ DBC start bit 8*B+k. The DBC signals are VSA_FAULT_* in _honda_elesys_base.dbc.
                              routes 10f-113), so with it vsaFault is already true on the frame
                              accFaulted first is - which is what lets selfdrived name the VSA in
                              the disengagement alert, created on that one frame
-  stored  0x1A4 b3.3, b3.6, b3.7, b6.0   the lamp bits, +20 ms after a live onset, and from 2.26 s
-                             after key-on on a stored start; b3.6 and b3.7 are also part of the
-                             start-up bulb check (clean starts: b3.4-b3.7 until at most 3.08 s
-                             after the first 0x1A4 frame, over 143 starts) - hence the window
-          0x1A4 b4.0         set only on a stored start (0x01 from the second frame, 0.26 s), never
-                             on a live onset; cleared with the stored fault (113 t=36.877)
+  stored  0x1A4 b3.3, b6.0   fault lamp bits, +20 ms after a live onset, and 2.0 s after the first
+                             0x1A4 frame on a stored start. Never part of the start-up bulb check,
+                             and never set at all outside routes 110-113 (259 VSA sessions on 166
+                             routes) - counted from the first frame
+          0x1A4 b4.0         set only on a stored start, from the VSA's second frame (20 ms), never
+                             on a live onset; cleared with the stored fault (113 t=36.877). Never
+                             in a bulb check either - counted from the first frame
+          0x1A4 b3.6, b3.7   fault lamp bits too, but also part of the start-up bulb check (clean
+                             starts: b3.4-b3.7 until at most 3.08 s after the first 0x1A4 frame,
+                             over 143 starts) - counted only after the start-up window
   NOT USED  0x1A4 b3.5, b4.1 they are lamp bits of this fault too, but they also sit on, together,
                              for minutes at a time on 45 earlier routes (comma_logs 00-87, 4.6 h
                              in all) in which the VSA acknowledged openpilot's brake requests
@@ -50,8 +54,11 @@ DBC start bit 8*B+k. The DBC signals are VSA_FAULT_* in _honda_elesys_base.dbc.
             0x3D9 b1.0, b1.2 a 5 Hz echo of the lamp state, 140 ms late
 
 This monitor, replayed over all 166 routes at card's 100 Hz from each route's first VSA frame, sets
-a flag on 110-113 only: vsaFault from each onset frame, vsaStoredFault 5.5 s after key-on on 111
-and 113 (until 113's clear) and 0.5 s after each live onset's lamps.
+a flag on 110-113 only: vsaFault from each onset frame, vsaStoredFault 0.5 s after each live onset's
+lamps and, on 111 and 113, 0.5 s after b4.0 first appears (until 113's clear). Those times count from
+the first logged frame. On the car card starts about 2.1 s after key-on and the CANParser holds the
+VSA's latest frame, so vsaStoredFault rises 0.5 s after card's first frame, about 2.6 s after key-on;
+engagement is not refused before that (cruise needs 19 mph anyway).
 
 NEVER RAISES. CarStateExt.update() calls this every frame from CarState.update(); an exception
 there stops card, and with card stops openpilot's 0x1FA - the VSA sets BRAKE_ERROR about a
@@ -61,15 +68,18 @@ import math
 
 # VSA_STATUS (0x1A4)
 LIVE_SIGNALS = ("VSA_FAULT_LIVE_B2_2", "VSA_FAULT_LIVE_B2_3")
-LAMP_SIGNALS = ("VSA_FAULT_LAMP_B3_3", "VSA_FAULT_LAMP_B3_6", "VSA_FAULT_LAMP_B3_7", "VSA_FAULT_LAMP_B6_0",
-                "VSA_FAULT_STORED_B4_0")
+# lamp bits no bulb check has ever lit: counted from the VSA's first frame
+FAULT_ONLY_LAMP_SIGNALS = ("VSA_FAULT_LAMP_B3_3", "VSA_FAULT_LAMP_B6_0", "VSA_FAULT_STORED_B4_0")
+# lamp bits the start-up bulb check lights as well: counted only after the start-up window
+BULB_LAMP_SIGNALS = ("VSA_FAULT_LAMP_B3_6", "VSA_FAULT_LAMP_B3_7")
+LAMP_SIGNALS = FAULT_ONLY_LAMP_SIGNALS + BULB_LAMP_SIGNALS
 # VEHICLE_DYNAMICS (0x1EA)
 INERTIAL_INVALID = "VSA_FAULT_INERTIAL_INVALID"
 
 # Frames are CarState.update() calls, 100 Hz: card runs once per panda batch.
 #
 # The start-up bulb check lights b3.4-b3.7 for up to 3.08 s after the VSA's first frame (143 clean
-# starts). Lamp bits are not counted until STARTUP_WINDOW_FRAMES after the first 0x1A4 frame this
+# starts). b3.6 and b3.7 are not counted until STARTUP_WINDOW_FRAMES after the first 0x1A4 frame this
 # CarState has seen, or after the VSA's frames resume from a silence. card starts some seconds
 # after key-on, so on the car the margin is larger than the 1.9 s it is here.
 STARTUP_WINDOW_FRAMES = 500   # 5.0 s
@@ -145,7 +155,7 @@ class VsaFaultMonitor:
     inertial_invalid = settled and self._dyn_silent < VSA_SILENT_FRAMES and _bit(dyn, INERTIAL_INVALID)
     self.vsa_fault = any(_bit(vsa, s) for s in LIVE_SIGNALS) or (inertial_invalid and bool(brake_error))
 
-    lamps = settled and any(_bit(vsa, s) for s in LAMP_SIGNALS)
+    lamps = any(_bit(vsa, s) for s in FAULT_ONLY_LAMP_SIGNALS) or (settled and any(_bit(vsa, s) for s in BULB_LAMP_SIGNALS))
     if lamps:
       self._lamp_on = min(self._lamp_on + 1, STORED_SET_FRAMES)
       self._lamp_off = 0

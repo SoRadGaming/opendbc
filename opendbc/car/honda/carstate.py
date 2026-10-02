@@ -344,9 +344,10 @@ class CarState(CarStateBase, CarStateExt):
     # FORK(HONDA_ACCORD_9G_AU): VEHICLE_DYNAMICS (0x1EA), for the VSA fault monitor's inertial-invalid bit
     # (opendbc/sunnypilot/car/honda/vsa_fault.py). Nothing else on any Honda reads 0x1EA, so it is new to the parser,
     # and liveness-exempt for the reason above: a provisional fault signal must never be what costs openpilot its CAN.
-    # Its counter is checked like any Honda frame's. Across 7.6 million logged frames (166 routes) the one place it
-    # would have reached MAX_BAD_COUNTER (route 0000000a, t=636) is where VSA_STATUS, which upstream already parses,
-    # reaches it too; 0 checksum failures.
+    # For the same reason its counter is not checked (below): five broken counters would otherwise set counters_valid
+    # False. Its Honda checksum still is, so a bad frame is still dropped. (Across 7.6 million logged frames, 166 routes,
+    # the one place its counter would have reached MAX_BAD_COUNTER, route 0000000a t=636, is where VSA_STATUS, which
+    # upstream already parses, reaches it too; 0 checksum failures.)
     pt_msgs = [("GW_ACTIVE", float("nan")), ("GW_STEER_GRANT", float("nan")),
                ("EPS_LIN_RAW", float("nan")), ("GW_VERSION", float("nan")),
                ("GW_BUILD", float("nan")), ("VEHICLE_DYNAMICS", float("nan"))] if CP.carFingerprint in HONDA_ELESYS else []
@@ -354,6 +355,10 @@ class CarState(CarStateBase, CarStateExt):
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_msgs, CanBus(CP).pt),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),
     }
+    if CP.carFingerprint in HONDA_ELESYS:  # FORK(HONDA_ACCORD_9G_AU): 0x1EA's counter never costs canValid
+      for state in parsers[Bus.pt].message_states.values():
+        if state.name == "VEHICLE_DYNAMICS":
+          state.ignore_counter = True
     if CP.enableBsm:
       parsers[Bus.body] = CANParser(DBC[CP.carFingerprint][Bus.body], [], CanBus(CP).radar)
 

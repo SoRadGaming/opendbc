@@ -44,7 +44,7 @@ git rev-list --count HEAD..refs/upstream/master                     # 0 on 2026-
 git diff --name-status refs/upstream/master HEAD                    # the 31 files and this one
 MB=$(git merge-base HEAD refs/upstream/master)
 git rev-list --count $MB..refs/upstream/master -- <file>            # conflict risk of one file
-git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 68 since the VSA fault (2026-10-03; 49 after the 2026-10 batch, 31 after the sync)
+git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 70 since the VSA fault (2026-10-03; 49 after the 2026-10 batch, 31 after the sync)
 ```
 
 ## Files by area
@@ -151,7 +151,8 @@ the 2026-09 merge.
 * **`opendbc/car/honda/carstate.py`** (0): `update_gear_elesys()` / `SPORT_DWELL`, taken only when the gearbox frame
   has `GEAR` (a fingerprint with 0x191 and no 0x188 raised `KeyError('GEAR')` under fuzzing; 2026-10); `VEHICLE_DYNAMICS`
   registered liveness-exempt with the gateway frames (2026-10-03), for the VSA fault monitor - nothing else on any Honda
-  reads 0x1EA; the ELESYS `stockAeb`, which also
+  reads 0x1EA - and with `ignore_counter` set on its `MessageState` (a hunk after the parsers are built; its checksum is
+  still checked), so a provisional signal can never cost `canValid`; the ELESYS `stockAeb`, which also
   sets `carFaultedNonCritical = True` when stock AEB fires with `ACC_HUD.ACC_ON == 0`; `LKAS_PROBLEM` from bus 0,
   inside upstream's `if not (self.CP.flags & HondaFlags.BOSCH):`; `scm_buttons` and `econ_on`.
 * `opendbc/sunnypilot/car/honda/carstate_ext.py` (0): `fuelGauge` from `SCM_BUTTONS.FUEL_LEVEL` / 105; since 2026-10-03
@@ -161,10 +162,12 @@ the 2026-09 merge.
 * `opendbc/sunnypilot/car/honda/vsa_fault.py` (new, 2026-10-03): `VsaFaultMonitor`, the VSA's own fault from
   **provisional** bits named from timing (incident 2026-10-01, Honda DTC 32-11; sunnypilot `CAR-HONDA-ACCORD-9G-AU.md`
   6.6). `vsaFault` = 0x1A4 b2.2/b2.3, or 0x1EA b6.2 with `accFaulted` once the start-up window is over; `vsaStoredFault`
-  = 0x1A4 b3.3/b3.6/b3.7/b4.0/b6.0 after a 5 s start-up window (the bulb check lights b3.4-b3.7 for up to 3.08 s),
-  0.5 s set and clear debounce; both False after 0.5 s without a 0x1A4 frame, and the window restarts. b3.5/b4.1 are
-  left out on purpose: they also sit on for minutes on 45 earlier routes where the VSA braked normally. Replayed
-  over all 166 logged routes it flags 110-113 only.
+  = any of 0x1A4 b3.3/b4.0/b6.0 (`FAULT_ONLY_LAMP_SIGNALS`, never in a bulb check nor anywhere outside routes 110-113:
+  counted from the first frame) or b3.6/b3.7 (`BULB_LAMP_SIGNALS`, counted after a 5 s start-up window; the bulb check
+  lights b3.4-b3.7 for up to 3.08 s), 0.5 s set and clear debounce; both False after 0.5 s without a 0x1A4 frame, and the
+  window restarts. On a stored start the flag rises 0.5 s after card's first frame. b3.5/b4.1 are left out on purpose:
+  they also sit on for minutes on 45 earlier routes where the VSA braked normally. Replayed over all 166 logged routes
+  it flags 110-113 only.
 * `opendbc/car/honda/fingerprints.py` (0): FW versions for fwdRadar and srs.
 * `opendbc/car/honda/radar_interface.py` (0): Elesys radar parser and fault states.
 * `opendbc/car/car_helpers.py` (0): the `skip_fw_query` argument on `fingerprint()` and `get_car()`.
@@ -260,13 +263,13 @@ Run from this directory with `PYTHONPATH=.` (in the sunnypilot venv, which has o
 python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 73 tests (72 in test_elesys)
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                            # 31 tests: the gas law
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 28 tests: the soft final stop
-python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 28 tests: the VSA's own fault
+python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault
 python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 942 run, OK (skipped=69)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
-python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 110 tests on 2026-10-03, including the integration script
+python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 115 tests on 2026-10-03, including the integration script
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning.py
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning_integration.py                      # §15 SKIPs without openpilot on PYTHONPATH
-python -m unittest discover                                                                 # 9600 run, OK (skipped=1268) with the VSA fault (2026-10-03)
+python -m unittest discover                                                                 # 9605 run, OK (skipped=1268) with the VSA fault and its review fixes (2026-10-03)
 ./test.sh                                                                                   # uv lock check, then ruff, ty, codespell, cpplint, MISRA, unittest-parallel
 ```
 
