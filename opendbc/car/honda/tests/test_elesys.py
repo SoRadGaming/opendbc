@@ -615,8 +615,8 @@ class TestElesysTorquePrior(unittest.TestCase):
   def test_own_prior(self):
     from opendbc.car.interfaces import get_torque_params
     p = get_torque_params()['HONDA_ACCORD_9G_AU']
-    self.assertEqual(p['LAT_ACCEL_FACTOR'], 1.1)
-    self.assertEqual(p['MAX_LAT_ACCEL_MEASURED'], 1.1)
+    self.assertEqual(p['LAT_ACCEL_FACTOR'], 1.25)
+    self.assertEqual(p['MAX_LAT_ACCEL_MEASURED'], 1.25)
     self.assertEqual(p['FRICTION'], 0.18)
 
   def test_honda_accord_prior_unchanged(self):
@@ -636,25 +636,39 @@ class TestElesysTorquePrior(unittest.TestCase):
 
   def test_learnable_window_holds_the_filtered_values(self):
     # torqued clips the raw factor to (1 +- FACTOR_SANITY 0.3) * prior and friction to (1 +- 0.5) * prior.
-    # Checked here: the logged raw factor on fc/fd/103 (current firmware), 0.944-1.281, and the FILTERED
-    # factor of the real TorqueEstimator replayed over nine authority-160 routes, 0.793 (town first) to
-    # 1.347 (highway first); friction learned 0.16-0.23.
-    # Deliberately NOT checked: that replay's raw factor spans 0.667-1.471, which no +-30% window holds
-    # (2.2 against 1.86). The 0.77 floor clips up to ~24% of a town route's raw samples, 1.43 ~1%.
+    # This car's factor rises with speed, 0.67 in town to 1.66 on the highway commute, and no +-30% window
+    # holds that (2.5 against 1.86). The 1.25 prior (2026-10-03; 1.1 before) chooses the highway: commuting
+    # dominates the engaged steering, and a feedforward that is too strong at speed is the worse error.
     from opendbc.car.interfaces import get_torque_params
     p = get_torque_params()['HONDA_ACCORD_9G_AU']
     lo, hi = 0.7 * p['LAT_ACCEL_FACTOR'], 1.3 * p['LAT_ACCEL_FACTOR']
-    self.assertAlmostEqual(lo, 0.77)
-    self.assertAlmostEqual(hi, 1.43)
-    for factor in (0.793, 0.944, 1.0, 1.09, 1.19, 1.281, 1.347):
-      self.assertTrue(lo <= factor <= hi, msg=f"{factor} outside {lo}-{hi}")
+    self.assertAlmostEqual(lo, 0.875)
+    self.assertAlmostEqual(hi, 1.625)
+    # Inside: the highway routes. fc/fd/103: a fit on the wire 1.215/1.505/1.39, the controller's own
+    # correction 1.28-1.36. The real TorqueEstimator with this prior, chained fc -> fd -> 103 -> 10f from an
+    # empty cache: filtered 1.352/1.362/1.459 at the ends of fd/103/10f, 10f's raw median 1.453 and highest
+    # 1.590, and no time at either limit.
+    for factor in (1.215, 1.28, 1.352, 1.36, 1.362, 1.39, 1.453, 1.459, 1.505, 1.590):
+      self.assertTrue(lo < factor < hi, msg=f"{factor} outside {lo}-{hi}")
+    # At the ceiling: 10f (the commute) on its own from an empty cache, three methods - a fit on the wire
+    # 1.634, the controller's correction 1.65, the TorqueEstimator 1.664. 1.625 is within 3% of all three
+    # (that replay with this prior: raw above 1.625 69% of the valid time, filtered 1.578 at the end); the
+    # 1.1 prior's 1.43 ceiling sat 12-14% below them, held 100% of the raw and ended at 1.396.
+    for factor in (1.634, 1.65, 1.664):
+      self.assertLess(abs(factor - hi) / factor, 0.03, msg=f"{factor} vs ceiling {hi}")
+    # Clipped at the floor, by design: the town routes (d8/d9/e1/e2, ~60 km/h) give a raw factor down to
+    # 0.667, medians 0.791-0.868, and filtered 0.813-0.867 under the 1.1 prior. With this prior, town first
+    # (d5..e2 -> fc -> fd -> 103 -> 10f), the raw sits below 0.875 on 97-100% of d9/e1/e2/fc and the
+    # filtered factor ends e2 0.882 and fc 0.876, then recovers to 1.353 by the end of 10f.
+    for factor in (0.667, 0.791, 0.809, 0.813, 0.867, 0.868):
+      self.assertLess(factor, lo, msg=f"{factor} not below the floor {lo}")
     for friction in (0.14, 0.16, 0.18, 0.193, 0.23):
       self.assertTrue(0.5 * p['FRICTION'] <= friction <= 1.5 * p['FRICTION'], msg=f"{friction}")
 
   def test_car_params_carry_the_prior_and_the_offset_seed(self):
     CP = self._cp(ELESYS_CAR)
     self.assertEqual(CP.lateralTuning.which(), 'torque')
-    self.assertAlmostEqual(CP.lateralTuning.torque.latAccelFactor, 1.1, places=6)
+    self.assertAlmostEqual(CP.lateralTuning.torque.latAccelFactor, 1.25, places=6)
     self.assertAlmostEqual(CP.lateralTuning.torque.friction, 0.18, places=6)
     self.assertAlmostEqual(CP.lateralTuning.torque.latAccelOffset, -0.43, places=6)
 

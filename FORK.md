@@ -172,9 +172,11 @@ the 2026-09 merge.
 * `opendbc/car/honda/radar_interface.py` (0): Elesys radar parser and fault states.
 * `opendbc/car/car_helpers.py` (0): the `skip_fw_query` argument on `fingerprint()` and `get_car()`.
 * `opendbc/car/tests/routes.py` (0): test route `15646e8515eda1a7/00000019--dd0700eac9`.
-* `opendbc/car/torque_data/override.toml` (0): the car's own torqued prior, `"HONDA_ACCORD_9G_AU" = [1.1, 1.1, 0.18]`
-  (2026-10). Torque 1.0 = 2560 on `0x0E4` = 160 serial counts at board authority 160; **any change of the board's
-  authority or full scale must change this prior too**, because the prior is torqued's cache key.
+* `opendbc/car/torque_data/override.toml` (0): the car's own torqued prior, `"HONDA_ACCORD_9G_AU" = [1.25, 1.25, 0.18]`
+  (2026-10; 1.1 until 2026-10-03). Torque 1.0 = 2560 on `0x0E4` = 160 serial counts at board authority 160; **any
+  change of the board's authority or full scale must change this prior too**, because the prior is torqued's cache key.
+  The learnable window is 0.875-1.625: the highway routes' 1.2-1.5 (fc/fd/103) sit inside it, the commute's 1.63-1.66
+  (10f) at its ceiling, and town drives (raw 0.67-0.9) are clipped at the floor by design.
 * `opendbc/car/torque_data/substitute.toml` (0): a `FORK` comment where `HONDA_ACCORD_9G_AU = HONDA_ACCORD` used to be.
   The substitute pinned torqued at its 1.18 floor; `test_elesys.py` fails if a merge brings it back. sunnypilot's NNLC
   model lookup (`nnlc/helpers.py`) also reads this file as a fallback. Without the line it still picks
