@@ -10,6 +10,7 @@ from opendbc.car.honda.values import CAR, DBC, STEER_THRESHOLD, HondaFlags, Crui
 from opendbc.car.interfaces import CarStateBase
 
 from opendbc.sunnypilot.car.honda.carstate_ext import CarStateExt
+from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
 
 TransmissionType = structs.CarParams.TransmissionType
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -148,7 +149,8 @@ class CarState(CarStateBase, CarStateExt):
     if self.CP.flags & HondaFlags.BOSCH_RADARLESS:
       ret.accFaulted = bool(cp.vl["CRUISE_FAULT_STATUS"]["CRUISE_FAULT"])
     else:
-      if self.CP.openpilotLongitudinalControl:
+      # FORK(HONDA_ACCORD_9G_AU): also in stock ACC mode, so the VSA's live fault still disengages (vsa_fault_alert.py)
+      if self.CP.openpilotLongitudinalControl or self.CP_SP.flags & HondaFlagsSP.ELESYS_STOCK_ACC:
         if (self.CP.carFingerprint == CAR.ACURA_MDX_4G) and (self.CP.flags & HondaFlags.BOSCH_ALT_BRAKE):
           ret.accFaulted = bool(cp.vl["BRAKE_MODULE"]["CRUISE_FAULT"])
         else:

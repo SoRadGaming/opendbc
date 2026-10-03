@@ -57,6 +57,7 @@ class HondaSafetyFlags(IntFlag):
   RADARLESS = 8
   BOSCH_CANFD = 16
   ELESYS_SCM_STANDDOWN = 32
+  ELESYS_STOCK_ACC = 64  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode, HONDA_PARAM_ELESYS_STOCK_ACC in safety/modes/honda.h
 
 
 class HondaFlags(IntFlag):

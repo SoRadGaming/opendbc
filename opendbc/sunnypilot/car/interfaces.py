@@ -12,11 +12,14 @@ from collections.abc import Callable
 
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanRecvCallable, CanSendCallable
+from opendbc.car.carlog import carlog
+from opendbc.car.honda.values import HONDA_ELESYS, HondaSafetyFlags  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
 from opendbc.car.hyundai.values import HyundaiFlags
 from opendbc.car.subaru.values import SubaruFlags
 from opendbc.car.toyota.values import ToyotaSafetyFlags
 from opendbc.sunnypilot.car.hyundai.enable_radar_tracks import enable_radar_tracks as hyundai_enable_radar_tracks
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
+from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP, HondaSafetyFlagsSP  # FORK(HONDA_ACCORD_9G_AU)
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from opendbc.sunnypilot.car.subaru.values_ext import SubaruFlagsSP, SubaruSafetyFlagsSP
 from opendbc.sunnypilot.car.tesla.values import MadsScreenButtonType, TeslaFlagsSP, TeslaSafetyFlagsSP
@@ -90,6 +93,7 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
   _initialize_stop_and_go(CP, CP_SP, params_dict)
   _initialize_toyota(CP, CP_SP, params_dict)
+  _initialize_honda(CP, CP_SP, params_dict)  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
 
 
 def _initialize_custom_longitudinal_tuning(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
@@ -166,3 +170,25 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
 
     if toyota_stop_and_go_hack and CP.openpilotLongitudinalControl:
       CP_SP.flags |= ToyotaFlagsSP.STOP_AND_GO_HACK.value
+
+
+# FORK(HONDA_ACCORD_9G_AU): stock ACC mode (HondaElesysStockAcc). The car's own ACC (the Elesys radar, panda bus 2)
+# does gas and brake, openpilot steers only, and the panda forwards every frame both ways. The one writer of the mode:
+# _get_params/_get_params_sp have already decided everything from "openpilot long" (the stand-down bit, the
+# interceptor, pcmCruise), so all of it is undone here, in one place, from one param - never a half state. With the
+# param off this is a no-op and CarParams/CarParamsSP are byte-identical to before. minEnableSpeed stays 19 mph.
+# See docs/fork/CAR-HONDA-ACCORD-9G-AU.md, "Stock ACC mode".
+def _initialize_honda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_dict: dict[str, str]) -> None:
+  if CP.brand == 'honda' and CP.carFingerprint in HONDA_ELESYS:
+    if int(params_dict.get("HondaElesysStockAcc", 0)) == 1:
+      CP_SP.flags |= HondaFlagsSP.ELESYS_STOCK_ACC.value
+      CP.openpilotLongitudinalControl = False
+      CP.pcmCruise = True
+      CP.autoResumeSng = False
+      # the pedal passes the driver's foot through with no 0x200; the panda also forces its interceptor off
+      CP_SP.enableGasInterceptor = False
+      CP_SP.safetyParam &= ~HondaSafetyFlagsSP.GAS_INTERCEPTOR
+      # bit 32 (the SCM_BUTTONS stand-down) was set by _get_params; bits 32 and 64 together are never sent
+      safety_param = CP.safetyConfigs[-1].safetyParam & ~HondaSafetyFlags.ELESYS_SCM_STANDDOWN.value
+      CP.safetyConfigs[-1].safetyParam = safety_param | HondaSafetyFlags.ELESYS_STOCK_ACC.value
+      carlog.warning("Honda ELESYS stock ACC mode: openpilot longitudinal off, all frames forwarded")
