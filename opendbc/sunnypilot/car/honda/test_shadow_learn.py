@@ -39,9 +39,15 @@ class Act:
 
 
 @dataclass
+class Hud:
+  leadVisible: bool = False
+
+
+@dataclass
 class FakeCC:
   longActive: bool = True
   actuators: Act = field(default_factory=Act)
+  hudControl: Hud = field(default_factory=Hud)
 
 
 @dataclass
@@ -56,15 +62,17 @@ class Out:
 @dataclass
 class FakeCS:
   out: Out = field(default_factory=Out)
+  pcm_pedal_gas: float = 0.0     # CarStateExt's 0x17C PEDAL_GAS
 
 
 def feed(sh, n, v=10.0, a=-1.0, ref=-1.0, counts=80.0, gas=0.0, pitch=0.0, pose_fresh=True,
-         mode_ok=True, long_active=True, state=LongCtrlState.pid, **out):
-  cc = FakeCC(long_active, Act(ref, state))
-  cs = FakeCS(Out(vEgo=v, aEgo=a, **out))
+         mode_ok=True, long_active=True, state=LongCtrlState.pid, pcm=None, lead=False, gain=1.0, **out):
+  """n 50 Hz frames of one state. pcm: the PCM's pedal reading; by default it sees the interceptor's command."""
+  cc = FakeCC(long_active, Act(ref, state), Hud(lead))
+  cs = FakeCS(Out(vEgo=v, aEgo=a, **out), (40.0 if gas > 0 else 0.0) if pcm is None else pcm)
   for _ in range(n):
     sh.update(cc, cs, pitch=pitch, pose_fresh=pose_fresh, mode_ok=mode_ok, cmd_ref=ref,
-              brake_frac=counts / sl.NIDEC_BRAKE_MAX, gas_cmd=gas)
+              brake_frac=counts / sl.NIDEC_BRAKE_MAX, gas_cmd=gas, brake_gain=gain)
 
 
 def totals(sh):
@@ -105,10 +113,17 @@ class TestBandsAndBounds(unittest.TestCase):
     self.assertEqual(launch_multiplier(n - 1, 1.4, 1.0), 1.0)
     self.assertEqual(launch_multiplier(n, 0.0, 0.0), 1.0)
 
-  def test_applicable_only_on_the_elesys_accord(self):
-    self.assertTrue(sl.shadow_applicable(CarInterface.get_non_essential_params(PLATFORM)))
-    self.assertFalse(sl.shadow_applicable(CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)))
-    self.assertFalse(sl.shadow_applicable(None))
+  def test_applicable_only_on_the_elesys_accord_with_the_interceptor(self):
+    def sp(interceptor):
+      CP = CarInterface.get_non_essential_params(PLATFORM)
+      CP_SP = CarInterface.get_non_essential_params_sp(CP, PLATFORM)
+      CP_SP.enableGasInterceptor = interceptor
+      return CP_SP
+    self.assertTrue(sl.shadow_applicable(CarInterface.get_non_essential_params(PLATFORM), sp(True)))
+    self.assertFalse(sl.shadow_applicable(CarInterface.get_non_essential_params(PLATFORM), sp(False)),
+                     "no interceptor: the pedal command reads 0 on every frame")
+    self.assertFalse(sl.shadow_applicable(CarInterface.get_non_essential_params(CAR.HONDA_CIVIC), sp(True)))
+    self.assertFalse(sl.shadow_applicable(None, None))
 
 
 class TestGates(unittest.TestCase):
@@ -116,7 +131,7 @@ class TestGates(unittest.TestCase):
     sh = HondaShadowLearners()
     # 2% downhill (nose-down, pitch < 0): the car shows -1.0 but the brakes delivered -1.0 + 0.196
     pitch = -0.02
-    feed(sh, sl.WINDOW + 49, v=12.0, a=-1.0, ref=-1.0, counts=80.0, pitch=pitch)
+    feed(sh, sl.CLEAN_HOLD + 49, v=12.0, a=-1.0, ref=-1.0, counts=80.0, pitch=pitch)
     cell = sh.brake[speed_band(12.0)][count_band(80.0)]
     self.assertEqual(cell.n, 50)
     self.assertAlmostEqual(cell.mean(), G * math.sin(pitch), places=2)
@@ -134,6 +149,27 @@ class TestGates(unittest.TestCase):
         sh = HondaShadowLearners()
         feed(sh, 200, **kw)
         self.assertEqual(totals(sh)[0], 0, name)
+
+  def test_nothing_is_admitted_until_a_clean_second_after_an_override(self):
+    # route 10f t 2425.8: the driver lifts off, the law's commands read zero over the WINDOW (the interceptor sent 0
+    # during the override), and aEgo still carries the driver's throttle: +1.17 'coast'. A brake and a launch sample
+    # on the frames after a release, or after an engagement, are the same hole.
+    cases = {"coast": dict(counts=0.0, v=11.5, a=1.2, ref=-0.1), "brake": dict(counts=80.0, v=12.0, a=0.5, ref=-1.0),
+             "launch": dict(counts=0.0, v=2.0, a=2.0, ref=1.0, gas=0.15)}
+    overrides = {"gas pressed": dict(gasPressed=True), "disengaged": dict(long_active=False),
+                 "gas pressed and disengaged": dict(gasPressed=True, long_active=False),
+                 "brake pressed": dict(brakePressed=True), "stock AEB": dict(stockAeb=True),
+                 "stopping": dict(state=LongCtrlState.stopping), "pose stale": dict(pose_fresh=False)}
+    for name, kw in cases.items():
+      for oname, okw in overrides.items():
+        with self.subTest(f"{name} after {oname}"):
+          sh = HondaShadowLearners()
+          feed(sh, 200, **(kw | okw))
+          self.assertEqual(totals(sh), (0, 0, 0))
+          feed(sh, sl.CLEAN_HOLD - 1, **kw)
+          self.assertEqual(totals(sh), (0, 0, 0), "still inside the clean hold")
+          feed(sh, 1, **kw)
+          self.assertEqual(sum(totals(sh)), 1, "a clean second later")
 
   def test_jerk_gate_on_the_plant_model(self):
     sh = HondaShadowLearners()
@@ -156,13 +192,16 @@ class TestGates(unittest.TestCase):
                 brake_frac=counts / sl.NIDEC_BRAKE_MAX, gas_cmd=0.0)
     self.assertEqual(totals(sh), (0, 0, 0))
     sh = HondaShadowLearners()
-    feed(sh, sl.WINDOW - 1, counts=50.0)     # the window still holds a <=60 command...
-    feed(sh, 10, counts=65.0)                # ...so a 65-count command crosses bands: not admitted
-    self.assertEqual(totals(sh), (0, 0, 0))
+    feed(sh, sl.CLEAN_HOLD, counts=50.0)     # admitted, <= 60 counts
+    before = totals(sh)
+    feed(sh, sl.WINDOW - 1, counts=65.0)     # the window still holds a <=60 command, so 65 crosses bands: not admitted
+    self.assertEqual(totals(sh), before)
+    feed(sh, 1, counts=65.0)                 # the whole window at 65 now
+    self.assertEqual(sh.brake[speed_band(10.0)][count_band(65.0)].n, 1)
 
   def test_coast(self):
     sh = HondaShadowLearners()
-    feed(sh, sl.WINDOW + 99, v=20.0, a=-0.35, ref=-0.2, counts=0.0)
+    feed(sh, sl.CLEAN_HOLD + 99, v=20.0, a=-0.35, ref=-0.2, counts=0.0)
     b = speed_band(20.0)
     self.assertEqual(sh.coast_acc[b].n, 100)
     self.assertAlmostEqual(sh.coast_acc[b].mean(), -0.35)
@@ -173,24 +212,38 @@ class TestGates(unittest.TestCase):
 
   def test_launch(self):
     sh = HondaShadowLearners()
-    feed(sh, sl.WINDOW + 149, v=2.0, a=1.4, ref=1.0, counts=0.0, gas=0.15)
+    feed(sh, sl.CLEAN_HOLD + 149, v=2.0, a=1.4, ref=1.0, counts=0.0, gas=0.15)
     self.assertEqual(sh.launch[0].n, 150)
     self.assertAlmostEqual(sh.launch[0].ratio(), 1.4)
     self.assertAlmostEqual(launch_multiplier(*sh.launch_pooled()), 1 / 1.4)
     self.assertEqual(sh.launch_episodes, 1)
     for name, kw in {"weak demand": dict(ref=0.2), "brake in the window": dict(counts=5.0),
                      "pedal not pressing": dict(gas=0.0), "above 6 m/s": dict(v=6.5), "creep": dict(v=0.3),
-                     "steeper than 4 deg": dict(pitch=0.075)}.items():
+                     "steeper than 4 deg": dict(pitch=0.075), "the PCM does not see the pedal": dict(pcm=0.0),
+                     "the PCM's pedal not recorded": dict(pcm=float("nan"))}.items():
       with self.subTest(name):
         sh = HondaShadowLearners()
         args = dict(v=2.0, a=1.4, ref=1.0, counts=0.0, gas=0.15) | kw
         feed(sh, 200, **args)
         self.assertEqual(totals(sh)[2], 0, name)
 
+  def test_a_launch_behind_a_lead_is_kept_apart(self):
+    # A_synth L2b learns from no-lead launches: behind a lead the samples are logged on their own, never in lmult
+    sh = HondaShadowLearners()
+    feed(sh, sl.CLEAN_HOLD + 149, v=2.0, a=1.4, ref=1.0, counts=0.0, gas=0.15, lead=True)
+    self.assertEqual((sh.launch[0].n, sh.launch_lead[0].n), (0, 150))
+    self.assertEqual(launch_multiplier(*sh.launch_pooled()), 1.0)
+    self.assertEqual((sh.launch_episodes, sh.launch_episodes_lead), (0, 1))
+    d = parse(sh.line())
+    self.assertEqual(d["lnl"], [150.0, 0.0])
+    self.assertAlmostEqual(d["lratiol"][0], 1.4)
+    self.assertEqual(d["ln"], [0.0, 0.0])
+    self.assertEqual((d["lep"], d["lepl"]), (0.0, 1.0))
+
   def test_launch_on_a_grade_is_measured_with_gravity_removed(self):
     sh = HondaShadowLearners()     # route 115's launch: -2.7 deg, the car shows 1.88 for a 1.04 command
     pitch = math.radians(-2.7)
-    feed(sh, sl.WINDOW + 149, v=2.0, a=1.88, ref=1.04, counts=0.0, gas=0.15, pitch=pitch)
+    feed(sh, sl.CLEAN_HOLD + 149, v=2.0, a=1.88, ref=1.04, counts=0.0, gas=0.15, pitch=pitch)
     self.assertAlmostEqual(sh.launch[0].ratio(), (1.88 + G * math.sin(pitch)) / 1.04, places=3)
     self.assertEqual(totals(sh)[0], 0)   # and the same grade keeps it out of the brake table
 
@@ -211,7 +264,7 @@ class TestGates(unittest.TestCase):
 
   def test_brake_correction_fades_in_with_speed(self):
     sh = HondaShadowLearners()
-    feed(sh, sl.WINDOW + sl.MIN_CELL_SAMPLES, v=4.0, a=-0.7, ref=-1.0, counts=50.0)
+    feed(sh, sl.CLEAN_HOLD + sl.MIN_CELL_SAMPLES, v=4.0, a=-0.7, ref=-1.0, counts=50.0)
     self.assertAlmostEqual(sh.brake_correction(4.0, 50.0), -0.3, places=6)
     self.assertAlmostEqual(sh.brake_correction(1.5, 50.0), -0.15, places=6)
     self.assertEqual(sh.brake_correction(0.5, 50.0), 0.0)
@@ -223,7 +276,7 @@ class TestLog(unittest.TestCase):
     lines = []
     with mock.patch.object(sl.carlog, "info", lambda msg, *a, **k: lines.append(msg)):
       sh = HondaShadowLearners()
-      feed(sh, 2 * sl.LOG_INTERVAL, v=12.0, a=-0.8, ref=-1.0, counts=80.0)
+      feed(sh, 2 * sl.LOG_INTERVAL, v=12.0, a=-0.8, ref=-1.0, counts=80.0, gain=1.07)
       self.assertEqual(len(lines), 2)                        # once a minute while learning...
       feed(sh, 2 * sl.LOG_INTERVAL, long_active=False)
       self.assertEqual(len(lines), 3)                        # ...once at the disengage, then silent
@@ -237,11 +290,14 @@ class TestLog(unittest.TestCase):
     for k in ("bn", "be", "bsd", "bcorr", "bcb", "bacc"):
       self.assertEqual(len(d[k]), n_cells, k)
     i = speed_band(12.0) * (len(sl.BRAKE_COUNT_BP) + 1) + count_band(80.0)
-    self.assertEqual(d["bn"][i], 2 * sl.LOG_INTERVAL - sl.WINDOW + 1)
+    self.assertEqual(d["bn"][i], 2 * sl.LOG_INTERVAL - sl.CLEAN_HOLD + 1)
     self.assertAlmostEqual(d["be"][i], 0.2, places=3)
     self.assertAlmostEqual(d["bcorr"][i], -0.2, places=3)
     self.assertTrue(math.isnan(d["be"][0]))
     self.assertEqual(d["lmult"], 1.0)
+    self.assertEqual(d["bgain"], [1.07], "the live brake gain the table was measured at")
+    for k in ("lnl", "lral", "lrrl", "lratiol"):
+      self.assertEqual(len(d[k]), len(sl.LAUNCH_SPEED_BP) - 1, k)
 
 
 # --- through the real CarController --------------------------------------------------------------
@@ -271,6 +327,7 @@ class _CS:
     self.lkas_hud = {}
     self.scm_buttons = {"CRUISE_BUTTONS": 0, "CRUISE_SETTING": 0}
     self.is_metric = True
+    self.pcm_pedal_gas = 40.0
 
 
 def _build(shadow: bool):
@@ -353,6 +410,19 @@ class TestNothingActuatedChanges(unittest.TestCase):
         cc_obj.update(_make_cc(-1.0, LongCtrlState.pid, True, 0.0), structs.CarControlSP(), cs, i * int(1e7))
     self.assertIsNone(tu.shadow)
     logged.assert_called_once()
+
+  def test_a_shadow_that_cannot_be_built_leaves_the_controller_working(self):
+    # an import or construction failure in __init__ (the trap dynamic_tuning.py's import comment describes)
+    with mock.patch.object(sl, "HondaShadowLearners", side_effect=RuntimeError("boom")), \
+         mock.patch.object(dt.carlog, "exception") as logged:
+      cc_obj = _build(True)
+    self.assertIsNone(cc_obj.dynamic_tuner.shadow)
+    logged.assert_called_once()
+    self.assertTrue(cc_obj.dynamic_tuner.enabled)
+    cs = _CS()
+    cs.out.vEgo = 10.0
+    for i in range(10):
+      cc_obj.update(_make_cc(-1.0, LongCtrlState.pid, True, 0.0), structs.CarControlSP(), cs, i * int(1e7))
 
   def test_garbage_in_never_raises(self):
     sh = HondaShadowLearners()

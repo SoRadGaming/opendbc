@@ -11,24 +11,44 @@ multiplier run like this first, so several drives of data can be judged before a
     coast deceleration with neither pedal nor brake (the drag / brake-on point term).
   * L2b LAUNCH MULTIPLIER. Below 6 m/s the gas law over-delivers (route 115 t 511: target 1.6-2.0,
     achieved 2.4-2.7 m/s^2). This measures achieved / requested at 0.5-3 and 3-6 m/s and the bounded
-    pedal multiplier (<= 1.0: it may only ever take pedal away) that would cancel it.
+    pedal multiplier (<= 1.0: it may only ever take pedal away) that would cancel it. A_synth L2b learns
+    from launches with no lead and with the pedal confirmed on 0x17C PEDAL_GAS: both are gates here, and
+    launches behind a lead are kept in their own sums (logged, never in the multiplier).
 
 THE SIGNAL. Each sample compares the net acceleration the car achieved, aEgo + g*sin(pitch) (gravity
 removed), with the command the gas/brake law was handed (actuators.accel + the tuner's pitch term)
 pushed through the tuner's first-order plant model (PLANT_TAU 0.3 s, `cmd_ref`). A perfect law gives
-zero error; what is left is the law's error at that speed and command. That is the same quantity
-openpilot's longitudinal integrator (controlsState.uiAccelCmd) converges to cancel, which is what
-A_synth L1 proposed learning from -- but the integrator is not visible in card, it also carries the
-planner's own transients, and it is slow; the plant error is visible here, now, and needs no
-integrator to have converged. The offline report checks the two agree (shadow_learn_report.py).
+zero error; what is left is the law's error at that speed and command.
+
+THIS DEPARTS FROM A_synth L1, which learns from openpilot's longitudinal integrator
+(controlsState.uiAccelCmd) on brake frames. In a steady state the two should agree (the integrator
+settles where achieved = target, so error = -(uiAccelCmd + the P term)), but the integrator is not
+visible in card, so this uses the plant error. Whether they DO agree is checked offline, not assumed:
+the one-off replay in the CAR doc (9.3) bins -uiAccelCmd on exactly these gates beside `be`. On 115 and
+10f they agree within 0.06 m/s^2 above 20 m/s and do NOT below 15 m/s (up to 0.18 apart, one cell of
+opposite sign), so the brake table is not validated there.
+
+The command it measures against is the LAW'S command at the brake gain then in force: brake_frac is
+recorded in HondaDynamicTuner.brake_gain(), before that gain, the soft final stop ceiling and the
+release limiter (carcontroller.py), so `bcb` is not the 0x1FA count on the wire and the error already
+contains whatever the live scalar gain corrects. Each line logs the mean gain over its brake samples
+(`bgain`); a table applied on top of the gain would have to be read against it.
 
 WHY NOTHING HERE CAN REACH AN ACTUATOR:
-  * the tuner hands it COPIES of numbers (floats) and never reads anything back from it;
+  * the tuner hands it numbers it already computed and never reads anything back from it; the CC and
+    CS it is handed are only read;
   * it is called last in the 50 Hz gas/brake block (from HondaDynamicTuner.update_wind(), after
     brake_gain() and observe_pedal() have produced and recorded this frame's commands);
-  * any exception switches it off for the rest of the drive (HondaDynamicTuner._shadow_update);
+  * any exception switches it off for the rest of the drive (HondaDynamicTuner._shadow_update), and the
+    tuner imports and builds it inside try blocks;
   * it owns no Params and no writer thread.
-The replay check in shadow_learn_report.py's docstring is how that was proven on routes 115 and 10f.
+test_shadow_learn's CarController test and the route replays in the CAR doc (9.3) prove it: byte-
+identical CAN with and without it.
+
+THE GATES are on a run of clean frames, not just this one: CLEAN_HOLD (1 s) of engaged PID control
+with no driver pedal, no stock AEB, D, a fresh pose. A driver's throttle stays in aEgo after the pedal
+is released (route 10f: 0.38 s median, 0.76 s p90 before aEgo is back within 0.15 of the command),
+and the pedal/brake WINDOW alone only holds the law's commands, which read zero during an override.
 
 LOG. One `hondashadow` line (carlog -> card -> cloudlog -> logMessage) every LOG_INTERVAL while
 something new was admitted, and one at every disengage, so the last line of a route is the drive's
@@ -57,6 +77,9 @@ NIDEC_BRAKE_MAX = 256         # CarControllerParams.NIDEC_BRAKE_MAX: brake fract
 # best pure delay aTarget -> aEgo 0.40 s on 115, 0.25 s on 10f). So a sample is admitted only when the
 # pedal and brake commands have held their state for the whole of that window.
 WINDOW = 20                   # 50 Hz samples = 0.4 s
+# ...and only after this many consecutive clean frames (engaged, PID, no driver pedal, no stock AEB, D, fresh pose):
+# the driver's throttle, or the frames before an engagement, must have left aEgo (docstring: 10f p90 0.76 s)
+CLEAN_HOLD = 50               # 50 Hz samples = 1.0 s
 MAX_PITCH = math.radians(2.0) # brake/coast: above this, grade error swamps the measurement (A_synth L1)
 # The jerk gate of A_synth L1, on the plant model's own ramp rate (the tuner's cmd_ref): the tuner's 0.5 m/s^3
 # (LEARN_MAX_JERK), held for STEADY_HOLD samples. The tuner's own dwell holds it a full second (SETTLE_FRAMES);
@@ -82,7 +105,8 @@ BRAKE_FADE_SPEED = (1.0, 2.0) # the would-apply correction fades in over this sp
 # --- L2b: launch multiplier ------------------------------------------------------------------------
 LAUNCH_SPEED_BP = (0.5, 3.0, 6.0)   # two bands: 0.5-3 m/s (the v1 segment) and 3-6 m/s
 LAUNCH_MIN_REQ = 0.3          # m/s^2 of (lagged) command: below this the ratio is noise
-LAUNCH_MIN_PEDAL = 0.01       # the interceptor must actually be pressing for the whole WINDOW
+LAUNCH_MIN_PEDAL = 0.01       # the interceptor must actually be pressing for the whole WINDOW...
+LAUNCH_MIN_PCM_PEDAL = 1.0    # ...and the PCM must see it: 0x17C PEDAL_GAS (0-255) >= this over the WINDOW
 # A launch ramps faster than the brake channel's dwell (0.5 m/s^3) ever admits, so this uses the plant
 # model's own ramp rate with a looser cap: the tau uncertainty (+-0.2 s) times 1.0 m/s^3 leaves at most
 # 0.2 m/s^2 of residual against the ~0.6-0.8 m/s^2 over-delivery being measured.
@@ -132,13 +156,27 @@ def launch_band(v: float) -> int:
   return _band(v, LAUNCH_SPEED_BP) - 1
 
 
-def shadow_applicable(CP) -> bool:
-  """Only the Elesys Accord: the bands, the window and the brake law they measure are this car's."""
+def shadow_applicable(CP, CP_SP) -> bool:
+  """Only the Elesys Accord with the gas interceptor: the bands, the window and the brake law they measure
+  are this car's, and without the interceptor the pedal command reads 0 on every frame (all 'no pedal')."""
   try:
     from opendbc.car.honda.values import HONDA_ELESYS
-    return CP is not None and CP.carFingerprint in HONDA_ELESYS
+    return CP is not None and CP.carFingerprint in HONDA_ELESYS and bool(getattr(CP_SP, "enableGasInterceptor", False))
   except Exception:
     return False
+
+
+def pcm_pedal(CS) -> float:
+  """0x17C POWERTRAIN_DATA PEDAL_GAS as CarStateExt records it: the pedal the PCM sees (with the interceptor,
+  openpilot's command as the interceptor passes it on). nan when not recorded."""
+  return _finite(getattr(CS, "pcm_pedal_gas", float("nan")))
+
+
+def lead_visible(CC) -> bool:
+  try:
+    return bool(CC.hudControl.leadVisible)
+  except Exception:
+    return True   # not known: kept out of the no-lead sums
 
 
 class _Mean:
@@ -215,15 +253,21 @@ class HondaShadowLearners:
     self.brake_acc = [[_Mean() for _ in range(n_cmd)] for _ in range(n_speed)]
     self.coast_err = [_Mean() for _ in range(n_speed)]
     self.coast_acc = [_Mean() for _ in range(n_speed)]
+    self.brake_gain = _Mean()     # the live brake gain in force over the brake samples (docstring)
+    # no lead: what the multiplier learns from; behind a lead: logged on its own, never in the multiplier
     self.launch = [_Ratio() for _ in range(len(LAUNCH_SPEED_BP) - 1)]
+    self.launch_lead = [_Ratio() for _ in range(len(LAUNCH_SPEED_BP) - 1)]
     self.launch_episodes = 0
+    self.launch_episodes_lead = 0
     self._in_launch = False
 
     self._counts: deque = deque(maxlen=WINDOW)
     self._gas: deque = deque(maxlen=WINDOW)
+    self._pcm_pedal: deque = deque(maxlen=WINDOW)
     self._prev_ref = 0.0
     self._steady = 0
     self._ramp_ok = 0
+    self._clean = 0
     self._long_active = False
     self._frames = 0
     self._dirty = False
@@ -232,19 +276,24 @@ class HondaShadowLearners:
   # --- per 50 Hz frame -------------------------------------------------------------------------------
 
   def update(self, CC, CS, *, pitch: float, pose_fresh: bool, mode_ok: bool,
-             cmd_ref: float, brake_frac: float, gas_cmd: float) -> None:
-    """One 50 Hz sample. Every argument is a value the tuner already computed for this frame; nothing
-    is returned and nothing outside this object is written."""
+             cmd_ref: float, brake_frac: float, gas_cmd: float, brake_gain: float = 1.0) -> None:
+    """One 50 Hz sample. Every keyword argument is a value the tuner already computed for this frame, CC
+    and CS are only read; nothing is returned and nothing outside this object is written."""
     long_active = bool(CC.longActive)
+    out = CS.out
     counts = _finite(brake_frac, 0.0) * NIDEC_BRAKE_MAX
     gas = _finite(gas_cmd, 0.0)
     ref = _finite(cmd_ref, 0.0)
     self._counts.append(counts)
     self._gas.append(gas)
+    self._pcm_pedal.append(pcm_pedal(CS))
     ramp = abs(ref - self._prev_ref) * RATE_HZ
     self._prev_ref = ref
     self._steady = self._steady + 1 if ramp <= STEADY_MAX_RAMP else 0
     self._ramp_ok = self._ramp_ok + 1 if ramp <= LAUNCH_MAX_RAMP else 0
+    clean = (long_active and mode_ok and pose_fresh and CC.actuators.longControlState == LongCtrlState.pid
+             and not out.gasPressed and not out.brakePressed and not out.stockAeb)
+    self._clean = self._clean + 1 if clean else 0
 
     # the drive's running totals go out at every disengage and once a minute, if anything was added
     disengaged = self._long_active and not long_active
@@ -253,18 +302,18 @@ class HondaShadowLearners:
     if self._dirty and (disengaged or self._frames % LOG_INTERVAL == 0):
       self.emit()
 
-    launched = self._sample(CC, CS, long_active, pitch, pose_fresh, mode_ok, ref, counts)
+    launched = self._sample(CC, CS, pitch, ref, counts, brake_gain)
     if launched and not self._in_launch:
-      self.launch_episodes += 1
+      if lead_visible(CC):
+        self.launch_episodes_lead += 1
+      else:
+        self.launch_episodes += 1
     self._in_launch = launched
 
-  def _sample(self, CC, CS, long_active, pitch, pose_fresh, mode_ok, ref, counts) -> bool:
+  def _sample(self, CC, CS, pitch, ref, counts, brake_gain) -> bool:
     """Admit at most one sample into one table. Returns True if it was a launch sample."""
     out = CS.out
-    if not (long_active and mode_ok and pose_fresh
-            and CC.actuators.longControlState == LongCtrlState.pid
-            and not out.gasPressed and not out.brakePressed and not out.stockAeb
-            and len(self._counts) == WINDOW):
+    if self._clean < CLEAN_HOLD or len(self._counts) < WINDOW:
       return False
     pitch = _finite(pitch)
     v = _finite(out.vEgo)
@@ -286,6 +335,7 @@ class HondaShadowLearners:
         self.brake[sb][cb].add(err)
         self.brake_counts[sb][cb].add(counts)
         self.brake_acc[sb][cb].add(achieved)
+        self.brake_gain.add(_finite(brake_gain, 1.0))
         self._dirty = True
       elif cb_hi <= 0.0 and v >= COAST_MIN_SPEED:
         self.coast_err[sb].add(err)
@@ -294,9 +344,11 @@ class HondaShadowLearners:
       return False
 
     lb = launch_band(v)
-    if (lb >= 0 and abs(pitch) < LAUNCH_MAX_PITCH and cb_hi <= 0.0 and gas_lo >= LAUNCH_MIN_PEDAL and ref >= LAUNCH_MIN_REQ
-            and self._ramp_ok >= LAUNCH_RAMP_HOLD):
-      self.launch[lb].add(ref, achieved)
+    # the PCM saw the pedal over the whole window (nan - not recorded - counts as not seen)
+    pcm_ok = all(p >= LAUNCH_MIN_PCM_PEDAL for p in self._pcm_pedal)
+    if (lb >= 0 and abs(pitch) < LAUNCH_MAX_PITCH and cb_hi <= 0.0 and gas_lo >= LAUNCH_MIN_PEDAL and pcm_ok
+            and ref >= LAUNCH_MIN_REQ and self._ramp_ok >= LAUNCH_RAMP_HOLD):
+      (self.launch_lead if lead_visible(CC) else self.launch)[lb].add(ref, achieved)
       self._dirty = True
       return True
     return False
@@ -342,7 +394,11 @@ class HondaShadowLearners:
             f"lspd={_fmt(LAUNCH_SPEED_BP, 'g')} ln={_fmt([r.n for r in self.launch], 'd')} " +
             f"lra={_fmt([r.ra for r in self.launch], '.4g')} lrr={_fmt([r.rr for r in self.launch], '.4g')} " +
             f"lratio={_fmt([r.ratio() for r in self.launch], '.3f')} lep={self.launch_episodes} " +
-            f"lmult={launch_multiplier(n, ra, rr):.3f}")
+            f"lmult={launch_multiplier(n, ra, rr):.3f} " +
+            f"lnl={_fmt([r.n for r in self.launch_lead], 'd')} lral={_fmt([r.ra for r in self.launch_lead], '.4g')} " +
+            f"lrrl={_fmt([r.rr for r in self.launch_lead], '.4g')} " +
+            f"lratiol={_fmt([r.ratio() for r in self.launch_lead], '.3f')} lepl={self.launch_episodes_lead} " +
+            f"bgain={_fmt([self.brake_gain.mean()], '.3f')}")
 
   def emit(self) -> None:
     self._dirty = False

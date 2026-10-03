@@ -73,6 +73,9 @@ class CarStateExt:
     self._eps_lin_ts = 0
     self._vsa_fault = VsaFaultMonitor()      # FORK(HONDA_ACCORD_9G_AU)
     self._vsa_fault_error_logged = False
+    # FORK(HONDA_ACCORD_9G_AU): 0x17C PEDAL_GAS, the pedal the PCM sees, for the shadow launch learner's pedal
+    # confirmation (shadow_learn.py). Not a CarState field; nan until read, and on other cars.
+    self.pcm_pedal_gas = float("nan")
 
   def update(self, ret: structs.CarState, ret_sp: structs.CarStateSP,
              can_parsers: dict[StrEnum, CANParser]) -> None:
@@ -85,6 +88,7 @@ class CarStateExt:
       self._update_linbus_firmware(ret_sp, cp)
       self._update_driver_torque_validity(ret, ret_sp, cp)
       ret.fuelGauge = min(cp.vl["SCM_BUTTONS"]["FUEL_LEVEL"] / FUEL_LEVEL_FULL, 1.0)
+      self.pcm_pedal_gas = float(cp.vl["POWERTRAIN_DATA"]["PEDAL_GAS"])  # FORK(HONDA_ACCORD_9G_AU): shadow_learn.py
       self._update_vsa_fault(ret, ret_sp, cp)  # FORK(HONDA_ACCORD_9G_AU)
 
     if self.CP_SP.flags & HondaFlagsSP.NIDEC_HYBRID:
