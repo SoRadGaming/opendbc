@@ -65,19 +65,38 @@ At launch speeds this car answers the pedal like a hinge, not a line through zer
 up to ~0.08-0.09 pedal, then ~13 m/s^2 per unit at 1.5-3 m/s, 10.7 at 3-4.5 and 8.1 at 4.5-6
 (48 routes, 099..115, engaged, no pedals, pedal lagged 0.4 s). v1's 0.55-0.85 is a line through
 zero, so it asks too little for small demands and too much for large ones; the two cross at
-~1 m/s^2. The cap is the hinge's own line, so it only binds above that crossing (net > 0.8 at
-any speed): stop-and-go demand gets exactly v2's pedal, a launch gets the pedal the car needs.
-It never asks for more than v2 (less pedal from a stop, the safer direction); at net <= 0 it is
-P0, above v2's offset (<= 0.017 here), so the pedal-zero window and the brake-on point do not
-move; and it is continuous: its slope at 6 m/s is the table's measured k there, with an offset
-above v2's, so it stops binding before 6 m/s (from ~5.3 m/s only past the 2 m/s^2 accel limit).
+~1 m/s^2. The cap is the hinge's own line, so it only binds above that crossing - never below
+net 0.85, and where it starts depends on speed: net 2.13 at 0 m/s, 1.70 at 0.5, 1.42 at 1.0, 1.22
+at 1.5, 1.07 at 2, 0.86 at 3, 1.15 at 4, 2.01 at 5, 3.7 at 5.5. So demands below ~0.85 m/s^2 get
+v2's pedal exactly; above that, at 1-5 m/s, it binds behind a lead too (in the 099..115 replay on
+19.5% of the lead frames below 6 m/s, from a 0.84 command up). It never asks for more than v2
+(less pedal from a stop, the safer direction); at net <= 0 it is P0, above v2's offset (<= 0.017
+here), so the pedal-zero window and the brake-on point do not move; and it is continuous: its
+slope at 6 m/s is the table's measured k there, with an offset above v2's, so it stops binding
+before 6 m/s (from ~5.3 m/s only past the 2 m/s^2 accel limit).
+
+IT REDUCES THE LAUNCH OVER-DELIVERY; IT DOES NOT REMOVE IT. Below ~1.4 m/s a normal 1.1-1.6 m/s^2
+demand is not capped at all (115 t 511 at 1.0 m/s asked 1.13 and got 1.62, a frame the cap leaves
+alone), and the model below still has 115 t 511 at 1.88 against 1.70 asked (peak 2.18, was 2.82).
+That model is the same 48-route hinge K was fitted from, and only 1 of the 13 launches ran v2, so
+the next drives' launches - and the shadow launch ratio at 0.5-3 m/s (shadow_learn.py) - are the
+real check before P0 or K is tuned.
+
+SCOPE: it reaches 3-6 m/s, not only the 0-3 m/s segment, because a cap ending at 3 m/s would step
+off v2 there; it meets v2 at 6 m/s instead (at 3 m/s, net 2.0: 0.354 -> 0.247 pedal; at 4.5:
+0.324 -> 0.293; nothing from ~5.3 m/s). It applies to any rolling pull-away below 6 m/s with net
+above the line (a roundabout exit), not only to launches from a stop. V2 ONLY: with
+HondaElesysGasLawV2 off - v1, kept as the exact pre-2026-10 law to go back to - and on update()'s
+exception fallback to v1, the launch is uncapped, as before.
 
 Closed-loop replay (openpilot's PI, that hinge as the plant, each launch's logged target and
 grade; validated against the law that ran to ~0.1 m/s^2) of all 13 clean engaged launches from a
 stop on 099..115: aEgo/aTarget at 0.5-4.5 m/s 1.18 -> 1.04 with no lead and 1.11 -> 1.02 behind
 one, peak aEgo 2.32 -> 1.85 m/s^2, integrator low point -0.44 -> -0.04, time to 6 m/s 0.07 s and
 0.03 s quicker (no sag after the over-shoot). The one-number alternative (3 m/s k = 8.7) made the
-launches behind a lead 0.11 s slower to 6 m/s and under-deliver (0.94).
+launches behind a lead 0.11 s slower to 6 m/s and under-deliver (0.94). In-sample: the plant is
+the fit the cap came from. First-drive check: a launch behind a car pulling away must not feel
+sluggish.
 
 DRIVE MODES. mode_slot(): S if the gear is sport, else ECON if ECON is on, else D (unknown or
 P/R/N count as D). MODE_K is a per-slot multiplier on k, all 1.0 today, so the slots change
