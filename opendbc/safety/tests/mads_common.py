@@ -448,6 +448,29 @@ class MadsSafetyTestBase(unittest.TestCase):
     self.safety.mads_heartbeat_engaged_check()
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
+  # FORK(UPSTREAM-FIX): the reset above is on the grant's rising edge only. On the car CAN arrives at ~100 Hz between
+  # the 1 Hz ticks, so a reset on every received frame would switch the heartbeat exit off; the tests above call the
+  # tick back to back and would not notice. These receive a second of traffic before every tick.
+  def _three_ticks_with_can_traffic_exit_lateral(self):
+    for tick in range(3):
+      for _ in range(100):
+        self._rx(self._speed_msg(0))
+      self.assertTrue(self.safety.get_controls_allowed_lateral(), f"lateral exited before tick {tick + 1}")
+      self.safety.mads_heartbeat_engaged_check()
+    self.assertFalse(self.safety.get_controls_allowed_lateral(), "three mismatches with CAN traffic between must exit")
+
+  def test_heartbeat_engaged_mads_exits_with_can_traffic_between_ticks(self):
+    self.safety.set_mads_params(True, False, False)
+    self.safety.set_mads_button_press(0)
+    self._rx(self._speed_msg(0))
+    self.safety.set_controls_allowed_lateral(True)
+    self.safety.set_heartbeat_engaged_mads(False)
+    self._three_ticks_with_can_traffic_exit_lateral()
+
+  def test_heartbeat_engaged_mads_regrant_exits_with_can_traffic_between_ticks(self):
+    self._heartbeat_exit_then_regrant()
+    self._three_ticks_with_can_traffic_exit_lateral()
+
   def test_mads_button_not_engaged_without_press(self):
     """Test that MADS button in idle state does not engage lateral control"""
     try:
