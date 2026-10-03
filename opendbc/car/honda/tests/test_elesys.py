@@ -545,6 +545,63 @@ class TestElesysGearDecode(unittest.TestCase):
     self.assertNotIn("GEAR", p.vl["GEARBOX_CVT"])
 
 
+class TestElesysKeyOffSteerStatus(unittest.TestCase):
+  """At key-off this EPS sends STEER_STATUS 1 (DRIVER_STEERING) in its last frames, which upstream's rule takes as both
+  a temporary and a permanent fault. Across 88 logged routes (187 runs of it) STEER_STATUS 1 appeared only at key-on
+  and key-off, always at a standstill, and in P on every route since the gear decode was fixed (03e on); routes 10f,
+  114 and 115 showed it as "LKAS Fault: Restart the car" / TAKE CONTROL IMMEDIATELY. carstate.py ignores it ONLY
+  at a standstill AND in P, ONLY on HONDA_ELESYS; anywhere else it is the fault it always was."""
+
+  def _ci(self, car):
+    from opendbc.can import CANPacker
+    from opendbc.car import gen_empty_fingerprint
+    from opendbc.car.honda.interface import CarInterface
+    fp = gen_empty_fingerprint()
+    fp[0][0x188 if car in HONDA_ELESYS else 0x1A3] = 8   # an automatic, as each car's own gearbox frame says
+    CP = CarInterface.get_params(car, fp, [], False, False, False)
+    CP_SP = CarInterface.get_params_sp(CP, car, fp, [], False, False, False)
+    self.assertEqual(str(CP.transmissionType), 'automatic')
+    return CarInterface(CP, CP_SP), CANPacker(DBC[car][Bus.pt])
+
+  def _gear_raw(self, car, name):
+    from opendbc.can import CANDefine
+    dv = CANDefine(DBC[car][Bus.pt]).dv["GEARBOX_AUTO"]["GEAR_SHIFTER"]
+    return next(raw for raw, n in dv.items() if n == name)
+
+  def _faults(self, car, steer_status, gear, kph, frames=30):
+    ci, packer = self._ci(car)
+    gear_values = {"GEAR_SHIFTER": self._gear_raw(car, gear)}
+    if car in HONDA_ELESYS:
+      gear_values["GEAR"] = 0
+    ret = None
+    for i in range(frames):
+      msgs = [packer.make_can_msg("STEER_STATUS", 0, {"STEER_STATUS": steer_status}),
+              packer.make_can_msg("ENGINE_DATA", 0, {"XMISSION_SPEED": kph}),
+              packer.make_can_msg("GEARBOX_AUTO", 0, gear_values)]
+      ret, _ = ci.update([((i + 1) * int(1e7), [_as_tuple(m) for m in msgs])])
+    return ret.standstill, TestElesysGearDecode._name(ret.gearShifter), ret.steerFaultTemporary, ret.steerFaultPermanent
+
+  def test_parked_driver_steering_is_not_a_fault(self):
+    self.assertEqual(self._faults(ELESYS_CAR, 1, "P", 0.0), (True, 'park', False, False))
+
+  def test_driver_steering_is_still_a_fault_unless_parked(self):
+    # standstill in D (a red light), and moving: both still faults, temporary and permanent as upstream has them
+    self.assertEqual(self._faults(ELESYS_CAR, 1, "D", 0.0), (True, 'drive', True, True))
+    standstill, gear, tmp, perm = self._faults(ELESYS_CAR, 1, "P", 20.0)
+    self.assertFalse(standstill)
+    self.assertTrue(tmp and perm)
+    for gear in ("R", "N"):
+      self.assertEqual(self._faults(ELESYS_CAR, 1, gear, 0.0)[2:], (True, True), msg=gear)
+
+  def test_only_driver_steering_is_ignored_when_parked(self):
+    self.assertEqual(self._faults(ELESYS_CAR, 0, "P", 0.0)[2:], (False, False))
+    for status in (5, 6, 7):       # FAULT_1, TMP_FAULT, PERMANENT_FAULT: still faults in P
+      self.assertTrue(any(self._faults(ELESYS_CAR, status, "P", 0.0)[2:]), msg=f"STEER_STATUS={status}")
+
+  def test_other_hondas_are_unchanged(self):
+    self.assertEqual(self._faults(NIDEC_CAR, 1, "P", 0.0)[2:], (True, True))
+
+
 class TestElesysStockAeb(unittest.TestCase):
   """stockAeb stands openpilot down so the factory CMBS can have the car. The four bits below
   are the ones confirmed on this car by bit-level analysis of a real event; all four read 0

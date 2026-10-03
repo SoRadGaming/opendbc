@@ -208,6 +208,14 @@ class CarState(CarStateBase, CarStateExt):
       gear_position = self.shifter_values.get(cp.vl[self.gearbox_msg]["GEAR_SHIFTER"], None)
       ret.gearShifter = self.parse_gear_shifter(gear_position)
 
+    # FORK(HONDA_ELESYS): at key-off this EPS sends STEER_STATUS 1 (DRIVER_STEERING) in its last frames
+    # (routes 10f, 114, 115), which the rule above takes as both a temporary and a permanent fault:
+    # "LKAS Fault: Restart the car", or TAKE CONTROL IMMEDIATELY while MADS is still on. Ignore it only
+    # parked -- at a standstill AND in P. Moving, or in any other gear, 1 is still a fault.
+    if self.CP.carFingerprint in HONDA_ELESYS and steer_status == "DRIVER_STEERING" and ret.standstill and ret.gearShifter == GearShifter.park:
+      ret.steerFaultPermanent = False
+      ret.steerFaultTemporary = False
+
     ret.gasPressed = cp.vl["POWERTRAIN_DATA"]["PEDAL_GAS"] > 1e-5
 
     ret.steeringTorque = cp.vl["STEER_STATUS"]["STEER_TORQUE_SENSOR"]
