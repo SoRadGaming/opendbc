@@ -47,13 +47,37 @@ What v2 deliberately does NOT change (skeptic review, which overrides the audit 
     do not move.
   * 0 AND 3 m/s ARE v1's VALUES (gm 0.55 and 0.85, i.e. k = 8.73 and 5.65), and the table is
     interpolated in the same quantity v1 interpolates (pedal per unit `gas`, 4.8/k), so the
-    whole 0-3 m/s segment -- every launch -- is v1's law. The measured 3 m/s k (8.7) is NOT used.
+    whole 0-3 m/s segment is v1's law up to the launch cap below. The measured 3 m/s k (8.7) is
+    NOT used: it would cut the pedal for every demand, and small ones already under-deliver.
   * The k table only covers pedal up to ~0.25-0.28 (the data's p95). Above that the car
     under-delivers against the line (kickdown, +0.14..+0.35 m/s^2 residual), so "full pedal at
     20 m/s needs 2.55 m/s^2" is an extrapolation, not a measurement.
 
 Expect it to feel SOFTER on take-off from a roll at 6-20 m/s: it removes the 1.3-1.5x onset
 over-delivery. That is the measurement, not a regression; the PI adds what is really missing.
+
+LAUNCH CAP (2026-10; route 115 t 511: target 1.6-2.0 m/s^2, aEgo 2.4-2.7, the PI integrator wound
+down to -0.8). Below LAUNCH_CAP_V_END = 6 m/s v2 is also capped:
+
+  pedal = min(v2, LAUNCH_CAP_P0 + net / K_launch(v))      P0 0.08; K_launch 13.0 / 12.0 / 6.8 at 0 / 3 / 6
+
+At launch speeds this car answers the pedal like a hinge, not a line through zero: creep only
+up to ~0.08-0.09 pedal, then ~13 m/s^2 per unit at 1.5-3 m/s, 10.7 at 3-4.5 and 8.1 at 4.5-6
+(48 routes, 099..115, engaged, no pedals, pedal lagged 0.4 s). v1's 0.55-0.85 is a line through
+zero, so it asks too little for small demands and too much for large ones; the two cross at
+~1 m/s^2. The cap is the hinge's own line, so it only binds above that crossing (net > 0.8 at
+any speed): stop-and-go demand gets exactly v2's pedal, a launch gets the pedal the car needs.
+It never asks for more than v2 (less pedal from a stop, the safer direction); at net <= 0 it is
+P0, above v2's offset (<= 0.017 here), so the pedal-zero window and the brake-on point do not
+move; and it is continuous: its slope at 6 m/s is the table's measured k there, with an offset
+above v2's, so it stops binding before 6 m/s (from ~5.3 m/s only past the 2 m/s^2 accel limit).
+
+Closed-loop replay (openpilot's PI, that hinge as the plant, each launch's logged target and
+grade; validated against the law that ran to ~0.1 m/s^2) of all 13 clean engaged launches from a
+stop on 099..115: aEgo/aTarget at 0.5-4.5 m/s 1.18 -> 1.04 with no lead and 1.11 -> 1.02 behind
+one, peak aEgo 2.32 -> 1.85 m/s^2, integrator low point -0.44 -> -0.04, time to 6 m/s 0.07 s and
+0.03 s quicker (no sag after the over-shoot). The one-number alternative (3 m/s k = 8.7) made the
+launches behind a lead 0.11 s slower to 6 m/s and under-deliver (0.94).
 
 DRIVE MODES. mode_slot(): S if the gear is sport, else ECON if ECON is on, else D (unknown or
 P/R/N count as D). MODE_K is a per-slot multiplier on k, all 1.0 today, so the slots change
@@ -124,6 +148,15 @@ ELESYS_FF_G0 = [0.045, 0.045, 0.080, 0.102, 0.110, 0.122, 0.150, 0.211]
 # i.e. net = -1.95 * wb. v2 keeps that pedal-zero point for whatever offset it uses.
 OFFSET_PER_WB = 0.75
 
+# The launch cap (docstring): below LAUNCH_CAP_V_END v2 never sends more than P0 + net / K. K is
+# the measured launch response above the pedal the car starts to pull at (13.1 at 1.5-3 m/s, 10.7
+# at 3-4.5, 8.1 at 4.5-6 against 12.3 / 10.6 / 8.2 here), ending on the table's measured k at
+# 6 m/s so the cap meets v2 there instead of stepping off it.
+LAUNCH_CAP_BP = [0., 3., ELESYS_FF_BP[2]]
+LAUNCH_CAP_K = [13.0, 12.0, ELESYS_FF_K[2]]
+LAUNCH_CAP_P0 = 0.08      # the pedal at which the car starts to pull from a crawl, measured 0.08-0.09
+LAUNCH_CAP_V_END = ELESYS_FF_BP[2]
+
 
 def _finite(x, fallback: float = 0.0) -> float:
   try:
@@ -144,10 +177,15 @@ def elesys_ff_offset(v_ego: float, wind_brake: float) -> float:
   return min(float(np.interp(v_ego, ELESYS_FF_BP, ELESYS_FF_G0)), today)
 
 
+def elesys_launch_cap(v_ego: float, gas: float, k_mult: float = 1.0) -> float:
+  """The most pedal v2 sends below LAUNCH_CAP_V_END for this `gas` (= net/4.8): P0 + net/K(v)."""
+  return LAUNCH_CAP_P0 + gas * 4.8 / (float(np.interp(v_ego, LAUNCH_CAP_BP, LAUNCH_CAP_K)) * k_mult)
+
+
 def elesys_pedal_v2(v_ego: float, gas: float, brake: float, wind_brake: float, k_mult: float = 1.0) -> float:
   """The v2 law, clipped to [0, 1]. `gas` and `brake` are compute_gb_honda_elesys()'s fractions
-  (one of them is 0), `k_mult` the drive-mode multiplier on k. Never raises; 0.0 for anything
-  non-finite."""
+  (one of them is 0), `k_mult` the drive-mode multiplier on k. Below LAUNCH_CAP_V_END the launch
+  cap applies. Never raises; 0.0 for anything non-finite."""
   try:
     v = float(v_ego)
     g = max(_finite(gas), 0.0)
@@ -162,6 +200,8 @@ def elesys_pedal_v2(v_ego: float, gas: float, brake: float, wind_brake: float, k
     else:
       off = neg_slope = 0.0                  # no aero term to anchor the window on: no offset
     pedal = off + g * (elesys_ff_gm(v) / m) - b * neg_slope
+    if v < LAUNCH_CAP_V_END:
+      pedal = min(pedal, elesys_launch_cap(v, g, m))
     pedal = float(np.clip(pedal, 0., 1.))
   except Exception:
     return 0.0
