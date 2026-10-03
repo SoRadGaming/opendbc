@@ -490,6 +490,49 @@ class TestHondaElesysScmStanddownSafety(TestHondaNidecPcmAltSafety):
     self.safety.set_honda_fwd_brake(True)
     super(TestHondaNidecSafetyBase, self).test_fwd_hook()
 
+  # FORK(UPSTREAM-FIX): route 114, seg 13, as logged. SCM_BUTTONS (0x1A6) from 804.51 to 805.50, with the LKAS press
+  # (CRUISE_SETTING 1) at 805.19-805.25. The panda's heartbeat exit was at ~804.25 and its next 1 Hz tick at ~805.21,
+  # before pandad's heartbeat could report MADS engaged; that tick revoked the grant and the car got no steering
+  # for 2 s (controlsMismatchLateral at 807.53).
+  ROUTE_114_SCM_BUTTONS = """
+    0008002a8e800005 0008002a8e800014 0008002a8e800023 0008002a8a800036 0008002a8a800009 0008002d8a800015
+    0008002d8a800024 0008002d8a800033 0008002d9a800005 0008002d9a800014 000800239a80002d 000800239a80003c
+    000800239a80000f 00080023a1800016 00080023a1800025 0008001ea180003a 0008001ea180000d 0008001ea180001c
+    0008001ea7800025 0008001ea7800034 0008001aa780000b 0008001aa780001a 0008001aa7800029 0008001aab800034
+    0008001aab800007 00080017ab800019 00080017ab800028 00080017ab800037 00080017a680000f 00080017a680001e
+    0008001ba6800029 0008001ba6800038 0008001ba680000b 0008001ba680001a 0008001ba6800029 0008001ba6840034
+    0008001ba6840007 0008001ba6840016 0008001ba6800029 0008001ba6800038 0008001ba680000b 0008001ba680001a
+    0008001ba6800029 0008001ba6800038 0008001ba680000b 0008001ba680001a 0008001ba6800029 0008001ba6800038
+    0008001bad800004 0008001bad800013""".split()
+
+  def test_route_114_lkas_regrant_survives_the_next_heartbeat_tick(self):
+    frames = [bytes.fromhex(x) for x in self.ROUTE_114_SCM_BUTTONS]
+    self.safety.set_mads_params(True, False, False)   # ALT_EXP_ENABLE_MADS, as logged
+    self.safety.set_heartbeat_engaged_mads(True)
+    for dat in frames[:20]:                           # no press: MAIN_ON settles at 1
+      self.assertTrue(self._rx(libsafety_py.make_CANPacket(0x1A6, 0, dat)))
+    self.safety.set_controls_allowed_lateral(True)
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # 801.75: openpilot's MADS goes to disabled; the panda's third 1 Hz tick exits lateral
+    self.safety.set_heartbeat_engaged_mads(False)
+    for _ in range(3):
+      self.safety.mads_heartbeat_engaged_check()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    # 805.19: the LKAS press grants lateral again
+    for dat in frames[20:]:
+      self.assertTrue(self._rx(libsafety_py.make_CANPacket(0x1A6, 0, dat)))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # ~805.21: the next tick, with the heartbeat still saying MADS off. This revoked the grant on the car.
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.safety.set_heartbeat_engaged_mads(True)
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
 
 class TestHondaElesysStanddownGasInterceptorSafety(TestHondaNidecAltGasInterceptorSafety):
   """
