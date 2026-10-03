@@ -543,6 +543,27 @@ class TestHondaElesysStanddownGasInterceptorSafety(TestHondaNidecAltGasIntercept
 HONDA_ELESYS_LONG_TX = [(0x1FA, 0, 8), (0x1FA, 2, 8), (0x30C, 0, 8), (0x30C, 2, 8), (0x200, 0, 6), (0x1A6, 0, 8), (0x1A6, 2, 8),
                         (0x33D, 0, 4), (0x33D, 0, 5), (0x33D, 0, 8), (0xE5, 0, 8), (0x296, 0, 4), (0x296, 2, 4)]
 
+# What the panda hears on this car. The radar (bus 2) sends only BRAKE_COMMAND and ACC_HUD; the rest is the car's (bus 0).
+HONDA_ELESYS_RADAR_FRAMES = (("BRAKE_COMMAND", {"COMPUTER_BRAKE": 0}), ("ACC_HUD", {"PCM_SPEED": 50, "PCM_GAS": 10}))
+HONDA_ELESYS_CAR_FRAMES = (("POWERTRAIN_DATA", {}), ("ENGINE_DATA", {"XMISSION_SPEED": 20}), ("SCM_BUTTONS", {"MAIN_ON": 1}),
+                           ("LKAS_HUD", {}))
+
+
+def honda_elesys_wire(test, relay_open: bool, rounds: int = 20):
+  """Frames as the firmware sees them (fwd hook, then rx hook). With the harness relay open each frame arrives on its
+  own bus; with it closed - a passive comma, routes 0e-82 - bus 0 and bus 2 are one wire and every frame arrives on
+  both. Returns the (bus, addr, fwd) decisions and the relay_malfunction state after each frame."""
+  seen = []
+  for _ in range(rounds):
+    for frames, home in ((HONDA_ELESYS_CAR_FRAMES, 0), (HONDA_ELESYS_RADAR_FRAMES, 2)):
+      for name, values in frames:
+        for bus in ((home,) if relay_open else (home, 2 - home)):
+          msg = test.packer.make_can_msg_safety(name, bus, values)
+          fwd = test.safety.safety_fwd_hook(bus, msg[0].addr)
+          test.safety.safety_rx_hook(msg)
+          seen.append((bus, msg[0].addr, fwd, test.safety.get_relay_malfunction()))
+  return seen
+
 
 class TestHondaElesysStockAccSafety(TestHondaNidecPcmAltSafety):
   """
@@ -553,7 +574,8 @@ class TestHondaElesysStockAccSafety(TestHondaNidecPcmAltSafety):
   """
   TX_MSGS = [[0xE4, 0], [0x194, 0], [0x500, 0]]
   FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194]}
-  RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x194)}
+  # nothing on the car's side sends 0xE4/0x194: the radar's own frames on bus 0 are what show a relay that did not open
+  RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x194, 0x1FA, 0x30C)}
 
   def setUp(self):
     self.packer = CANPackerSafety("honda_accord_au_2015_can_generated")
@@ -561,6 +583,44 @@ class TestHondaElesysStockAccSafety(TestHondaNidecPcmAltSafety):
     self.safety.set_current_safety_param_sp(HondaSafetyFlagsSP.GAS_INTERCEPTOR)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_STOCK_ACC)
     self.safety.init_tests()
+
+  def test_relay_open_forwards_everything(self):
+    seen = honda_elesys_wire(self, relay_open=True)
+    self.assertFalse(any(relay for *_, relay in seen))
+    for bus, addr, fwd, _ in seen:
+      self.assertEqual(2 - bus, fwd, f"{addr=:#x} from {bus=}")
+
+  def test_stuck_relay_is_a_relay_malfunction(self):
+    # a harness relay that did not open (undetected harness, loose or flipped cable, failed relay): the radar's
+    # first frame seen on bus 0 trips it, and from then on nothing is forwarded back onto the same wire
+    seen = honda_elesys_wire(self, relay_open=False)
+    first = next(i for i, (*_, relay) in enumerate(seen) if relay)
+    self.assertEqual(0, seen[first][0])
+    self.assertTrue(seen[first][1] in (0x1FA, 0x30C), hex(seen[first][1]))
+    self.assertFalse(any(relay for *_, relay in seen[:first]))
+    self.assertTrue(all(relay for *_, relay in seen[first:]))
+    self.assertTrue(all(fwd == -1 for _, _, fwd, _ in seen[first + 1:]))
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(self._send_steer_msg(0)))
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("SP_HUD_STATUS", 0, {"LAT_ACTIVE": 1})))
+
+  def test_stuck_relay_respects_the_transition_timeout(self):
+    # the first second after the relay switches is not judged, as for every other relay check
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_STOCK_ACC)
+    honda_elesys_wire(self, relay_open=False, rounds=2)
+    self.assertFalse(self.safety.get_relay_malfunction())
+    self.safety.init_tests()   # safety_mode_cnt = 2: past the timeout (the firmware counts it at 1 Hz)
+    honda_elesys_wire(self, relay_open=False, rounds=1)
+    self.assertTrue(self.safety.get_relay_malfunction())
+
+  def test_refused_radar_frames_change_nothing(self):
+    # 0x1FA/0x30C are relay checks here, never transmits: a refused BRAKE_COMMAND must not become OP's brake level,
+    # which would hold the AEB latch below the radar's request
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(self._send_brake_msg(self.MAX_BRAKE)))
+    self.assertFalse(self._tx(self._send_acc_hud_msg(0, 0)))
+    self.assertTrue(self._rx(self._radar_brake_msg(COMPUTER_BRAKE=1, FCW=2)))
+    self.assertTrue(self.safety.get_honda_fwd_brake())
 
   def _send_brake_msg(self, brake, aeb_req=0, bus=0):
     # this platform's stock-AEB flag is read from bit 43 (FCW field), not AEB_REQ_1 (bit 29)
@@ -740,12 +800,22 @@ class TestHondaElesysStockAccStanddownConflictSafety(common.SafetyTest):
     self.assertFalse(self._tx(self.packer.make_can_msg_safety("STEERING_CONTROL", 0, {"STEER_TORQUE": 0})))
     self.assertFalse(self._tx(self.packer.make_can_msg_safety("SCM_BUTTONS", 2, {"MAIN_ON": 0})))
 
-  def test_no_relay_malfunction(self):
-    # nothing is transmitted, so nothing is relay-checked: a stock ECU on any bus is expected
+  def test_relay_malfunction_on_the_radars_frames_only(self):
+    # nothing is transmitted, but the relay is still checked on the radar's own frames: forwarding everything
+    # through a relay that did not open would put every frame back onto the same wire
     for bus in range(3):
       for addr in self.SCANNED_ADDRS:
+        self.safety.set_relay_malfunction(False)
         self._rx(make_msg(bus, addr, 8))
-        self.assertFalse(self.safety.get_relay_malfunction(), (bus, hex(addr)))
+        self.assertEqual(bus == 0 and addr in (0x1FA, 0x30C), self.safety.get_relay_malfunction(), (bus, hex(addr)))
+
+  def test_stuck_relay_is_a_relay_malfunction(self):
+    self.assertFalse(any(relay for *_, relay in honda_elesys_wire(self, relay_open=True)))
+    seen = honda_elesys_wire(self, relay_open=False)
+    first = next(i for i, (*_, relay) in enumerate(seen) if relay)
+    self.assertEqual(0, seen[first][0])
+    self.assertTrue(seen[first][1] in (0x1FA, 0x30C), hex(seen[first][1]))
+    self.assertTrue(all(fwd == -1 for _, _, fwd, _ in seen[first + 1:]))
 
   def test_stock_acc_state(self):
     # stock ACC mode with no stand-down: the radar's AEB latch reads bit 43, the pedal is not read

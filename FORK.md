@@ -44,7 +44,7 @@ git rev-list --count HEAD..refs/upstream/master                     # 0 on 2026-
 git diff --name-status refs/upstream/master HEAD                    # the 31 files and this one
 MB=$(git merge-base HEAD refs/upstream/master)
 git rev-list --count $MB..refs/upstream/master -- <file>            # conflict risk of one file
-git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 93 with stock ACC mode (2026-10-04; 70 after the VSA fault, 49 after the 2026-10 batch, 31 after the sync)
+git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 98 with stock ACC mode (2026-10-04; 70 after the VSA fault, 49 after the 2026-10 batch, 31 after the sync)
 ```
 
 ## Files by area
@@ -221,7 +221,11 @@ the 2026-09 merge.
     `0x1A6`, no `0xE5`) and no stand-down: only `0x0E4` and `0x500` go out. `carstate.py`: `accFaulted` from
     `BRAKE_ERROR` also with the flag;
   * `honda.h`: param 64 forces the interceptor off, has its own TX list (`0xE4`, `0x194` relay-checked, `0x500`),
-    and its fwd hook blocks nothing; 32 and 64 together transmit nothing and forward everything;
+    and its fwd hook blocks nothing. Since nothing on the car's side sends `0xE4`/`0x194`, the radar's own `0x1FA`
+    and `0x30C` on bus 0 are relay-checked too (`HONDA_N_ELESYS_STOCK_ACC_RELAY_CHECK`: `disable_static_blocking`,
+    and `honda_tx_hook` refuses them in this mode), so a harness relay that did not open is a relay malfunction
+    instead of every frame forwarded back onto the same wire. 32 and 64 together transmit nothing, keep that relay
+    check and forward everything;
   * `safety/tests/libsafety/safety.c` / `libsafety_py.py`: the getter `get_honda_elesys_stock_acc()`;
     `test_honda.py`: `TestHondaElesysStockAccSafety`, `TestHondaElesysStockAccStanddownConflictSafety`;
     `car/honda/tests/test_elesys_stock_acc.py` (new): the hook, toggle-off identity, the sends, `accFaulted`.
@@ -282,7 +286,7 @@ python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.te
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                            # 31 tests: the gas law
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 28 tests: the soft final stop
 python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault
-python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 1020 run, OK (skipped=73)
+python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 1025 run, OK (skipped=73)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
 python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 115 tests on 2026-10-03, including the integration script
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning.py

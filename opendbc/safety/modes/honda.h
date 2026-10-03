@@ -27,6 +27,13 @@
   {0x30C, 0, 8, .check_relay = true},   \
   {0x33D, 0, 5, .check_relay = true},   \
 
+// FORK(HONDA_ACCORD_9G_AU): stock ACC mode's relay check. The radar (bus 2) sends only 0x1FA (50 Hz) and 0x30C (10 Hz);
+// either one arriving on bus 0 means the harness relay did not open, and every forward would land back on the same
+// wire. Relay checks only: honda_tx_hook refuses both in this mode, and disable_static_blocking keeps them forwarded.
+#define HONDA_N_ELESYS_STOCK_ACC_RELAY_CHECK                               \
+  {0x1FA, 0, 8, .check_relay = true, .disable_static_blocking = true},  \
+  {0x30C, 0, 8, .check_relay = true, .disable_static_blocking = true},  \
+
 enum {
   HONDA_BTN_NONE = 0,
   HONDA_BTN_MAIN = 1,
@@ -241,6 +248,13 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
   unsigned int bus_pt = honda_get_pt_bus();
   unsigned int bus_buttons = (honda_bosch_radarless) ? 2U : bus_pt;  // the camera controls ACC on radarless Bosch cars
 
+  // FORK(HONDA_ACCORD_9G_AU): stock ACC mode lists the radar's 0x1FA and 0x30C for the relay check only
+  // (HONDA_N_ELESYS_STOCK_ACC_RELAY_CHECK): OP never sends either, and the refused frame leaves honda_brake alone
+  const bool elesys_stock_acc_relay_check_only = honda_elesys_stock_acc && ((msg->addr == 0x1FAU) || (msg->addr == 0x30CU));
+  if (elesys_stock_acc_relay_check_only) {
+    tx = false;
+  }
+
   // ACC_HUD: safety check (nidec w/o pedal)
   if ((msg->addr == 0x30CU) && (msg->bus == bus_pt)) {
     int pcm_speed = (msg->data[0] << 8) | msg->data[1];
@@ -258,7 +272,7 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
   }
 
   // BRAKE: safety check (nidec)
-  if ((msg->addr == 0x1FAU) && (msg->bus == bus_pt)) {
+  if ((msg->addr == 0x1FAU) && (msg->bus == bus_pt) && !elesys_stock_acc_relay_check_only) {  // FORK(HONDA_ACCORD_9G_AU)
     honda_brake = (msg->data[0] << 2) + ((msg->data[1] >> 6) & 0x3U);
 
     if (honda_nidec_hybrid) {
@@ -383,11 +397,18 @@ static safety_config honda_nidec_init(uint16_t param) {
 
   // FORK(HONDA_ACCORD_9G_AU): stock ACC mode (ELESYS_STOCK_ACC). The car's own ACC (the Elesys radar on bus 2) does
   // gas and brake, so OP sends steering and SP_HUD_STATUS only: no 0x1FA, 0x30C, 0x200 or 0x1A6 on either bus, and
-  // no 0x33D (the stock camera's, forwarded). Relay-checked like the stand-down list.
+  // no 0x33D (the stock camera's, forwarded). Nothing on the car's side sends 0xE4 or 0x194, so the relay is checked
+  // on the radar's own frames too (HONDA_N_ELESYS_STOCK_ACC_RELAY_CHECK).
   static CanMsg HONDA_N_ELESYS_STOCK_ACC_TX_MSGS[] = {
     {0xE4,  0, 5, .check_relay = true},
     {0x194, 0, 4, .check_relay = true},
     {0x500, 0, 8, .check_relay = false},
+    HONDA_N_ELESYS_STOCK_ACC_RELAY_CHECK
+  };
+
+  // FORK(HONDA_ACCORD_9G_AU): stand-down and stock ACC bits together: nothing OP may send, the relay check kept
+  static CanMsg HONDA_N_ELESYS_STOCK_ACC_CONFLICT_TX_MSGS[] = {
+    HONDA_N_ELESYS_STOCK_ACC_RELAY_CHECK
   };
 
   const uint16_t HONDA_PARAM_NIDEC_ALT = 4;
@@ -476,11 +497,12 @@ static safety_config honda_nidec_init(uint16_t param) {
   }
 
   // FORK(HONDA_ACCORD_9G_AU): stock ACC mode, see HONDA_N_ELESYS_STOCK_ACC_TX_MSGS. With the stand-down bit also
-  // set, transmit nothing at all.
+  // set, transmit nothing at all, and keep the relay check. The 32|64 mapping rests on this list and on the override
+  // at the end of honda_nidec_fwd_hook; clearing honda_elesys_scm_standdown above is defense in depth that no test
+  // can observe through them. Review both together.
   if (honda_elesys_stock_acc) {
     if (elesys_scm_standdown_param) {
-      ret.tx_msgs = NULL;
-      ret.tx_msgs_len = 0;
+      SET_TX_MSGS(HONDA_N_ELESYS_STOCK_ACC_CONFLICT_TX_MSGS, ret);
     } else {
       SET_TX_MSGS(HONDA_N_ELESYS_STOCK_ACC_TX_MSGS, ret);
     }
@@ -595,9 +617,9 @@ static bool honda_nidec_fwd_hook(int bus_num, int addr) {
   }
 
   // FORK(HONDA_ACCORD_9G_AU): stock ACC mode blocks nothing. The radar's 0x1FA is the stock ACC's brake as well as
-  // CMBS and its 0x30C is the stock ACC's gas (not in the TX list, so not statically blocked either); the real 0x1A6
-  // reaches the radar with the driver's MAIN_ON. ALT_EXP_DISABLE_STOCK_AEB does not apply: blocking 0x1FA here
-  // would take the ACC's brake away too.
+  // CMBS and its 0x30C is the stock ACC's gas (relay-checked on bus 0 with disable_static_blocking, so not statically
+  // blocked either); the real 0x1A6 reaches the radar with the driver's MAIN_ON. ALT_EXP_DISABLE_STOCK_AEB does not
+  // apply: blocking 0x1FA here would take the ACC's brake away too.
   if (honda_elesys_stock_acc) {
     block_msg = false;
   }
