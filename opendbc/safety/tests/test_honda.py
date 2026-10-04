@@ -449,48 +449,11 @@ class TestHondaNidecAltGasInterceptorSafety(GasInterceptorSafetyTest, HondaButto
     return self.packer.make_can_msg_safety("SCM_BUTTONS", bus, values)
 
 
-class TestHondaElesysScmStanddownSafety(TestHondaNidecPcmAltSafety):
+class HondaElesysRoute114Regrant:
   """
-    HONDA_ACCORD_9G_AU (Elesys radar) stock-ACC stand-down (ELESYS_SCM_STANDDOWN): OP re-sends SCM_BUTTONS
-    (0x1A6) on bus 2 with MAIN_ON=0 and the stock 0x1A6 is blocked bus 0 -> 2.
-    0x33D (4-byte LKAS_HUD) is forwarded from the stock camera, not sent by OP.
+    Route 114's LKAS re-press, as logged, for both of the car's safety params: the stand-down (36) and stock ACC
+    mode (68). The MADS heartbeat exit and its reset are mads.h's, the same in every mode. A mixin, not a TestCase.
   """
-  # 0x500 is SP_HUD_STATUS for the LIN-bus gateway, on bus 0 (the module sits on the camera's bus;
-  # bus 2 is the Elesys radar branch on this harness)
-  TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x1A6, 2], [0x500, 0]]
-  FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
-  RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x194, 0x30C)}
-
-  def setUp(self):
-    self.packer = CANPackerSafety("acura_ilx_2016_can_generated")
-    self.safety = libsafety_py.libsafety
-    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_SCM_STANDDOWN)
-    self.safety.init_tests()
-
-  def _send_brake_msg(self, brake, aeb_req=0, bus=0):
-    # this platform's stock-AEB flag is read from bit 43 (FCW field), not AEB_REQ_1 (bit 29)
-    values = {self.BRAKE_SIG: brake, "FCW": aeb_req * 2}
-    return self.packer.make_can_msg_safety("BRAKE_COMMAND", bus, values)
-
-  def test_acc_hud_safety_check(self):
-    # normal gas rules, except the factory-camera braking pattern (pcm_gas=198, pcm_speed=0) is always allowed
-    for controls_allowed in [True, False]:
-      self.safety.set_controls_allowed(controls_allowed)
-      for pcm_gas in range(255):
-        for pcm_speed in range(100):
-          send = (controls_allowed and pcm_gas <= self.MAX_GAS) or (pcm_gas == 0 and pcm_speed == 0) or (pcm_gas == 198 and pcm_speed == 0)
-          self.assertEqual(send, self._tx(self._send_acc_hud_msg(pcm_gas, pcm_speed)))
-
-  def test_fwd_hook(self):
-    # 0x1A6 (SCM_BUTTONS) is blocked bus 0 -> 2 under stand-down; 0x33D is forwarded (stock camera HUD)
-    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C, 0x1FA], 0: [0x1A6]}
-    self.safety.set_honda_fwd_brake(False)
-    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
-
-    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
-    self.safety.set_honda_fwd_brake(True)
-    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
-
   # FORK(UPSTREAM-FIX): route 114, seg 13, as logged. SCM_BUTTONS (0x1A6) from 804.51 to 805.50, with the LKAS press
   # (CRUISE_SETTING 1) at 805.19-805.25. The panda's heartbeat exit was at ~804.25 and its next 1 Hz tick at ~805.21,
   # before pandad's heartbeat could report MADS engaged; that tick revoked the grant and the car got no steering
@@ -533,6 +496,49 @@ class TestHondaElesysScmStanddownSafety(TestHondaNidecPcmAltSafety):
     self.safety.set_heartbeat_engaged_mads(True)
     self.safety.mads_heartbeat_engaged_check()
     self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+
+class TestHondaElesysScmStanddownSafety(HondaElesysRoute114Regrant, TestHondaNidecPcmAltSafety):
+  """
+    HONDA_ACCORD_9G_AU (Elesys radar) stock-ACC stand-down (ELESYS_SCM_STANDDOWN): OP re-sends SCM_BUTTONS
+    (0x1A6) on bus 2 with MAIN_ON=0 and the stock 0x1A6 is blocked bus 0 -> 2.
+    0x33D (4-byte LKAS_HUD) is forwarded from the stock camera, not sent by OP.
+  """
+  # 0x500 is SP_HUD_STATUS for the LIN-bus gateway, on bus 0 (the module sits on the camera's bus;
+  # bus 2 is the Elesys radar branch on this harness)
+  TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x1A6, 2], [0x500, 0]]
+  FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
+  RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x194, 0x30C)}
+
+  def setUp(self):
+    self.packer = CANPackerSafety("acura_ilx_2016_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_SCM_STANDDOWN)
+    self.safety.init_tests()
+
+  def _send_brake_msg(self, brake, aeb_req=0, bus=0):
+    # this platform's stock-AEB flag is read from bit 43 (FCW field), not AEB_REQ_1 (bit 29)
+    values = {self.BRAKE_SIG: brake, "FCW": aeb_req * 2}
+    return self.packer.make_can_msg_safety("BRAKE_COMMAND", bus, values)
+
+  def test_acc_hud_safety_check(self):
+    # normal gas rules, except the factory-camera braking pattern (pcm_gas=198, pcm_speed=0) is always allowed
+    for controls_allowed in [True, False]:
+      self.safety.set_controls_allowed(controls_allowed)
+      for pcm_gas in range(255):
+        for pcm_speed in range(100):
+          send = (controls_allowed and pcm_gas <= self.MAX_GAS) or (pcm_gas == 0 and pcm_speed == 0) or (pcm_gas == 198 and pcm_speed == 0)
+          self.assertEqual(send, self._tx(self._send_acc_hud_msg(pcm_gas, pcm_speed)))
+
+  def test_fwd_hook(self):
+    # 0x1A6 (SCM_BUTTONS) is blocked bus 0 -> 2 under stand-down; 0x33D is forwarded (stock camera HUD)
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C, 0x1FA], 0: [0x1A6]}
+    self.safety.set_honda_fwd_brake(False)
+    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
+
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6]}
+    self.safety.set_honda_fwd_brake(True)
+    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
 
 
 class TestHondaElesysStanddownGasInterceptorSafety(TestHondaNidecAltGasInterceptorSafety):
@@ -608,7 +614,7 @@ def honda_elesys_wire(test, relay_open: bool, rounds: int = 20):
   return seen
 
 
-class TestHondaElesysStockAccSafety(TestHondaNidecPcmAltSafety):
+class TestHondaElesysStockAccSafety(HondaElesysRoute114Regrant, TestHondaNidecPcmAltSafety):
   """
     HONDA_ACCORD_9G_AU stock ACC mode (NIDEC_ALT | ELESYS_STOCK_ACC): the car's own ACC (the Elesys radar on bus 2)
     does gas and brake; OP sends steering and SP_HUD_STATUS (0x500) only and blocks nothing from forwarding: the

@@ -234,7 +234,8 @@ the 2026-09 merge.
   * `opendbc/safety/sunnypilot/mads.h` (upstream file, `FORK(UPSTREAM-FIX)`, every MADS car): a lateral grant zeroes
     `heartbeat_engaged_mads_mismatches`, as `safety.h` does for `heartbeat_engaged_mismatches`.
     `safety/tests/mads_common.py` (upstream file): the regrant and heartbeat-traffic tests, run by every MADS safety
-    class; `test_honda.py`: route 114's `0x1A6` frames;
+    class; `test_honda.py`: route 114's `0x1A6` frames (`HondaElesysRoute114Regrant`, run under both the stand-down,
+    param 36, and stock ACC mode, param 68);
   * `carstate.py`: `STEER_STATUS` 1 at a standstill in P is not a steering fault on `HONDA_ELESYS`
     (`TestElesysKeyOffSteerStatus` in `test_elesys.py`);
   * `elesys_gas.py`: the v2 launch cap below 6 m/s (`TestLaunchCap` in `test_elesys_gas.py`);
@@ -304,12 +305,12 @@ python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                
 python -m unittest opendbc.car.honda.tests.test_elesys_stock_acc                          # 17 tests: stock ACC mode
 python -m unittest opendbc.sunnypilot.car.honda.test_shadow_learn                          # 21 tests: the shadow learners
 python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault
-python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 1090 run, OK (skipped=73) (2026-10-05, stock ACC mode + batch 2)
+python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 1091 run, OK (skipped=73) (2026-10-05, stock ACC mode + batch 2)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
 python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 143 tests (2026-10-05, stock ACC mode + batch 2), including the integration script
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning.py
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning_integration.py                      # §15 SKIPs without openpilot on PYTHONPATH
-python -m unittest discover                                                                 # 10230 run, OK (skipped=1272) (2026-10-05, stock ACC mode + batch 2)
+python -m unittest discover                                                                 # 10231 run, OK (skipped=1272) (2026-10-05, stock ACC mode + batch 2)
 ./test.sh                                                                                   # uv lock check, then ruff, ty, codespell, cpplint, MISRA, unittest-parallel
 ```
 
