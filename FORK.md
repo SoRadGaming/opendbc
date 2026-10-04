@@ -27,7 +27,7 @@ The full merge guide and the per-area documents live in the sunnypilot repo, und
 | fork HEAD | `8bd6e314` (upstream `f95f996f` merged into the fork's `c61cfd9b`), then the review-fix commit. That becomes `sp-master` and sunnypilot's pinned pointer. |
 | upstream commits not in the fork | 0 on 2026-09-27 |
 | fork commits since the fork point | 40 at `8bd6e314` (39 excluding merges). A merge keeps history, so this counts every fork commit since `b9712d20`; use the diff to see what the fork carries. |
-| files changed | 31, plus this file (36 since the 2026-10 batch: `elesys_gas.py`, `test_elesys_gas.py`, `elesys_stop.py`, `test_elesys_stop.py` and `torque_data/override.toml` are new to the list; 39 since 2026-10-03: `vsa_fault.py`, `test_vsa_fault.py` and `fixtures/vsa_fault_frames.json.gz`) |
+| files changed | 31, plus this file (36 since the 2026-10 batch: `elesys_gas.py`, `test_elesys_gas.py`, `elesys_stop.py`, `test_elesys_stop.py` and `torque_data/override.toml` are new to the list; 39 since 2026-10-03: `vsa_fault.py`, `test_vsa_fault.py` and `fixtures/vsa_fault_frames.json.gz`; 44 since 2026-10-04, stock ACC mode: `sunnypilot/car/interfaces.py`, `sunnypilot/car/honda/values_ext.py`, `car/honda/tests/test_elesys_stock_acc.py`, `safety/tests/libsafety/safety.c` and `libsafety_py.py`; 48 since 2026-10-05, batch 2 merged beside it: `safety/sunnypilot/mads.h`, `safety/tests/mads_common.py`, `sunnypilot/car/honda/shadow_learn.py` and `test_shadow_learn.py`) |
 
 **Branches.** This fork's GitHub default branch is `master` (`fe144714`), not `sp-master`. The submodule clone in the
 Windows checkout (`S:/OP/sp-live/opendbc_repo`) fetches only `master`
@@ -44,7 +44,7 @@ git rev-list --count HEAD..refs/upstream/master                     # 0 on 2026-
 git diff --name-status refs/upstream/master HEAD                    # the 31 files and this one
 MB=$(git merge-base HEAD refs/upstream/master)
 git rev-list --count $MB..refs/upstream/master -- <file>            # conflict risk of one file
-git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 70 since the VSA fault (2026-10-03; 49 after the 2026-10 batch, 31 after the sync)
+git grep -n -E "FORK(\(|:)" -- opendbc | wc -l                      # 107 with stock ACC mode and batch 2 (2026-10-05; 98 with stock ACC mode alone, 70 after the VSA fault, 49 after the 2026-10 batch, 31 after the sync)
 ```
 
 ## Files by area
@@ -209,6 +209,42 @@ the 2026-09 merge.
 * `opendbc/safety/tests/test_honda.py` (0): `TestHondaElesysScmStanddownSafety`,
   `TestHondaElesysStanddownGasInterceptorSafety`.
 * `opendbc/safety/tests/common.py` (0): scanned-range exceptions for these tests (`0x30C`, `0x1A6`).
+* **Stock ACC mode** (2026-10-04, `FORK(HONDA_ACCORD_9G_AU)`; sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` section 15): the
+  sunnypilot param `HondaElesysStockAcc` hands the car's own ACC the gas and brake while openpilot steers.
+  * `opendbc/sunnypilot/car/interfaces.py` (upstream file): `_initialize_honda()`, called last in `setup_interfaces()`,
+    the mode's one writer - openpilot long off, `pcmCruise`, no interceptor (`CP_SP` and SP param bit 2),
+    `autoResumeSng` False, safety param `(p & ~32) | 64` = 68, `HondaFlagsSP.ELESYS_STOCK_ACC`, and the carlog line.
+    A no-op with the param off;
+  * `values.py` `HondaSafetyFlags.ELESYS_STOCK_ACC = 64`; `opendbc/sunnypilot/car/honda/values_ext.py` (upstream file)
+    `HondaFlagsSP.ELESYS_STOCK_ACC = 8`;
+  * `carcontroller.py`: with the flag, neither longitudinal branch (no `0x1FA`/`0x200`/`0x30C`, no cancel/resume
+    `0x1A6`, no `0xE5`) and no stand-down: only `0x0E4` and `0x500` go out. `carstate.py`: `accFaulted` from
+    `BRAKE_ERROR` also with the flag;
+  * `honda.h`: param 64 forces the interceptor off, has its own TX list (`0xE4`, `0x194` relay-checked, `0x500`),
+    and its fwd hook blocks nothing. Since nothing on the car's side sends `0xE4`/`0x194`, the radar's own `0x1FA`
+    and `0x30C` on bus 0 are relay-checked too (`HONDA_N_ELESYS_STOCK_ACC_RELAY_CHECK`: `disable_static_blocking`,
+    and `honda_tx_hook` refuses them in this mode), so a harness relay that did not open is a relay malfunction
+    instead of every frame forwarded back onto the same wire. 32 and 64 together transmit nothing, keep that relay
+    check and forward everything;
+  * `safety/tests/libsafety/safety.c` / `libsafety_py.py`: the getter `get_honda_elesys_stock_acc()`;
+    `test_honda.py`: `TestHondaElesysStockAccSafety`, `TestHondaElesysStockAccStanddownConflictSafety`;
+    `car/honda/tests/test_elesys_stock_acc.py` (new): the hook, toggle-off identity, the sends, `accFaulted`.
+* **Batch 2** (2026-10-04, merged beside stock ACC mode on 2026-10-05; sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` 6.4,
+  8.5, 9.2 and 9.3):
+  * `opendbc/safety/sunnypilot/mads.h` (upstream file, `FORK(UPSTREAM-FIX)`, every MADS car): a lateral grant zeroes
+    `heartbeat_engaged_mads_mismatches`, as `safety.h` does for `heartbeat_engaged_mismatches`.
+    `safety/tests/mads_common.py` (upstream file): the regrant and heartbeat-traffic tests, run by every MADS safety
+    class; `test_honda.py`: route 114's `0x1A6` frames;
+  * `carstate.py`: `STEER_STATUS` 1 at a standstill in P is not a steering fault on `HONDA_ELESYS`
+    (`TestElesysKeyOffSteerStatus` in `test_elesys.py`);
+  * `elesys_gas.py`: the v2 launch cap below 6 m/s (`TestLaunchCap` in `test_elesys_gas.py`);
+  * `shadow_learn.py` (new) and `test_shadow_learn.py` (new): the brake response table and the launch multiplier,
+    logged as `hondashadow` lines and applied to nothing. `dynamic_tuning.py` builds them (`_build_shadow()`) and feeds
+    them from `update_wind()`; `carstate_ext.py` records `pcm_pedal_gas` (`0x17C`) for the launch learner.
+  * With stock ACC mode on, none of the longitudinal parts run: `_is_applicable()` needs openpilot long, so the tuner
+    is off and builds no shadow learners (which also need the interceptor), and no `0x200` means no launch cap
+    (`TestStockAccBesideBatch2` in `test_elesys_stock_acc.py`, with the tuner's toggle on). The `mads.h` and
+    `STEER_STATUS` changes apply in both modes.
 * DBC: `honda_accord_au_2015_can.dbc` (since 2026-10-03 also `VSA_1AA` 0x1AA and `VSA_3D9` 0x3D9, provisional VSA-fault
   frames that carstate does not read; their Honda checksum and counter were checked on 7.6 and 0.76 million logged
   frames), `_honda_elesys_base.dbc`, `_lkas_hud_4byte.dbc`,
@@ -262,16 +298,18 @@ complete steps, checks and on-car verification are in the sunnypilot `docs/fork/
 Run from this directory with `PYTHONPATH=.` (in the sunnypilot venv, which has opendbc's dependencies):
 
 ```bash
-python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 73 tests (72 in test_elesys)
-python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                            # 31 tests: the gas law
+python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 77 tests (76 in test_elesys)
+python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                            # 38 tests: the gas law and the launch cap
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 28 tests: the soft final stop
+python -m unittest opendbc.car.honda.tests.test_elesys_stock_acc                          # 17 tests: stock ACC mode
+python -m unittest opendbc.sunnypilot.car.honda.test_shadow_learn                          # 21 tests: the shadow learners
 python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault
-python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 942 run, OK (skipped=69)
+python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 1090 run, OK (skipped=73) (2026-10-05, stock ACC mode + batch 2)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
-python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 115 tests on 2026-10-03, including the integration script
+python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 143 tests (2026-10-05, stock ACC mode + batch 2), including the integration script
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning.py
 python opendbc/sunnypilot/car/honda/test_dynamic_tuning_integration.py                      # §15 SKIPs without openpilot on PYTHONPATH
-python -m unittest discover                                                                 # 9605 run, OK (skipped=1268) with the VSA fault and its review fixes (2026-10-03)
+python -m unittest discover                                                                 # 10230 run, OK (skipped=1272) (2026-10-05, stock ACC mode + batch 2)
 ./test.sh                                                                                   # uv lock check, then ruff, ty, codespell, cpplint, MISRA, unittest-parallel
 ```
 

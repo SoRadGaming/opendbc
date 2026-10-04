@@ -229,6 +229,11 @@ bool get_honda_fwd_brake(void){
   return honda_fwd_brake;
 }
 
+// FORK(HONDA_ACCORD_9G_AU)
+bool get_honda_elesys_stock_acc(void){
+  return honda_elesys_stock_acc;
+}
+
 static MADSState *get_mads_state(void) {
   return &m_mads_state;
 }

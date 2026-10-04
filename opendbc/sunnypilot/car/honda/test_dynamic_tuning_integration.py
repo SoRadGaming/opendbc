@@ -946,8 +946,14 @@ bad = [r for r in rows_v2 if r["gas"] != r["v2"]]
 check("param on: every interceptor command is elesys_pedal_v2, bit for bit", not bad, f"{bad[:2]}")
 bad = [(a["v"], a["a"], a["brake"], b["brake"]) for a, b in zip(rows_v1, rows_v2, strict=True) if a["brake"] != b["brake"]]
 check("the brake command is identical under both laws", not bad, f"{bad[:3]}")
-bad = [(r["v"], r["a"], r["gas"], r["v1"]) for r in rows_v2 if r["v"] <= 3.0 and abs(r["gas"] - r["v1"]) > 1e-12]
-check("at or below 3 m/s v2 IS v1 (every launch unchanged)", not bad, f"{bad[:3]}")
+# at or below 3 m/s v2 is v1 up to the launch cap (elesys_gas.py): small demands get v1's pedal, launches the cap's
+cap = [min(r["v1"], eg.elesys_launch_cap(r["v"], compute_gb_honda_elesys(r["a"], r["v"])[0])) for r in rows_v2]
+bad = [(r["v"], r["a"], r["gas"], r["v1"]) for r, c in zip(rows_v2, cap, strict=True) if r["v"] <= 3.0 and abs(r["gas"] - c) > 1e-12]
+check("at or below 3 m/s v2 IS v1 up to the launch cap", not bad, f"{bad[:3]}")
+bad = [(r["v"], r["a"], r["gas"], r["v1"]) for r in rows_v2 if r["v"] <= 3.0 and r["a"] <= 0.8 and r["gas"] != r["v1"]]
+check("and every demand up to 0.8 m/s^2 there is v1's pedal exactly", not bad, f"{bad[:3]}")
+capped = [r for r in rows_v2 if r["v"] <= 4.5 and r["a"] >= 1.6 and r["gas"] < r["v1"] - 0.01]
+check("while a 1.6 m/s^2 launch at 1.5-4.5 m/s is capped", len(capped) >= 3, f"{len(capped)}")
 moved = [r for r in rows_v2 if r["v"] >= 6.0 and r["a"] >= 0.5 and r["gas"] < r["v1"] - 0.02]
 check("and above it v2 really does ask for less pedal per m/s^2", len(moved) > 10, f"{len(moved)}")
 check("the gas law tag reaches the tuner's log fields", cc_v2.dynamic_tuner.debug_values()["gas_law"] == "v2"

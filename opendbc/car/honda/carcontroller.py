@@ -12,6 +12,7 @@ from opendbc.sunnypilot.car.honda.gas_interceptor import GasInterceptorCarContro
 from opendbc.sunnypilot.car.honda.icbm import IntelligentCruiseButtonManagementInterface
 from opendbc.sunnypilot.car.honda.dynamic_tuning import HondaDynamicTuner
 from opendbc.sunnypilot.car.honda.elesys_stop import ElesysSoftStop  # FORK(HONDA_ACCORD_9G_AU): soft final stop
+from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -270,6 +271,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # FORK(HONDA_ACCORD_9G_AU): the soft final stop (elesys_stop.py), on the tuner's toggle like the stopping
     # debounce and the 32-count release limiter. Never built on another car or with the toggle off.
     self.soft_stop = ElesysSoftStop() if (CP.carFingerprint in HONDA_ELESYS and self.dynamic_tuner.enabled) else None
+    # FORK(HONDA_ACCORD_9G_AU): stock ACC mode (HondaElesysStockAcc): 0x0E4 and 0x500 only, see below
+    self.elesys_stock_acc = bool(CP_SP.flags & HondaFlagsSP.ELESYS_STOCK_ACC)
 
     self.braking = False
     self.brake_steady = 0.
@@ -404,7 +407,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
       pcm_speed = float(np.interp(gas - brake, pcm_speed_BP, pcm_speed_V))
       pcm_accel = int(np.clip((adjust_accel / 1.44) / max_accel, 0.0, 1.0) * self.params.NIDEC_GAS_MAX)
 
-    if not self.CP.openpilotLongitudinalControl:
+    # FORK(HONDA_ACCORD_9G_AU): stock ACC mode takes neither branch. Nothing longitudinal goes out: the radar's own
+    # 0x1FA/0x30C reach the car, and openpilot cannot cancel stock ACC here - this car has no 0xE5, and a CANCEL
+    # 0x1A6 on bus 0 would collide with the SCM's own (the panda does not allow either).
+    if not self.CP.openpilotLongitudinalControl and not self.elesys_stock_acc:
       if self.frame % 2 == 0 and not (self.CP.flags & (HondaFlags.BOSCH_RADARLESS | HondaFlags.BOSCH_CANFD)):
         can_sends.append(hondacan.create_bosch_supplemental_1(self.packer, self.CAN))
       # If using stock ACC, spam cancel command to kill gas when OP disengages.
@@ -413,7 +419,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
       elif CC.cruiseControl.resume:
         can_sends.append(hondacan.spam_buttons_command(self.packer, self.CAN, CruiseButtons.RES_ACCEL, self.CP))
 
-    else:
+    elif self.CP.openpilotLongitudinalControl:
       # Send gas and brake commands.
       if self.frame % 2 == 0:
         ts = self.frame * DT_CTRL
@@ -479,7 +485,9 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
                                                               self.packer, self.frame, self.dynamic_tuner))
           self.dynamic_tuner.update_wind(CC, CS, float(wind_brake_ms2))
 
-    if self.CP.carFingerprint in HONDA_ELESYS and self.CP.openpilotLongitudinalControl and self.frame % 4 == 0:
+    # FORK(HONDA_ACCORD_9G_AU): never in stock ACC mode - the radar hears the driver's real SCM_BUTTONS (MAIN_ON) then
+    if self.CP.carFingerprint in HONDA_ELESYS and self.CP.openpilotLongitudinalControl and not self.elesys_stock_acc and \
+       self.frame % 4 == 0:
       can_sends.append(hondacan.create_scm_buttons_no_cruise(self.packer, self.CAN.camera, CS.scm_buttons))
 
     # Send dashboard UI commands.

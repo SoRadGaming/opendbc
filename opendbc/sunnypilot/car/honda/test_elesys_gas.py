@@ -28,7 +28,7 @@ GOLD_FF_G0 = [0.045, 0.045, 0.080, 0.102, 0.110, 0.122, 0.150, 0.211]
 GOLD_NETS = [-0.5, -0.1, 0.0, 0.5, 1.0, 2.0]                 # m/s^2, after creep
 GOLD_PEDAL = {                                               # v (m/s) -> pedal per GOLD_NETS
   0.: [0.0, 0.0, 0.000413, 0.057704, 0.114996, 0.229579],
-  3.: [0.0, 0.0, 0.003295, 0.091836, 0.180378, 0.357461],
+  3.: [0.0, 0.0, 0.003295, 0.091836, 0.163333, 0.246667],    # 1.0 and 2.0: the launch cap, 0.08 + net/12
   6.: [0.0, 0.0, 0.016872, 0.090401, 0.163930, 0.310989],
   10.: [0.0, 0.0, 0.042838, 0.149221, 0.255604, 0.468370],
   15.: [0.0, 0.011990, 0.086990, 0.234049, 0.381107, 0.675225],
@@ -36,6 +36,9 @@ GOLD_PEDAL = {                                               # v (m/s) -> pedal 
   25.: [0.0, 0.076558, 0.150000, 0.400000, 0.650000, 1.0],
   30.: [0.0, 0.126047, 0.211000, 0.461000, 0.711000, 1.0],
 }
+GOLD_LAUNCH_CAP_BP = [0., 3., 6.]
+GOLD_LAUNCH_CAP_K = [13.0, 12.0, 6.8]
+GOLD_LAUNCH_CAP_P0 = 0.08
 SPEEDS = list(np.round(np.arange(0.0, 36.0, 0.25), 2))
 
 
@@ -52,6 +55,17 @@ def split(net):
 def v2(v, net, k_mult=1.0):
   g, b = split(net)
   return eg.elesys_pedal_v2(v, g, b, wb(v), k_mult)
+
+
+def v2_uncapped(v, net, k_mult=1.0):
+  """v2 as it was before the launch cap."""
+  with mock.patch.object(eg, "LAUNCH_CAP_V_END", -1.0):
+    return v2(v, net, k_mult)
+
+
+def launch_cap(v, net, k_mult=1.0):
+  """The cap's line, P0 + net / K(v), in the same net >= 0 terms as `gas`."""
+  return GOLD_LAUNCH_CAP_P0 + max(net, 0.0) / (float(np.interp(v, GOLD_LAUNCH_CAP_BP, GOLD_LAUNCH_CAP_K)) * k_mult)
 
 
 def v1(v, net):
@@ -107,11 +121,13 @@ class TestGasLawV2(unittest.TestCase):
         ship = float(np.clip(float(np.interp(v, GOLD_V1_BP, GOLD_V1_V)) * (g - b + wb(v) * 3 / 4), 0., 1.))
         self.assertEqual(eg.elesys_pedal_v1(v, g, b, wb(v)), ship, msg=f"v={v} net={net}")
 
-  def test_at_or_below_3_ms_v2_is_v1(self):
+  def test_at_or_below_3_ms_v2_is_v1_up_to_the_launch_cap(self):
     for v in np.linspace(0.0, 3.0, 61):
       for net in np.linspace(-1.0, 2.0, 61):
-        self.assertAlmostEqual(v2(float(v), float(net)), v1(float(v), float(net)), delta=1e-12,
-                               msg=f"v={v} net={net}")
+        v, net = float(v), float(net)
+        self.assertAlmostEqual(v2_uncapped(v, net), v1(v, net), delta=1e-12, msg=f"v={v} net={net}")
+        expect = float(np.clip(min(v1(v, net), launch_cap(v, net)), 0.0, 1.0))
+        self.assertAlmostEqual(v2(v, net), expect, delta=1e-12, msg=f"v={v} net={net}")
 
   def test_continuous_at_zero(self):
     for v in SPEEDS:
@@ -191,6 +207,90 @@ class TestGasLawV2(unittest.TestCase):
       self.assertEqual(eg.elesys_pedal_v2(20.0, 0.0, 0.1, w), 0.0)
       self.assertEqual(eg.elesys_pedal_v2(20.0, 0.0, 0.0, w), 0.0)
       self.assertGreater(eg.elesys_pedal_v2(20.0, 0.1, 0.0, w), 0.0)
+
+
+class TestLaunchCap(unittest.TestCase):
+  """The launch cap: below 6 m/s v2 never sends more than 0.08 + net / K(v). Route 115 t 511 asked 1.6-2.0 m/s^2 and
+  got 2.4-2.7 from a stop; the car's launch response is a hinge (nothing below ~0.08 pedal, ~13 m/s^2 per unit
+  above it at 1.5-3 m/s), which v1's line through zero over-asks above ~1 m/s^2 and under-asks below it."""
+
+  NETS = [float(x) for x in np.linspace(-3.0, 3.0, 241)]
+
+  def test_constants_match_the_golden_copy_and_meet_the_table(self):
+    self.assertEqual(eg.LAUNCH_CAP_BP, GOLD_LAUNCH_CAP_BP)
+    self.assertEqual(eg.LAUNCH_CAP_K, GOLD_LAUNCH_CAP_K)
+    self.assertEqual(eg.LAUNCH_CAP_P0, GOLD_LAUNCH_CAP_P0)
+    self.assertEqual(eg.LAUNCH_CAP_V_END, 6.0)
+    # it ends on the v2 table's own measured k at 6 m/s, so the cap meets the table there
+    self.assertEqual(eg.LAUNCH_CAP_BP[-1], eg.ELESYS_FF_BP[2])
+    self.assertEqual(eg.LAUNCH_CAP_K[-1], eg.ELESYS_FF_K[2])
+
+  def test_never_more_pedal_than_before_and_identical_from_6_ms(self):
+    for v in SPEEDS:
+      for net in self.NETS:
+        capped, before = v2(v, net), v2_uncapped(v, net)
+        self.assertLessEqual(capped, before, msg=f"v={v} net={net}")
+        if v >= 6.0:
+          self.assertEqual(capped, before, msg=f"v={v} net={net}")
+
+  def test_stop_and_go_demand_and_the_braking_side_are_untouched(self):
+    # binds only above the crossing with v2's line (~0.82 at 3 m/s, higher elsewhere): every demand up to 0.8,
+    # and the whole pedal-zero window and brake-on point, get exactly the pedal they got before
+    for v in np.arange(0.0, 6.0, 0.05):
+      for net in np.linspace(-3.0, 0.8, 77):
+        self.assertEqual(v2(float(v), float(net)), v2_uncapped(float(v), float(net)), msg=f"v={v} net={net}")
+
+  def test_binds_on_a_launch(self):
+    for v, net in ((1.8, 1.4), (2.2, 1.5), (3.0, 2.0), (3.8, 1.5), (4.5, 2.0)):
+      self.assertAlmostEqual(v2(v, net), launch_cap(v, net), delta=1e-12, msg=f"v={v} net={net}")
+      self.assertLess(v2(v, net), v2_uncapped(v, net) - 0.01, msg=f"v={v} net={net}")
+    # and it stops binding before 6 m/s for anything the planner can ask (accel limit 2.0)
+    for v in np.arange(5.4, 6.0, 0.01):
+      for net in np.linspace(0.0, 2.0, 41):
+        self.assertEqual(v2(float(v), float(net)), v2_uncapped(float(v), float(net)), msg=f"v={v} net={net}")
+
+  def test_continuous_in_speed_and_in_net(self):
+    for net in (0.5, 1.0, 1.5, 2.0, 3.0):
+      for edge in (3.0, 6.0):
+        self.assertAlmostEqual(v2(edge - 1e-9, net), v2(edge, net), delta=1e-6, msg=f"net={net} edge={edge}")
+      p = [v2(float(v), net) for v in np.arange(0.0, 8.0, 0.005)]
+      self.assertLess(max(abs(b - a) for a, b in zip(p, p[1:], strict=False)), 0.002, msg=f"net={net}")
+    for v in (0.5, 2.2, 3.0, 4.0, 5.5):
+      p = [v2(v, n) for n in self.NETS]
+      self.assertTrue(all(b >= a for a, b in zip(p, p[1:], strict=False)), msg=f"v={v}")
+      # no step where the cap takes over: on the gas side the pedal per 0.025 m/s^2 stays under v2's own slope
+      gas_side = [v2(v, n) for n in self.NETS if n >= 0.0]
+      self.assertLess(max(b - a for a, b in zip(gas_side, gas_side[1:], strict=False)), 0.025 * 0.85 / 4.8 + 1e-9, msg=f"v={v}")
+
+  def test_k_mult_scales_the_cap_slope_too(self):
+    for m in (0.85, 1.0, 1.3):
+      self.assertAlmostEqual(v2(2.2, 1.5, m), min(v2_uncapped(2.2, 1.5, m), launch_cap(2.2, 1.5, m)), delta=1e-12)
+
+  def test_route_115_launch(self):
+    # route 115 (b29973dca) t 511.5-513.1, 0.2 s apart: vEgo, the commanded accel (actuators.accel + the
+    # tuner's pitch term), the interceptor command it sent, aEgo and the planner's aTarget
+    from opendbc.car.honda.carcontroller import compute_gb_honda_elesys
+    frames = [
+      (0.9995, 1.1331, 0.1549, 1.6244, 1.2516),
+      (1.3546, 1.2743, 0.1831, 1.7620, 1.4692),
+      (1.7821, 1.3786, 0.2109, 2.2127, 1.6454),
+      (2.2611, 1.3780, 0.2262, 2.3595, 1.8047),
+      (2.7714, 1.3349, 0.2334, 2.5945, 1.9405),
+      (3.3209, 1.1699, 0.2114, 2.7584, 1.9818),
+      (3.8365, 0.9927, 0.1761, 2.5654, 1.9964),
+      (4.2542, 0.8556, 0.1524, 2.0641, 2.0000),
+    ]
+    for v, accel, sent, a_ego, a_target in frames:
+      g, b = compute_gb_honda_elesys(accel, v)
+      before = eg.elesys_pedal_v2(v, g, b, wb(v)) if v >= 6 else v2_uncapped(v, g * 4.8 - b * 2.6)
+      now = eg.elesys_pedal_v2(v, g, b, wb(v))
+      self.assertAlmostEqual(before, sent, delta=0.005, msg=f"v={v}: the replay reproduces what was sent")
+      self.assertLessEqual(now, before)
+      if a_ego > a_target + 0.4 and accel > 1.1:
+        # where the car over-delivered by 0.4-0.8 m/s^2 on a demand above the crossing, the cap takes off 0.02-0.04
+        # of pedal (~12-13 m/s^2 per unit); at 3.8 m/s the demand had already fallen to 0.99 and nothing changes
+        self.assertLess(now, sent - 0.015, msg=f"v={v}")
+        self.assertAlmostEqual(now, launch_cap(v, accel), delta=1e-9, msg=f"v={v}")
 
 
 class TestModeSlot(unittest.TestCase):

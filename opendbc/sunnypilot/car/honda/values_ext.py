@@ -12,6 +12,7 @@ class HondaFlagsSP(IntFlag):
   NIDEC_HYBRID = 1
   EPS_MODIFIED = 2
   HYBRID_ALT_BRAKEHOLD = 4
+  ELESYS_STOCK_ACC = 8  # FORK(HONDA_ACCORD_9G_AU): HondaElesysStockAcc, set by _initialize_honda (sunnypilot/car/interfaces.py)
 
 
 class HondaSafetyFlagsSP:

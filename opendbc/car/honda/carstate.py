@@ -10,6 +10,7 @@ from opendbc.car.honda.values import CAR, DBC, STEER_THRESHOLD, HondaFlags, Crui
 from opendbc.car.interfaces import CarStateBase
 
 from opendbc.sunnypilot.car.honda.carstate_ext import CarStateExt
+from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
 
 TransmissionType = structs.CarParams.TransmissionType
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -148,7 +149,8 @@ class CarState(CarStateBase, CarStateExt):
     if self.CP.flags & HondaFlags.BOSCH_RADARLESS:
       ret.accFaulted = bool(cp.vl["CRUISE_FAULT_STATUS"]["CRUISE_FAULT"])
     else:
-      if self.CP.openpilotLongitudinalControl:
+      # FORK(HONDA_ACCORD_9G_AU): also in stock ACC mode, so the VSA's live fault still disengages (vsa_fault_alert.py)
+      if self.CP.openpilotLongitudinalControl or self.CP_SP.flags & HondaFlagsSP.ELESYS_STOCK_ACC:
         if (self.CP.carFingerprint == CAR.ACURA_MDX_4G) and (self.CP.flags & HondaFlags.BOSCH_ALT_BRAKE):
           ret.accFaulted = bool(cp.vl["BRAKE_MODULE"]["CRUISE_FAULT"])
         else:
@@ -207,6 +209,14 @@ class CarState(CarStateBase, CarStateExt):
     else:
       gear_position = self.shifter_values.get(cp.vl[self.gearbox_msg]["GEAR_SHIFTER"], None)
       ret.gearShifter = self.parse_gear_shifter(gear_position)
+
+    # FORK(HONDA_ELESYS): at key-off this EPS sends STEER_STATUS 1 (DRIVER_STEERING) in its last frames
+    # (routes 10f, 114, 115), which the rule above takes as both a temporary and a permanent fault:
+    # "LKAS Fault: Restart the car", or TAKE CONTROL IMMEDIATELY while MADS is still on. Ignore it only
+    # parked -- at a standstill AND in P. Moving, or in any other gear, 1 is still a fault.
+    if self.CP.carFingerprint in HONDA_ELESYS and steer_status == "DRIVER_STEERING" and ret.standstill and ret.gearShifter == GearShifter.park:
+      ret.steerFaultPermanent = False
+      ret.steerFaultTemporary = False
 
     ret.gasPressed = cp.vl["POWERTRAIN_DATA"]["PEDAL_GAS"] > 1e-5
 

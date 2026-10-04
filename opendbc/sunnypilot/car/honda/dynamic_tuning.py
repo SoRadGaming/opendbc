@@ -24,6 +24,12 @@ Ported from MVL's ACURA_MDX_3G dynamic branch, restructured for this fork:
   * MVL's per-5mph lateral latFactors are deliberately NOT ported. Longitudinal
     only, by request.
 
+  * SHADOW LEARNERS (2026-10, shadow_learn.py). On the Elesys Accord with the gas
+    interceptor, with the toggle on (only then: they read this tuner's pitch and
+    plant model), a brake response table and a launch multiplier are measured and
+    logged (`hondashadow` lines) from the values this tuner already computes. They
+    are applied to nothing; see _shadow_update().
+
   * MVL reads/writes Params directly at the top of opendbc/car/honda/
     carcontroller.py. opendbc has to stay importable without openpilot on the PC
     side, so the import is lazy and every failure path degrades to
@@ -71,6 +77,8 @@ from opendbc.car.common.pid import PIDController
 # `ELESYS_GAS_BP as PEDAL_GAIN_BP` import was a trap -- renaming the gas grid took out
 # CarController.__init__, i.e. the car's longitudinal control, for a rename.
 from opendbc.sunnypilot.car.honda.elesys_gas import DRIVE_MODE_SLOTS, drive_mode_slot, econ_state, gear_name
+# The shadow learners (shadow_learn.py) are not worth that trap either: they are imported inside
+# HondaDynamicTuner._build_shadow(), under a try.
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
@@ -468,6 +476,14 @@ class HondaDynamicTuner:
     self.mode_ok = True
     self.long_active = False
 
+    # SHADOW learners (shadow_learn.py): the brake response table and the launch multiplier, measured and
+    # logged, never applied. Elesys Accord with the interceptor only, and only with the tuner on (they read its pitch and plant
+    # model). The three values below are copies of this frame's commands, recorded where they are computed.
+    self.shadow = self._build_shadow(CP, CP_SP) if self.enabled else None
+    self._shadow_brake_frac = 0.0
+    self._shadow_brake_gain = 1.0
+    self._shadow_gas = 0.0
+
   @staticmethod
   def _is_applicable(CP, CP_SP) -> bool:
     try:
@@ -757,6 +773,7 @@ class HondaDynamicTuner:
     try:
       if law:
         self.gas_law = str(law)
+      self._shadow_gas = _finite(gas_cmd)
       self._pedal_window.append(_finite(gas_cmd))
       if self._admit_pedal_sample(CC, CS):
         self.mode_admitted[self.slot] = self.mode_admitted.get(self.slot, 0) + 1
@@ -789,8 +806,43 @@ class HondaDynamicTuner:
     return 1.0
 
   def update_wind(self, CC, CS, wind_brake_ms2: float) -> None:
-    """Retired (see wind_scale). Kept so carcontroller.py's call needs no upstream edit."""
-    return
+    """The aero learner is retired (see wind_scale). The call is kept so carcontroller.py needs no upstream
+    edit, and since it is the LAST tuner call of the 50 Hz gas/brake block -- brake_gain() and
+    observe_pedal() have already recorded this frame's commands -- it is where the shadow learners sample."""
+    self._shadow_update(CC, CS)
+
+  # --- shadow learners (measured and logged, never applied) --------------------------------------
+
+  @staticmethod
+  def _build_shadow(CP, CP_SP):
+    """The shadow learners on the Elesys Accord with the interceptor, else None. Runs in CarController.__init__,
+    so anything that goes wrong leaves the tuner without them, logged, rather than raising."""
+    try:
+      from opendbc.sunnypilot.car.honda.shadow_learn import HondaShadowLearners, shadow_applicable
+      return HondaShadowLearners() if shadow_applicable(CP, CP_SP) else None
+    except Exception:
+      try:
+        carlog.exception(f"{LOG_TAG} shadow learners not started")
+      except Exception:
+        pass
+      return None
+
+  def _shadow_update(self, CC, CS) -> None:
+    """Feed shadow_learn.py one sample: numbers this tuner already computed, and the CC/CS it is handed, which
+    it only reads. Nothing comes back, so no command can depend on it. Runs inside CarController.update(),
+    so it never raises: the first exception switches the shadow learners off for the rest of the drive."""
+    if self.shadow is None:
+      return
+    try:
+      self.shadow.update(CC, CS, pitch=self.pitch, pose_fresh=self._pose_stale == 0, mode_ok=self.mode_ok,
+                         cmd_ref=self.cmd_ref, brake_frac=self._shadow_brake_frac, gas_cmd=self._shadow_gas,
+                         brake_gain=self._shadow_brake_gain)
+    except Exception:
+      self.shadow = None
+      try:
+        carlog.exception(f"{LOG_TAG} shadow learners raised; off for the rest of this drive")
+      except Exception:
+        pass
 
   # --- brake channel ---------------------------------------------------------
 
@@ -799,6 +851,8 @@ class HondaDynamicTuner:
     hand-editing the brake divisor in compute_gb_honda_elesys()."""
     if not self.enabled:
       return 1.0
+    # a copy for the shadow learners (_shadow_update); read by nothing else
+    self._shadow_brake_frac = _finite(apply_brake_frac)
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
 
@@ -863,6 +917,7 @@ class HondaDynamicTuner:
     # only applied in proportion to how much of it was actually learned at that speed.
     fade = float(np.clip(_finite(CS.out.vEgo) / BRAKE_LEARN_MIN_SPEED, 0.0, 1.0))
     gain = 1.0 + fade * float(np.clip(_finite(self.brake_pid_factor), -BRAKE_NEG_LIMIT, BRAKE_POS_LIMIT))
+    self._shadow_brake_gain = gain   # a copy for the shadow learners' log; read by nothing else
     return gain
 
   # --- telemetry -------------------------------------------------------------

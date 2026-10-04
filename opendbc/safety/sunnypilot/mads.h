@@ -128,6 +128,12 @@ inline void m_update_control_state(void) {
   if (allowed && m_mads_state.system_enabled && m_mads_state.controls_requested_lateral && !controls_allowed_lateral) {
     m_mads_state.controls_requested_lateral = false;
     controls_allowed_lateral = true;
+    // FORK(UPSTREAM-FIX): reset the heartbeat mismatch count on the rising edge of controls_allowed_lateral,
+    // as safety.h does for heartbeat_engaged_mismatches on the rising edge of controls_allowed. The count is
+    // only cleared at a 1 Hz tick that finds no mismatch, so after a heartbeat exit it stays at 3 until the
+    // next tick; a grant landing in that interval, before the 10 Hz heartbeat reports MADS engaged, was
+    // revoked by that tick (route 114, controlsMismatchLateral). Three fresh mismatches still exit.
+    heartbeat_engaged_mads_mismatches = 0U;
     m_mads_state.current_disengage.active_reason = MADS_DISENGAGE_REASON_NONE;
     m_mads_state.current_disengage.pending_reasons = MADS_DISENGAGE_REASON_NONE;
   }
