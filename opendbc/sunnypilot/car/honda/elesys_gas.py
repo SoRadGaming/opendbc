@@ -42,6 +42,9 @@ What v2 deliberately does NOT change (skeptic review, which overrides the audit 
     exactly v1's. Above it G0 is smaller, so the window there is GENTLER than v1's (0.76 against
     1.06 per m/s^2 at 20 m/s). Raise the low-speed G0 only together with moving the brake-on
     point to the measured coast deceleration, in the brake work.
+    (Batch 3: that is brake law v2, HondaElesysBrakeLawV2, default off - elesys_brake.py. On the
+    frames it runs, elesys_pedal_v2_window() takes over with the re-measured G0 and the pedal-zero
+    point at coast(v) + DELTA(v); with it off nothing below changes.)
   * THE NEGATIVE BRANCH IS v1's SHAPE: a straight line from the offset at net = 0 to zero at
     net = -1.95*wb, so the pedal-zero point and the brake-on point (net = -2.6*wb, carcontroller)
     do not move.
@@ -227,6 +230,39 @@ def elesys_pedal_v2(v_ego: float, gas: float, brake: float, wind_brake: float, k
   return pedal if math.isfinite(pedal) else 0.0
 
 
+def elesys_pedal_v2_window(v_ego: float, gas: float, net: float, off: float, zp: float, k_mult: float = 1.0) -> float:
+  """FORK(HONDA_ACCORD_9G_AU) batch 3: v2 with the pedal-zero window MOVED by brake law v2 (elesys_brake.py), which is
+  the move the docstring above says the low-speed offset has to wait for. Used only on the frames brake law v2 runs
+  (HondaElesysBrakeLawV2 on, PID, above 4 m/s); everywhere else elesys_pedal_v2() runs unchanged.
+    net >= 0       off + gas * gm2(v) / k_mult, launch cap below LAUNCH_CAP_V_END as in v2
+    zp < net < 0   off * (1 - net / zp)          a straight line from `off` at net 0 to 0 at zp
+    net <= zp      0                             the coast band down to the brake-on point, then the brake
+  `off` is the law's G0 (re-measured on the current pedal calibration) and `zp` its coast(v) + DELTA(v), both blended
+  from v2's own offset and -1.95*wb at 4-6 m/s, so at 4 m/s this is elesys_pedal_v2() exactly. Never raises; 0.0
+  for anything non-finite."""
+  try:
+    v = float(v_ego)
+    g = max(_finite(gas), 0.0)
+    n = float(net)
+    o = float(off)
+    z = float(zp)
+    m = _finite(k_mult, 1.0)
+    if m <= 0.0:
+      m = 1.0
+    if n >= 0.0:
+      pedal = o + g * (elesys_ff_gm(v) / m)
+      if v < LAUNCH_CAP_V_END:
+        pedal = min(pedal, elesys_launch_cap(v, g, m))
+    elif z < 0.0 and n > z:
+      pedal = o * (1.0 - n / z)
+    else:
+      pedal = 0.0
+    pedal = float(np.clip(pedal, 0., 1.))
+  except Exception:
+    return 0.0
+  return pedal if math.isfinite(pedal) else 0.0
+
+
 # --- drive modes ----------------------------------------------------------------------------------
 DRIVE_MODE_SLOTS = ("D", "ECON", "S")
 # Per-slot multiplier on k (so pedal per m/s^2 is divided by it). 1.0 everywhere until there is
@@ -386,17 +422,26 @@ class ElesysGasLaw:
     self.v2 = read_gas_law_v2(params)
     self.law = "v2" if self.v2 else "v1"
     self.blend = ModeCrossfade()
+    # FORK(HONDA_ACCORD_9G_AU) batch 3: (net, off, zp) from brake law v2 on the frames it runs, set by carcontroller.py
+    # before every call; None (always, with HondaElesysBrakeLawV2 off) leaves v2 exactly as it was
+    self.window: tuple[float, float, float] | None = None
 
   def _v2(self, v_ego, gas, brake, wind_brake) -> float:
     slot = self.blend.slot or "D"
-    p = elesys_pedal_v2(v_ego, gas, brake, wind_brake, MODE_K.get(slot, 1.0))
+    window = self.window
+
+    def law(k_mult):
+      if window is not None:
+        return elesys_pedal_v2_window(v_ego, gas, *window, k_mult)
+      return elesys_pedal_v2(v_ego, gas, brake, wind_brake, k_mult)
+    p = law(MODE_K.get(slot, 1.0))
     # p + sum(w_s * (p_s - p)) over the slots still fading out, which is sum(w_s * p_s) because
     # the weights sum to 1 -- but written this way it is EXACTLY p when every slot's law is the
     # same (MODE_K all 1.0 today), whatever the weights are
     out = p
     for s, w in self.blend.weights.items():
       if s != slot and w > 0.0:
-        out += w * (elesys_pedal_v2(v_ego, gas, brake, wind_brake, MODE_K.get(s, 1.0)) - p)
+        out += w * (law(MODE_K.get(s, 1.0)) - p)
     return out
 
   def update(self, CC, CS, gas: float, brake: float, wind_brake: float) -> float:

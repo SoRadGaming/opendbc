@@ -498,6 +498,11 @@ class HondaDynamicTuner:
     self.brake_gain_converged = self._get_float("HondaDynBrakeGain")
     self.brake_pid.i = self.brake_gain_converged
     self.brake_pid_factor = self.brake_gain_converged
+    # FORK(HONDA_ACCORD_9G_AU) batch 3: with brake law v2 running (HondaElesysBrakeLawV2, elesys_brake.py) the scalar
+    # gain is FIXED at 1.0 - the measured law replaces what it trims - and learns nothing. The stored
+    # HondaDynBrakeGain is left as it is, for when the law is turned off. CarController confirms it
+    # (set_brake_law_v2): the flag alone is not enough, the law also needs gas law v2.
+    self.brake_law_v2 = self._brake_law_v2_flag(CP_SP)
 
     # pitch
     self.pitch_filter = FirstOrderFilter(0.0, PITCH_RC, DT_CTRL)
@@ -993,13 +998,42 @@ class HondaDynamicTuner:
 
   # --- brake channel ---------------------------------------------------------
 
+  @staticmethod
+  def _brake_law_v2_flag(CP_SP) -> bool:
+    """CP_SP flag ELESYS_BRAKE_LAW_V2 (opendbc/sunnypilot/car/honda/values_ext.py). Runs in __init__: never raises."""
+    try:
+      from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+      return bool(int(CP_SP.flags) & HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value)
+    except Exception:
+      return False
+
+  def set_brake_law_v2(self, on: bool) -> None:
+    """FORK(HONDA_ACCORD_9G_AU) batch 3: what CarController decided at init - brake law v2 runs, or not (the flag
+    without gas law v2 does not run it). Holds the brake gain at 1.0 while on, and keeps the `blaw` build tag the
+    shadow learners and the hondadyn line carry true. A no-op when it agrees with the flag."""
+    on = bool(on)
+    if on == self.brake_law_v2:
+      return
+    self.brake_law_v2 = on
+    tag = "v2" if on else "v1"
+    try:
+      self.build["blaw"] = tag
+      if self.shadow is not None:
+        self.shadow.build["blaw"] = tag
+    except Exception:
+      pass
+
   def brake_gain(self, CC, CS, apply_brake_frac: float) -> float:
     """Learned multiplier on the base brake command. This is what replaces
-    hand-editing the brake divisor in compute_gb_honda_elesys()."""
+    hand-editing the brake divisor in compute_gb_honda_elesys().
+    FORK(HONDA_ACCORD_9G_AU) batch 3: 1.0, learning nothing, while brake law v2 runs (set_brake_law_v2)."""
     # a copy for the shadow learners (_shadow_update); read by nothing else. FORK(HONDA_ACCORD_9G_AU) batch 3: taken
     # before the toggle check, because the shadow learners run with the toggle off too (logging mode)
     self._shadow_brake_frac = _finite(apply_brake_frac)
     if not self.enabled:
+      return 1.0
+    if self.brake_law_v2:
+      self._shadow_brake_gain = 1.0
       return 1.0
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
@@ -1119,7 +1153,8 @@ class HondaDynamicTuner:
       # but reporting the offset next to a gain made the log unreadable: a settled
       # brake channel logged "brake=1.015 brakec=0.015", which reads as a
       # disagreement rather than as the same number twice.
-      "brake_gain": 1.0 + self.brake_pid_factor,
+      # FORK(HONDA_ACCORD_9G_AU) batch 3: the gain actually in force, 1.0 under brake law v2
+      "brake_gain": 1.0 if self.brake_law_v2 else 1.0 + self.brake_pid_factor,
       "brake_gain_converged": 1.0 + self.brake_gain_converged,
       "pitch": self.pitch,
       "pose_stale": self._pose_stale,

@@ -200,6 +200,12 @@ the 2026-09 merge.
   (`ELESYS_GAS_BP`/`ELESYS_GAS_V`, `elesys_gas_multiplier()`); v2 (`ELESYS_FF_*`, `elesys_pedal_v2()`) uses the measured
   pedal response, keeps v1 below 3 m/s and v1's offset below ~16.9 m/s; `HondaElesysGasLawV2` (read once, default on)
   picks one. Drive-mode slots, `MODE_K` (all 1.0) and the slot crossfade (`ElesysGasLaw`).
+* `opendbc/sunnypilot/car/honda/elesys_brake.py` (new, batch 3, 2026-10-05): brake law v2, `HondaElesysBrakeLawV2`
+  (CarParamsSP flag 32, default off, needs gas law v2). The measured coast curve replaces the aero credit, a soft dead
+  zone `c0(v)` and slope `k(v)` per band map the brake to counts, nothing is sent between the brake-on point and the
+  pedal-zero point (`elesys_gas.elesys_pedal_v2_window()`), and the scalar brake gain is held at 1.0. Today's path runs
+  below 4 m/s, outside PID and on non-finite input. Three `FORK` lines in `carcontroller.py` call it. Design, fit and
+  proofs: sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` 7.10; tests `test_elesys_brake.py`.
 * `opendbc/sunnypilot/car/honda/gas_interceptor.py` (0): imports `HONDA_ELESYS` and `elesys_gas` (re-exporting the v1
   names); on `HONDA_ELESYS` builds `ElesysGasLaw` and calls it instead of upstream's line; the `tuner` hook
   `observe_pedal`. Every other car runs upstream's line unchanged.
@@ -302,6 +308,7 @@ Run from this directory with `PYTHONPATH=.` (in the sunnypilot venv, which has o
 python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.test_elesys   # 77 tests (76 in test_elesys)
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                            # 38 tests: the gas law and the launch cap
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 28 tests: the soft final stop
+python -m unittest opendbc.sunnypilot.car.honda.test_elesys_brake                          # 29 tests: brake law v2 (batch 3)
 python -m unittest opendbc.car.honda.tests.test_elesys_stock_acc                          # 17 tests: stock ACC mode
 python -m unittest opendbc.sunnypilot.car.honda.test_shadow_learn                          # 21 tests: the shadow learners
 python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault

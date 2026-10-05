@@ -13,6 +13,7 @@ from opendbc.sunnypilot.car.honda.icbm import IntelligentCruiseButtonManagementI
 from opendbc.sunnypilot.car.honda.dynamic_tuning import HondaDynamicTuner
 from opendbc.sunnypilot.car.honda.elesys_stop import ElesysSoftStop  # FORK(HONDA_ACCORD_9G_AU): soft final stop
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
+from opendbc.sunnypilot.car.honda.elesys_brake import brake_law_v2_enabled, law_frame  # FORK(HONDA_ACCORD_9G_AU): brake law v2
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -342,6 +343,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.elesys_stock_acc = bool(CP_SP.flags & HondaFlagsSP.ELESYS_STOCK_ACC)
     # FORK(HONDA_ACCORD_9G_AU): pump rule C1 (HondaElesysPumpV6), else v5; fixed for the drive by _initialize_honda
     self.elesys_pump_v6 = bool(CP_SP.flags & HondaFlagsSP.ELESYS_PUMP_V6)
+    # FORK(HONDA_ACCORD_9G_AU): brake law v2 (HondaElesysBrakeLawV2, elesys_brake.py), fixed for the drive; it needs gas
+    # law v2, and the tuner then holds the brake gain at 1.0. Clear: nothing of it runs.
+    self.elesys_brake_v2 = brake_law_v2_enabled(CP, CP_SP, self.elesys_gas)
+    self.dynamic_tuner.set_brake_law_v2(self.elesys_brake_v2)
 
     self.braking = False
     self.brake_steady = 0.
@@ -402,8 +407,12 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
 
     self.last_torque = limited_torque
 
+    # FORK(HONDA_ACCORD_9G_AU): brake law v2 for this frame, or None where today's law runs (always with it off)
+    blaw = law_frame(adjust_accel, CS.out.vEgo, CC.longActive, actuators.longControlState) if self.elesys_brake_v2 else None
+
     # *** apply brake hysteresis ***
-    pre_limit_brake, self.braking, self.brake_steady = actuator_hysteresis(brake, self.braking, self.brake_steady)
+    pre_limit_brake, self.braking, self.brake_steady = actuator_hysteresis(brake if blaw is None else blaw.brake_lin,
+                                                                           self.braking, self.brake_steady)
 
     # *** rate limit after the enable check ***
     # NB: MVL runs a 3x faster brake rise here (3 * DT_CTRL). Deliberately NOT ported: combined
@@ -505,13 +514,15 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
                                                         self.stopping_counter, self.CP))
         else:
           apply_brake = np.clip(self.brake_last - wind_brake * self.dynamic_tuner.wind_scale(), 0.0, 1.0)
+          if blaw is not None:  # FORK(HONDA_ACCORD_9G_AU): brake law v2's count map; coast(v) replaces the aero credit
+            apply_brake = blaw.brake_frac(self.brake_last)
           # FORK(HONDA_ACCORD_9G_AU): never raise here. A non-finite vEgo makes wind_brake NaN, and the int() below
           # raised; an exception in update() means no 0x1FA at all, and the VSA latches BRAKE_ERROR ~1.0 s later.
           # Fall back to the brake without the aero credit, the more-braking side. Finite values are untouched.
           if not np.isfinite(apply_brake):
             apply_brake = float(np.clip(self.brake_last, 0.0, 1.0)) if np.isfinite(self.brake_last) else 0.0
           # FORK: learned brake gain. This is what replaces hand-editing the brake divisor in
-          # compute_gb_honda_elesys(); returns 1.0 with the dynamic tuner off.
+          # compute_gb_honda_elesys(); returns 1.0 with the dynamic tuner off, and with brake law v2 on.
           brake_gain = self.dynamic_tuner.brake_gain(CC, CS, float(apply_brake))
           apply_brake = int(np.clip(apply_brake * brake_gain * self.params.NIDEC_BRAKE_MAX,
                                     0, self.params.NIDEC_BRAKE_MAX - 1))
@@ -554,6 +565,9 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
 
           # the learned aero scale has to apply to both sides of the term or the wind learner
           # would be measuring an error it cannot influence
+          # FORK(HONDA_ACCORD_9G_AU): brake law v2 moves the pedal-zero window on its frames (it is never on without the gas law)
+          if self.elesys_brake_v2 and self.elesys_gas is not None:
+            self.elesys_gas.window = None if blaw is None else blaw.window
           can_sends.extend(GasInterceptorCarController.update(self, CC, CS, gas, brake,
                                                               wind_brake * self.dynamic_tuner.wind_scale(),
                                                               self.packer, self.frame, self.dynamic_tuner))
