@@ -192,3 +192,21 @@ def _initialize_honda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_
       safety_param = CP.safetyConfigs[-1].safetyParam & ~HondaSafetyFlags.ELESYS_SCM_STANDDOWN.value
       CP.safetyConfigs[-1].safetyParam = safety_param | HondaSafetyFlags.ELESYS_STOCK_ACC.value
       carlog.warning("Honda ELESYS stock ACC mode: openpilot longitudinal off, all frames forwarded")
+    # FORK(HONDA_ACCORD_9G_AU): the brake pump rule and the brake law, openpilot long only - never in stock ACC mode,
+    # where nothing longitudinal is sent. Read here, once, so the route's CarParamsSP records what it ran; the
+    # controller reads only CP_SP.flags. A key missing from params_dict (opendbc without openpilot) is off, i.e. the
+    # rule and law before these settings; on the device card always passes both, with params_keys.h's defaults.
+    elif CP.openpilotLongitudinalControl:
+      if _param_is_on(params_dict.get("HondaElesysPumpV6")):
+        CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_V6.value
+      if _param_is_on(params_dict.get("HondaElesysBrakeLawV2")):
+        CP_SP.flags |= HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value
+
+
+# FORK(HONDA_ACCORD_9G_AU): a BOOL param as card hands it over (bool from Params, or "1"/1/b"1"); anything else is off
+def _param_is_on(value) -> bool:
+  if isinstance(value, bytes):
+    value = value.decode(errors="ignore")
+  if isinstance(value, str):
+    return value.strip() == "1"
+  return isinstance(value, int) and value == 1   # bool is an int: True == 1

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from opendbc.car import Bus
 from opendbc.car.honda import hondacan
 from opendbc.car.honda.carcontroller import (brake_pump_hysteresis, brake_pump_hysteresis_elesys,
+                                             brake_pump_c1_elesys,  # FORK(HONDA_ACCORD_9G_AU): pump rule C1
                                              compute_gas_brake, compute_gb_honda_elesys,
                                              compute_gb_honda_nidec)
 from opendbc.sunnypilot.car.honda.gas_interceptor import elesys_gas_multiplier
@@ -358,6 +359,259 @@ class TestBrakePumpHysteresis(unittest.TestCase):
     for i in range(1, 100):
       pump, last = brake_pump_hysteresis(i + 1, i, last, i * 0.01)
       self.assertTrue(pump)
+
+class _C1:
+  """Pump rule C1 driven the way CarController drives it: one call per 0x1FA frame (every other 100 Hz frame), with
+  ts = frame * 0.01 exactly as the controller computes it."""
+  DT = 0.02
+
+  def __init__(self):
+    self.level, self.trig, self.last, self.frame = 0, 0, -1e9, 0
+
+  def step(self, cb, v=10.0):
+    ts = self.frame * 0.01
+    p, self.level, self.trig, self.last = brake_pump_c1_elesys(cb, v, self.level, self.trig, self.last, ts)
+    self.frame += 2
+    return p
+
+  def hold(self, cb, seconds, v=10.0):
+    return [self.step(cb, v) for _ in range(round(seconds / self.DT))]
+
+  @staticmethod
+  def starts(on):
+    return sum(1 for a, b in zip([False, *on], on, strict=False) if b and not a)
+
+
+class TestBrakePumpC1(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU): pump rule C1 (HondaFlagsSP.ELESYS_PUMP_V6). The pump delivers RISES in the command and
+  nothing else: a first burst at ~12 counts, one per rise past the deadband (after a 1 s gap unless the rise is big),
+  bursts at standstill only to build a hold, a burst at least every 6 s moving at cb >= 100 (dry bound + creep guard),
+  and the continuous run at v >= 2.5 / cb > 200. No 30 s top-up, no crawl run, no light-braking backstop."""
+
+  def test_onset_burst_at_about_twelve_counts(self):
+    c = _C1()
+    c.hold(0, 1.0)
+    first = next(cb for cb in range(1, 30) if c.step(cb))
+    self.assertEqual(first, 11)   # 11 > 0 + interp(11, [0, 60, 200], [12, 6, 3]) = 10.9
+    # an application that never passes the deadband never pumps
+    c = _C1()
+    self.assertFalse(any(c.hold(10, 10.0)))
+
+  def test_onset_is_one_half_second_burst_and_then_quiet(self):
+    c = _C1()
+    on = c.hold(40, 20.0)
+    self.assertEqual(_C1.starts(on), 1)
+    self.assertEqual(sum(on), 25)                        # 0.5 s at 50 Hz
+    self.assertTrue(all(on[:25]) and not any(on[25:]))   # no light-braking backstop: 19.5 s dry at cb 40
+
+  def test_rises_versus_the_deadband(self):
+    for level, small, big_enough in ((50, 5, 7), (150, 3, 5), (190, 2, 4)):
+      c = _C1()
+      c.hold(level, 3.0)
+      self.assertFalse(any(c.hold(level + small, 2.0)), msg=f"+{small} at {level} is inside the deadband")
+      c = _C1()
+      c.hold(level, 3.0)
+      self.assertTrue(any(c.hold(level + big_enough, 0.1)), msg=f"+{big_enough} at {level} is a rise")
+
+  def test_deadband_is_measured_from_the_delivered_level(self):
+    # two +5 steps 2 s apart at cb 50: each is inside the deadband of ~6.5, but the second takes the command 10 past
+    # what the last burst delivered, so it fires - drift cannot creep away undelivered
+    c = _C1()
+    c.hold(50, 3.0)
+    self.assertFalse(any(c.hold(55, 2.0)))
+    self.assertTrue(any(c.hold(60, 2.0)))
+
+  def test_min_gap_then_allowed(self):
+    c = _C1()
+    c.hold(60, 0.6)                           # burst 0-0.5 s
+    self.assertFalse(any(c.hold(70, 0.86)))   # +10, a rise, but 0.6-1.44 s after the trigger: blocked
+    on = c.hold(70, 0.1)                      # 1.46-1.54 s: fires at RUN + MIN_GAP = 1.5 s
+    self.assertEqual(on, [False, False, True, True, True])
+
+  def test_big_rise_bypasses_the_min_gap(self):
+    c = _C1()
+    c.hold(60, 0.6)
+    self.assertTrue(c.step(76))               # +16 > BIG 15, 0.6 s after the trigger
+
+  def test_running_burst_extends_while_the_command_climbs(self):
+    # an apply ramp is one smooth run: +3 counts a frame from 20 to 180
+    c = _C1()
+    ramp = [c.step(cb) for cb in range(20, 181, 3)]
+    on = ramp + c.hold(180, 2.0)
+    self.assertEqual(_C1.starts(on), 1)
+    self.assertTrue(all(ramp))
+    # a climb slower than EXT (= max(2, deadband / 2)) does not extend: +2 every 0.3 s at cb 30 (EXT 4.5)
+    c = _C1()
+    on = c.hold(30, 0.3) + c.hold(32, 0.3) + c.hold(34, 0.3) + c.hold(34, 2.0)
+    self.assertEqual(sum(on), 25)
+
+  def test_steady_moving_hold_needs_no_pump_below_100(self):
+    c = _C1()
+    self.assertEqual(_C1.starts(c.hold(90, 60.0)), 1)
+
+  def test_moving_at_100_or_more_bursts_every_six_seconds(self):
+    c = _C1()
+    on = c.hold(120, 30.0)
+    self.assertEqual(_C1.starts(on), 5)       # 0, 6, 12, 18, 24 s
+    self.assertEqual(sum(on), 5 * 25)
+
+  def test_standstill_hold_reached_firm_never_pumps(self):
+    # approach at cb 150 (pumped while moving), stop, the soft stop's 125 -> 189 rise at standstill: the hold is
+    # already there (level >= 100), so nothing pumps while stopped - not the rise, and no 30 s top-up
+    c = _C1()
+    c.hold(150, 2.0, v=3.0)
+    c.hold(125, 1.0, v=0.5)
+    on = [c.step(cb, v=0.0) for cb in range(125, 190, 2)]
+    on += c.hold(189, 120.0, v=0.0)
+    self.assertFalse(any(on))
+
+  def test_standstill_hold_reached_light_gets_one_hold_build_burst(self):
+    # stop reached at cb 40: the 40 -> 189 rise at standstill builds the hold - one burst, extended through the
+    # ramp, then nothing for two minutes
+    c = _C1()
+    c.hold(40, 3.0, v=1.0)
+    on = c.hold(125, 0.1, v=0.0) + [c.step(cb, v=0.0) for cb in range(127, 190, 2)] + c.hold(189, 120.0, v=0.0)
+    self.assertEqual(_C1.starts(on), 1)
+    self.assertGreaterEqual(c.level, 189)
+    # and a standstill rise cannot fire once the delivered level is 100 or more
+    c = _C1()
+    c.hold(100, 1.0, v=0.0)
+    self.assertFalse(any(c.hold(150, 5.0, v=0.0)))
+
+  def test_creep_guard(self):
+    # a built hold that starts to roll is moving again: at cb >= 100 with no burst for 6 s it fires at once
+    c = _C1()
+    c.hold(189, 1.0, v=0.0)
+    self.assertFalse(any(c.hold(189, 20.0, v=0.0)))
+    self.assertTrue(c.step(189, v=0.3))
+    # but not within 6 s of the last burst
+    c = _C1()
+    c.hold(189, 4.0, v=0.0)
+    self.assertFalse(c.step(189, v=0.3))
+
+  def test_firm_moving_braking_is_continuous(self):
+    c = _C1()
+    self.assertTrue(all(c.hold(201, 30.0, v=15.0)))
+    self.assertTrue(all(c.hold(253, 30.0, v=2.5)))
+    c = _C1()
+    on = c.hold(200, 30.0, v=15.0)            # cb > 200 exactly: at 200 the burst rules govern
+    self.assertLess(sum(on) / len(on), 0.15)
+
+  def test_no_crawl_continuous_run(self):
+    # v5 pinned the pump on at 0.15 <= v < 2.5 and cb > 100; C1 does not
+    c = _C1()
+    on = [c.step(150, v=2.4 - i * 0.0088) for i in range(250)]   # 5 s, 2.4 -> 0.2 m/s
+    self.assertEqual(_C1.starts(on), 1)
+    self.assertEqual(sum(on), 25)
+    c = _C1()
+    self.assertLess(sum(c.hold(253, 30.0, v=2.0)) / 1500, 0.15)
+
+  def test_release_needs_no_pump_and_rearms(self):
+    c = _C1()
+    c.hold(253, 2.0, v=15.0)
+    c.hold(60, 0.5, v=15.0)                          # the last firm frame's run tails out (<= 0.5 s), as in v5
+    self.assertFalse(any(c.hold(60, 3.0, v=15.0)))   # release to 60: no pump, the level follows it down
+    self.assertEqual(c.level, 60)
+    self.assertTrue(any(c.hold(67, 0.1, v=15.0)))    # a rise from the released level fires
+    # a release inside the jitter band (6 counts) keeps the level
+    c = _C1()
+    c.hold(80, 2.0)
+    c.hold(75, 1.0)
+    self.assertEqual(c.level, 80)
+
+  def test_release_to_zero_resets_and_the_next_application_bursts_at_once(self):
+    c = _C1()
+    c.hold(60, 0.6)
+    c.step(0)
+    self.assertEqual(c.level, 0)
+    self.assertTrue(c.step(20))               # first burst of an application: no minimum gap
+
+  def test_no_pump_without_brake(self):
+    p, level, _, _ = brake_pump_c1_elesys(0, 0.0, 150, 150, 0.0, 0.1)   # even inside a running burst
+    self.assertFalse(p)
+    self.assertEqual(level, 0)
+    p, _, _, _ = brake_pump_c1_elesys(0, 15.0, 0, 0, -1e9, 5.0)
+    self.assertFalse(p)
+
+  def test_non_finite_speed_counts_as_moving_below_firm(self):
+    # as in v5: a NaN vEgo is neither still nor firm, so a hold still gets its 6 s bound
+    c = _C1()
+    on = c.hold(150, 13.0, v=float("nan"))
+    self.assertEqual(_C1.starts(on), 3)
+
+
+class TestElesysPumpRuleSelection(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU): CarController picks the pump rule from CP_SP.flags alone, and with the flag clear
+  0x1FA is exactly what it was."""
+
+  def _run(self, flags, seconds=40.0):
+    from opendbc.can import CANPacker
+    from opendbc.car import gen_empty_fingerprint, structs
+    from opendbc.car.honda.carcontroller import CarController
+    from opendbc.car.honda.interface import CarInterface
+    fp = gen_empty_fingerprint()
+    fp[0][0x188] = 8   # GEARBOX_AUTO
+    fp[0][0x201] = 6   # the comma pedal
+    CP = CarInterface.get_params(ELESYS_CAR, fp, [], False, False, False)
+    CP_SP = CarInterface.get_params_sp(CP, ELESYS_CAR, fp, [], False, False, False)
+    self.assertTrue(CP.openpilotLongitudinalControl)
+    CP_SP.flags |= flags
+    cc_obj = CarController(DBC[ELESYS_CAR], CP, CP_SP)
+    packer = CANPacker(DBC[ELESYS_CAR][Bus.pt])
+    off = _as_tuple(packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 0}))[1]
+    on = _as_tuple(packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 1}))[1]
+    pump_mask = bytes(a ^ b for a, b in zip(off[:7], on[:7], strict=True))
+    cs = _FakeCS()
+    out = []
+    for i in range(round(seconds * 100)):
+      t = i * 0.01
+      cc = structs.CarControl.new_message()
+      cc.enabled = cc.longActive = True
+      # 3 s of braking into a stop, then a standstill hold
+      cs.out.vEgo = max(0.0, 6.0 - 2.0 * t)
+      cs.out.standstill = cs.out.vEgo == 0.0
+      cc.actuators.accel = -1.5 if t < 3.0 else -2.0
+      _, sends = cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, int(t * 1e9))
+      f = [d for a, d, _ in map(_as_tuple, sends) if a == 0x1FA]
+      if f:
+        out.append((f[0], cc_obj.apply_brake_last, float(cs.out.vEgo), i * 0.01,
+                    any(x & m for x, m in zip(f[0][:7], pump_mask, strict=True))))
+    return out
+
+  def test_flag_clear_is_v5_and_flag_set_is_c1(self):
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    v5 = self._run(0)
+    c1 = self._run(HondaFlagsSP.ELESYS_PUMP_V6.value)
+    self.assertEqual(len(v5), len(c1))
+    self.assertTrue(any(cb > 0 for _, cb, _, _, _ in v5))
+    anchor, last = 0, 0.0
+    level, trig, last1 = 0, 0, 0.0
+    for (f5, cb5, v, ts, p5), (f1, cb1, _, _, p1) in zip(v5, c1, strict=True):
+      self.assertEqual(cb5, cb1)              # the pump rule changes only the pump bit
+      exp5, anchor, last = brake_pump_hysteresis_elesys(cb5, v, anchor, last, ts)
+      exp1, level, trig, last1 = brake_pump_c1_elesys(cb1, v, level, trig, last1, ts)
+      self.assertEqual(p5, exp5, msg=f"v5 at {ts:.2f} s")
+      self.assertEqual(p1, exp1, msg=f"C1 at {ts:.2f} s")
+      if p5 == p1:
+        self.assertEqual(f5, f1)
+    # the scenario tells the rules apart: v5 tops a standstill hold up at 30 s, C1 never re-pumps a built hold
+    self.assertTrue(any(p for _, _, v, ts, p in v5 if v == 0.0 and ts > 20.0))
+    self.assertFalse(any(p for _, _, v, ts, p in c1 if v == 0.0 and ts > 20.0))
+
+  def test_brake_law_flag_alone_leaves_the_pump_on_v5(self):
+    # flag 32 belongs to the brake law; on its own it must not select C1
+    from opendbc.car.honda.carcontroller import CarController
+    from opendbc.car.honda.interface import CarInterface
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    self.assertEqual(HondaFlagsSP.ELESYS_PUMP_V6, 16)
+    self.assertEqual(HondaFlagsSP.ELESYS_BRAKE_LAW_V2, 32)
+    CP = CarInterface.get_non_essential_params(ELESYS_CAR)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, ELESYS_CAR)
+    CP_SP.flags |= HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value
+    self.assertFalse(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_v6)
+    CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_V6.value
+    self.assertTrue(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_v6)
+
 
 class TestElesysGasMultiplier(unittest.TestCase):
   """Golden pedal-multiplier curve -- deliberately duplicated so any change to the deployed
