@@ -351,7 +351,9 @@ PITCH_STALE_FRAMES = 100    # 1 s without a fresh pose -> ramp the feedforward o
 PITCH_FADE_MIN_SPEED = 2.0  # m/s below which the feedforward is fully faded out
 PITCH_FADE_FULL_SPEED = 5.0
 
-PERSIST_INTERVAL = 6000     # frames at 100 Hz -> every 60 s, and (batch 3) at every disengage and at card's exit
+# frames at 100 Hz -> every 60 s; (batch 3) the per-drive counters also at every disengage and at card's exit, the
+# learned brake gain only every 60 s, as before
+PERSIST_INTERVAL = 6000
 EXIT_FLUSH_TIMEOUT = 1.0    # s the exit flush waits for a write already in flight
 # carlog is forwarded to cloudlog by selfdrive/car/card.py, so these lines land in
 # logMessage and come straight back out of a route as plain text -- no capnp
@@ -435,17 +437,20 @@ class _ParamWriter:
 
   def write_now(self, values: dict, timeout: float = EXIT_FLUSH_TIMEOUT) -> bool:
     """FORK(HONDA_ACCORD_9G_AU) batch 3: write these values in THIS thread, last. For card's exit, when the daemon
-    thread is about to die with whatever it holds: waits up to `timeout` for a batch in flight, drops anything still
-    queued (it is older than these values), writes. False if it could not get the lock."""
+    thread is about to die with whatever it holds: waits up to `timeout` for a batch in flight, takes anything still
+    queued with these values written over it (a queued key these values do not carry - the brake gain of a 60 s
+    write - is still written, as the thread would have), writes. False if it could not get the lock."""
     if not self._lock.acquire(timeout=timeout):
       return False
     try:
+      pending: dict = {}
       try:
         while True:
-          self._queue.get_nowait()
+          pending.update(self._queue.get_nowait())
       except Empty:
         pass
-      self._write({k: float(v) for k, v in values.items()})
+      pending.update({k: float(v) for k, v in values.items()})
+      self._write(pending)
       self._closed = True
       return True
     finally:
@@ -597,17 +602,21 @@ class HondaDynamicTuner:
     that railed during a transient is never written, so it cannot come back as
     next drive's starting point. The per-mode seconds are counters, not learned
     values, and are written as running totals.
-    FORK(HONDA_ACCORD_9G_AU) batch 3: also on the frame after a disengage (update_state sets _persist_due), and once
-    more when card exits (flush_at_exit), so the end of a drive is no longer up to a minute short."""
+    FORK(HONDA_ACCORD_9G_AU) batch 3: the per-drive counters also on the frame after a disengage (update_state sets
+    _persist_due), and once more when card exits (flush_at_exit), so the end of a drive is no longer up to a minute
+    short. Those two writes carry the COUNTERS ONLY: HondaDynBrakeGain is the learned correction the next drive starts
+    from (it multiplies apply_brake), so it keeps exactly the 60 s cadence it had - the logging fixes change no
+    actuation, not even the next drive's (fix round 1)."""
     if self._writer is None or not self.enabled:
       return
-    if frame % PERSIST_INTERVAL != 0 and not self._persist_due:
+    on_cadence = frame % PERSIST_INTERVAL == 0
+    if not on_cadence and not self._persist_due:
       return
     self._persist_due = False
-    self._writer.put_many(self._persist_values())
+    self._writer.put_many(self._persist_values(include_gain=on_cadence))
 
-  def _persist_values(self) -> dict:
-    values = {"HondaDynBrakeGain": self.brake_gain_converged}
+  def _persist_values(self, include_gain: bool = True) -> dict:
+    values = {"HondaDynBrakeGain": self.brake_gain_converged} if include_gain else {}
     # plain floats only: put_many() does float(v) in THIS thread, the control thread
     values.update({key: self.mode_seconds_total(slot) for slot, key in MODE_SEC_KEYS.items()})
     return values
@@ -637,14 +646,15 @@ class HondaDynamicTuner:
       pass
 
   def flush_at_exit(self) -> None:
-    """The drive's last totals: the persisted values written synchronously (the writer is a daemon thread and dies
-    with the process), the shadow learners' last line, a last hondadyn line. Once; never raises."""
+    """The drive's last totals: the per-drive counters written synchronously (the writer is a daemon thread and dies
+    with the process) - not the learned brake gain, which keeps its 60 s cadence (persist()) - the shadow learners'
+    last line, a last hondadyn line. Once; never raises."""
     if self._flushed:
       return
     self._flushed = True
     try:
       if self._writer is not None and self.enabled:
-        self._writer.write_now(self._persist_values())
+        self._writer.write_now(self._persist_values(include_gain=False))
     except Exception:
       pass
     try:

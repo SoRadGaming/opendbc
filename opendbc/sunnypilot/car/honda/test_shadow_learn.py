@@ -573,10 +573,14 @@ class TestBuildTagsAndPersistence(unittest.TestCase):
     tu.persist(300)
     tu._writer.put_many.assert_called_once()
     self.assertAlmostEqual(tu._writer.put_many.call_args[0][0]["HondaDynModeSecD"], 2.99, places=6)
+    self.assertNotIn("HondaDynBrakeGain", tu._writer.put_many.call_args[0][0],
+                     "fix round 1: the learned gain the next drive starts from keeps its 60 s cadence")
     for frame in range(301, 400):
       tu.update_state(off, cs)
       tu.persist(frame)
     self.assertEqual(tu._writer.put_many.call_count, 1, "once per disengage, not every frame after it")
+    tu.persist(dt.PERSIST_INTERVAL)
+    assert "HondaDynBrakeGain" in tu._writer.put_many.call_args[0][0], "the 60 s write carries it, as before"
 
   def test_exit_flush_writes_synchronously_and_ends_on_the_totals(self):
     store = {}
@@ -591,7 +595,7 @@ class TestBuildTagsAndPersistence(unittest.TestCase):
       tu.flush_at_exit()
       tu.flush_at_exit()
     self.assertEqual(params.store["HondaDynModeSecD"], 12.5)
-    assert "HondaDynBrakeGain" in params.store
+    self.assertNotIn("HondaDynBrakeGain", params.store, "the exit flush writes the counters, not the learned gain")
     self.assertEqual([x.split()[0] for x in lines], ["hondashadow", "hondadyn"], "once, the shadow's total then the tuner's")
 
   def test_write_now_is_never_overtaken_by_an_older_batch(self):
@@ -615,16 +619,30 @@ class TestBuildTagsAndPersistence(unittest.TestCase):
     time.sleep(0.2)
     self.assertEqual(p.store["k"], 3.0)
 
+  def test_the_exit_flush_keeps_a_queued_sixty_second_write(self):
+    # the writer thread may still hold a 60 s batch (gain included) when card exits: write_now writes it too, under the
+    # newer counters - as the thread would have - rather than dropping the gain
+    import threading
+    from queue import Queue
+    w = dt._ParamWriter.__new__(dt._ParamWriter)    # no thread: the batch stays queued, deterministically
+    w._params, w._queue, w.write_errors, w._lock, w._closed = _Params({}), Queue(), 0, threading.Lock(), False
+    w.put_many({"HondaDynBrakeGain": 0.02, "HondaDynModeSecD": 1.0})
+    self.assertTrue(w.write_now({"HondaDynModeSecD": 5.0}))
+    self.assertEqual((w._params.store["HondaDynBrakeGain"], w._params.store["HondaDynModeSecD"]), (0.02, 5.0))
+
   def test_exit_flush_is_hooked_only_on_the_device(self):
     for device, calls in ((True, 1), (False, 0)):
       with self.subTest(device=device), mock.patch.object(dt, "_device_params", lambda p, d=device: d), \
            mock.patch("atexit.register") as reg, mock.patch("multiprocessing.util.Finalize") as fin:
         tu = _build(True).dynamic_tuner
-        self.assertEqual((reg.call_count, fin.call_count), (calls, calls))
+        # only the tuner's own hook: a module imported for the first time inside _build may register its own atexit
+        # (it did when this file ran alone, which made the count 2)
+        ours = [c for c in reg.call_args_list if getattr(c[0][0], "__name__", "") == "_flush"]
+        self.assertEqual((len(ours), fin.call_count), (calls, calls))
         if calls:
           self.assertEqual(fin.call_args.kwargs.get("exitpriority"), 10)
           with mock.patch.object(tu, "flush_at_exit") as flush:
-            reg.call_args[0][0]()          # what the process exit runs
+            ours[0][0][0]()                # what the process exit runs
           flush.assert_called_once()
 
 

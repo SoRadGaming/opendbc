@@ -28,7 +28,9 @@ RUNS, byte for byte: the soft stop, the standstill hold (~174-189 counts) and th
 From V_LO to V_HI every quantity is a linear blend from today's equivalent (zb = -2.6 wb, zp = -1.95 wb, c0 = 0,
 k = 1, TOE = 0, the gas law's offset) to v2's, so nothing steps at 4 m/s except the aero credit (< 1.5 counts).
 The one thing the flag changes on those frames too: the scalar brake gain (dynamic_tuning.py) is held at 1.0 for the
-whole drive and learns nothing (its stored value is kept). At a standstill it was already faded to 1.0.
+whole drive and learns nothing (its stored value is kept). At a standstill it was already faded to 1.0, but on the
+1-4 m/s stop approach today's path would apply the learned 0.99-1.03, so a stop approach can brake up to ~3% (~5
+counts at 170) differently: "stops unchanged" means today's code path with a x1.00 brake gain.
 It needs gas law v2 (brake_law_v2_enabled()); with HondaElesysGasLawV2 off it stays off for the drive.
 
 TWO MEASURED CHANGES BEYOND THE B2 SKETCH (without them v2 is worse than today on pump starts, +24% in the sim):
@@ -47,11 +49,28 @@ above 25 m/s. Firm braking at 20 m/s and above is extrapolated (steady data ther
 
 CLOSED LOOP (batch3/sim: the real LongControl and controller helpers, a plant fitted separately; 87 engaged min on
 7 routes, pump C1 on both): brake applications -33%, light ones (peak < 12 counts) 87 -> 0, moving brake time -37%,
-braking at targets coasting reaches -57%, pump starts -7%, pump time -13%, tracking equal or better, stops unchanged
-in paired comparison - under all 10 plant perturbations. THE COST is the onset: in the first second of an
-application the car decelerates 0.18 m/s^2 less than asked (today 0.09) and the integrator over-corrects for ~2 s
-(-0.08 at 5-10 m/s, -0.06 at 15-20 while braking; B4 wants +-0.05). Levers if the road shows it: a smaller TOE or a
-negative D_EXTRA pre-fills earlier (each ~+10% applications at -0.05); the c0 table is not one (<= 0.015).
+braking at targets coasting reaches -57%, pump starts -7%, pump time -13%, overall tracking RMS equal or better under
+all 10 plant perturbations (but worse while braking: 10f 0.199 against 0.165). THE COST is the onset: in the first
+second of an application the car decelerates 0.18 m/s^2 less than asked (today 0.09) and the integrator
+over-corrects for ~2 s (-0.08 at 5-10 m/s, -0.06 at 15-20 while braking; B4 wants +-0.05).
+
+IT FAILS TWO OF THE OWNER'S ACCEPTANCE CRITERIA, and both toward LESS brake: the every-band +-0.05 rule held out
+(20-25 m/s -0.076, above) and B4 in the simulator (5-10 m/s within +-0.05 in only 3 of the 11 plant variants;
+coast +0.1: -0.155 / -0.142 / -0.130 at 5-10 / 10-15 / 15-20 m/s; k -15%: -0.189 at 5-10). It needs the owner's
+explicit sign-off before anyone turns it on.
+The simulator is circular on coasting (its plant's COAST_V is this module's COAST_V), so the coast-band results are
+assumed, not tested; held-out open-loop coast bias reaches -0.103 (110) and +0.109 (114). It also mis-models the
+stop (closed-loop decel at the stop -1.21 m/s^2 against -0.68 logged, n 5), has no standstill bleed, and its pump
+delivery model does not separate the pump rules (open-loop RMS with and without it 0.121/0.121 on 110). So the
+'stops unchanged' paired comparison and every closed-loop pump or hold number are not evidence: stops, holds and
+the pump are measured in the car (B4, pump2 section 4, brake_route_check.py).
+Levers, run in the simulator under the plant's coast +-0.1 (fix round 1, batch3/sim/lever.py): D_EXTRA -0.05 puts B4
+inside +-0.05 on the nominal plant (worst band 0.043, against 0.079) for +8% applications and +7% pump starts, but
+under coast +0.1 / -0.1 still fails (worst 0.115 / 0.085, against 0.155 / 0.060); D_EXTRA -0.10: 0.053 nominal,
+0.076 / 0.101 under coast +-0.1; TOE 5 or 0 changes nothing
+(<= 0.001); the c0 table is not one (<= 0.015). No lever passes B4 under coast +-0.1 - and neither does today's law
+(0.149 / 0.116), so that gate measures the coast curve's error, which the integrator is there to absorb. None is
+adopted: a negative D_EXTRA brakes inside the coast band, against "nothing sent where coasting delivers".
 
 Known limits: coast(v) is D with ECON off and is used in every mode; the coast curve at 3-6 m/s varies by route
 (the 4-6 m/s blend exists for that); the plant's absolute onset figures rest on brake dynamics the logs barely

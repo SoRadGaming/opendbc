@@ -217,6 +217,13 @@ def brake_pump_hysteresis_elesys(apply_brake, v_ego, brake_anchor, last_pump_ts,
 #    deadband, not the refractory, caused most undelivered rises.
 #  - at standstill a burst may only BUILD a hold (level < 100): one hold-build burst on a stop reached at a light
 #    command, none once the hold is there. No 30 s top-up (58 starts, 31 s of pump on V5 that changed nothing logged).
+#    DEVIATION from the pseudo-code (batch 3 fix round 1, evidence: the soft stop): a standstill rise of more than
+#    ELESYS_PUMP_BIG_RISE over the delivered level is delivered too. The soft stop (elesys_stop.py, on with the tuner)
+#    caps the rolling command at ~125 counts and raises it to the 189 hold 0.55 s after the wheels read zero; without
+#    this the delivered level >= 100 blocked that rise for the whole stop, so the hold was the cap, never topped up -
+#    a state no logged hold has tested (pump2's holds were 143-253 counts). v5 delivered the same rise with its
+#    big-rise trigger. Cost, replayed open loop on the 66 V5 routes (no soft stop ran there): +1 start of 2021, 1 of
+#    107 stops. Still no top-up: a steady hold never re-pumps.
 #  - moving at cb >= 100 with no burst for 6 s: one burst. The firm-braking dry bound, and the creep guard - a hold
 #    that starts to roll is moving again, and fires at once if its last burst was 6 s or more ago.
 #  - kept: the continuous run at v >= 2.5 and cb > 200 (2905e73d; unresolved whether it is needed, 2.6% of pump time).
@@ -234,7 +241,9 @@ ELESYS_PUMP_C1_MIN_GAP = 1.0       # s of quiet after a burst before a rise unde
 ELESYS_PUMP_C1_FIRM = 200          # counts; moving faster than 2.5 m/s above this, the pump runs continuously
 ELESYS_PUMP_C1_TOPUP_CB = 100      # counts; moving at or above this, a burst at least every TOPUP_S
 ELESYS_PUMP_C1_TOPUP_S = 6.0
-ELESYS_PUMP_C1_HOLD_OK = 100       # counts delivered; at standstill a burst may only build a hold up to here
+# counts delivered; at standstill a burst builds a hold up to here, then only a rise of more than ELESYS_PUMP_BIG_RISE
+# over the delivered level fires (the soft stop's rise to the hold)
+ELESYS_PUMP_C1_HOLD_OK = 100
 
 
 def brake_pump_c1_elesys(apply_brake, v_ego, level, trig, last_pump_ts, ts):
@@ -254,7 +263,8 @@ def brake_pump_c1_elesys(apply_brake, v_ego, level, trig, last_pump_ts, ts):
     still = v_ego < 0.15
     gap_ok = (level == 0 or ts - last_pump_ts >= ELESYS_PUMP_RUN + ELESYS_PUMP_C1_MIN_GAP or
               apply_brake > level + ELESYS_PUMP_BIG_RISE)
-    if (not still or level < ELESYS_PUMP_C1_HOLD_OK) and apply_brake > level + deadband and gap_ok:
+    hold_rise = apply_brake > level + ELESYS_PUMP_BIG_RISE  # at standstill: the soft stop's rise to the hold
+    if (not still or level < ELESYS_PUMP_C1_HOLD_OK or hold_rise) and apply_brake > level + deadband and gap_ok:
       last_pump_ts, trig = ts, apply_brake  # the first burst of an application, or a real rise
     elif not still and apply_brake >= ELESYS_PUMP_C1_TOPUP_CB and ts - last_pump_ts >= ELESYS_PUMP_C1_TOPUP_S:
       last_pump_ts, trig = ts, apply_brake  # firm-braking dry bound, and the creep guard

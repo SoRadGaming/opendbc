@@ -455,15 +455,28 @@ class TestBrakePumpC1(unittest.TestCase):
     self.assertEqual(_C1.starts(on), 5)       # 0, 6, 12, 18, 24 s
     self.assertEqual(sum(on), 5 * 25)
 
-  def test_standstill_hold_reached_firm_never_pumps(self):
-    # approach at cb 150 (pumped while moving), stop, the soft stop's 125 -> 189 rise at standstill: the hold is
-    # already there (level >= 100), so nothing pumps while stopped - not the rise, and no 30 s top-up
+  def test_standstill_hold_reached_firm_never_tops_up(self):
+    # stop reached at the hold (V5's stops: ~185 counts when the wheels stop, hold 189): the hold is already there
+    # (level >= 100) and the last 4 counts are inside BIG_RISE, so nothing pumps while stopped - no 30 s top-up
+    c = _C1()
+    c.hold(185, 2.0, v=3.0)
+    on = c.hold(189, 120.0, v=0.0)
+    self.assertFalse(any(on))
+    self.assertEqual(c.level, 185)
+
+  def test_the_soft_stops_rise_to_the_hold_is_delivered_once(self):
+    # fix round 1 (finding 2): approach at cb 150 (pumped while moving), the soft stop's cap of 125 while rolling, then
+    # its 125 -> 189 rise at standstill (250 counts/s = 5 per 0x1FA frame). The pseudo-code's HOLD_OK alone left the
+    # delivered level at 125 for the whole stop; a rise of more than BIG_RISE over it is delivered - one burst - and a
+    # steady hold still never re-pumps
     c = _C1()
     c.hold(150, 2.0, v=3.0)
     c.hold(125, 1.0, v=0.5)
-    on = [c.step(cb, v=0.0) for cb in range(125, 190, 2)]
-    on += c.hold(189, 120.0, v=0.0)
-    self.assertFalse(any(on))
+    self.assertEqual(c.level, 125)
+    on = [c.step(cb, v=0.0) for cb in range(125, 190, 5)] + c.hold(189, 120.0, v=0.0)
+    self.assertEqual(_C1.starts(on), 1)
+    self.assertGreaterEqual(c.level, 189)
+    self.assertFalse(any(on[-5000:]), "no top-up after it")
 
   def test_standstill_hold_reached_light_gets_one_hold_build_burst(self):
     # stop reached at cb 40: the 40 -> 189 rise at standstill builds the hold - one burst, extended through the
@@ -473,10 +486,11 @@ class TestBrakePumpC1(unittest.TestCase):
     on = c.hold(125, 0.1, v=0.0) + [c.step(cb, v=0.0) for cb in range(127, 190, 2)] + c.hold(189, 120.0, v=0.0)
     self.assertEqual(_C1.starts(on), 1)
     self.assertGreaterEqual(c.level, 189)
-    # and a standstill rise cannot fire once the delivered level is 100 or more
+    # and once the delivered level is 100 or more a standstill rise fires only past BIG_RISE (15)
     c = _C1()
     c.hold(100, 1.0, v=0.0)
-    self.assertFalse(any(c.hold(150, 5.0, v=0.0)))
+    self.assertFalse(any(c.hold(115, 5.0, v=0.0)))
+    self.assertTrue(any(c.hold(116, 0.1, v=0.0)))
 
   def test_creep_guard(self):
     # a built hold that starts to roll is moving again: at cb >= 100 with no burst for 6 s it fires at once
@@ -613,7 +627,77 @@ class TestElesysPumpRuleSelection(unittest.TestCase):
     self.assertTrue(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_v6)
 
 
-class TestElesysGasMultiplier(unittest.TestCase):
+class TestElesysC1WithTheSoftStop(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU) fix round 1 (finding 2): the real CarController with the tuner on, so the soft stop is
+  built, and C1 selected. The soft stop caps the rolling command at ~125 counts and raises it to the hold after the
+  wheels read zero; C1 must deliver that rise (one burst at standstill), and not top the hold up afterwards."""
+
+  def _run(self, flags):
+    from unittest import mock
+    from opendbc.car import gen_empty_fingerprint, structs
+    from opendbc.car.honda.carcontroller import CarController
+    from opendbc.car.honda.interface import CarInterface
+    from opendbc.sunnypilot.car.honda import dynamic_tuning as dt
+    from opendbc.sunnypilot.car.honda import elesys_gas as eg
+
+    class _P:
+      store = {"HondaDynamicTuningEnabled": True, eg.GAS_LAW_PARAM: True}
+
+      def get(self, key, block=False, return_default=False):
+        return self.store.get(key, dt._PARAM_SPEC[key][0] if key in dt._PARAM_SPEC else None)
+
+      def get_bool(self, key, block=False):
+        return bool(self.store.get(key, False))
+
+      def put(self, key, val, block=False):
+        pass
+    fp = gen_empty_fingerprint()
+    fp[0][0x188] = 8
+    fp[0][0x201] = 6
+    with mock.patch.object(dt, "_open_params", lambda: _P()), mock.patch.object(eg, "_open_params", lambda: _P()):
+      CP = CarInterface.get_params(ELESYS_CAR, fp, [], False, False, False)
+      CP_SP = CarInterface.get_params_sp(CP, ELESYS_CAR, fp, [], False, False, False)
+      CP_SP.flags |= flags
+      cc_obj = CarController(DBC[ELESYS_CAR], CP, CP_SP)
+    self.assertIsNotNone(cc_obj.soft_stop, "the tuner on builds the soft stop")
+    cs = _FakeCS()
+    out = []
+    v, stopping = 6.0, False
+    for i in range(round(40.0 * 100)):
+      t = i * 0.01
+      stopping = stopping or v <= 0.9              # stopping entered below the soft stop's 1.2 m/s, as measured
+      v = max(0.0, v - (1.0 if not stopping else 0.6) * 0.01)
+      cs.out.vEgo = v
+      cs.out.vEgoRaw = v if v > 0.3 else 0.0          # XMISSION_SPEED reads 0 below ~0.3 m/s
+      cs.out.standstill = cs.out.vEgoRaw == 0.0
+      cs.out.aEgo = -0.6 if v > 0 else 0.0
+      cc = structs.CarControl.new_message()
+      cc.enabled = cc.longActive = True
+      cc.orientationNED = [0.0, 0.0, 0.0]
+      # the planner eases off into the stop (the creep table adds ~0.75 m/s^2 at 0.9 m/s: ~90 counts at entry, under
+      # the 125 cap), then longcontrol's stopping accel, which the cap holds at 125 until the wheels read zero
+      cc.actuators.accel = (-1.0 if v > 3.0 else -0.2) if not stopping else -0.8
+      cc.actuators.longControlState = structs.CarControl.Actuators.LongControlState.stopping if stopping else \
+        structs.CarControl.Actuators.LongControlState.pid
+      cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, int(t * 1e9))
+      if i % 2 == 0:
+        out.append((t, v, cs.out.standstill, cc_obj.apply_brake_last, cc_obj.pump_level))
+    return cc_obj, out
+
+  def test_c1_delivers_the_soft_stops_hold(self):
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    cc_obj, out = self._run(HondaFlagsSP.ELESYS_PUMP_V6.value)
+    t_stop = next(t for t, v, _, _, _ in out if v <= 0.9)
+    rolling = [cb for t, v, _, cb, _ in out if t >= t_stop and v > 0.0]
+    self.assertTrue(rolling and max(rolling) <= 130, f"the soft stop caps the rolling command: {max(rolling or [0])}")
+    held = [cb for t, v, ss, cb, _ in out if ss and t > 10.0]
+    self.assertGreaterEqual(min(held), 180, "the hold the soft stop rises to")
+    level_end = out[-1][4]
+    self.assertGreaterEqual(level_end, min(held), "C1 delivered the hold (the pseudo-code alone left it at the cap)")
+    # one burst at standstill, delivering the rise, none for the rest of the 30 s hold
+    t_still = next(t for t, v, ss, _, _ in out if ss)
+    levels_after = [lv for t, _, ss, _, lv in out if ss and t > t_still + 3.0]
+    self.assertEqual(min(levels_after), max(levels_after), "no top-up: the delivered level never moves again")
   """Golden pedal-multiplier curve -- deliberately duplicated so any change to the deployed
   curve fails a test until it has been re-measured.
 
