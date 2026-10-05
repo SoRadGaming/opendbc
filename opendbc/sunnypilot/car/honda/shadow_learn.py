@@ -49,13 +49,28 @@ THE GATES are on a run of clean frames, not just this one: CLEAN_HOLD (1 s) of e
 with no driver pedal, no stock AEB, D, a fresh pose. A driver's throttle stays in aEgo after the pedal
 is released (route 10f: 0.38 s median, 0.76 s p90 before aEgo is back within 0.15 of the command),
 and the pedal/brake WINDOW alone only holds the law's commands, which read zero during an override.
+THE LAUNCH counts its clean second through the stop instead (batch 3, learnaudit G6): it needs the same
+engaged, pedal-free, AEB-free, D, fresh-pose run, in ANY control state, so a launch from an openpilot-held
+stop is sampled from the first wheel motion. Waiting for a second of PID meant waiting for control to
+leave the stopping state, and by then the car was at 0.61-1.07 m/s (115 t 511, 10f t 303 and t 2408):
+the 0.5-1 m/s slice, where the overshoot is worst, was never sampled.
+
+RUNS WITHOUT THE TUNER'S LIVE PARTS (batch 3). The tuner builds this on the Elesys Accord with the
+interceptor and openpilot longitudinal whether or not HondaDynamicTuningEnabled is on: with the toggle off
+the tuner still tracks pitch and its plant model for this, and still applies nothing (dynamic_tuning.py).
+Never in stock ACC mode: openpilot longitudinal is off there, so the tuner does not apply.
 
 LOG. One `hondashadow` line (carlog -> card -> cloudlog -> logMessage) every LOG_INTERVAL while
-something new was admitted, and one at every disengage, so the last line of a route is the drive's
-total. The totals are per drive (they start at zero at every ignition); the per-cell counts are in
-the line, so routes are combined offline by weighting with them. Format: `key=value` tokens, lists in
-[...] (row-major for the brake table: speed band, then command band), `nan` for an empty cell -- the
-same shape parse_hondadyn.py already reads.
+something new was admitted, one at every disengage, and one when card exits at ignition-off (flush()),
+so the last line of a route is the drive's total. The totals are per drive (they start at zero at every
+ignition); the per-cell counts are in the line, so routes are combined offline by weighting with them.
+Format: `key=value` tokens, lists in [...] (row-major for the brake table: speed band, then command
+band), `nan` for an empty cell -- the same shape parse_hondadyn.py already reads. From v=2 every line
+starts with what it was measured on, BUILD_KEYS: `commit` (GitCommit, 9 characters), `gaslaw` (v1/v2),
+`cap` (1 = the launch cap is in the gas law), `pump` (v5 = the pump rule up to batch 2, v6 = the quieter
+rule C1, CP_SP flag 16), `blaw` (v1 = the /2.6 brake law, v2 = the measured law, CP_SP flag 32) and
+`tuner` (Dynamic Tuning's live parts on or off): shadow_learn_report.py never pools lines that differ in
+any of them.
 """
 
 import math
@@ -67,8 +82,15 @@ from opendbc.car.carlog import carlog
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 LOG_TAG = "hondashadow"
-LOG_VERSION = 1
+LOG_VERSION = 2               # 2: the build tags (BUILD_KEYS) and the launch window from first wheel motion
 RATE_HZ = 50                  # called once per 50 Hz gas/brake frame
+
+# What a line was measured on, in the order the line carries them. "-" = not known.
+BUILD_KEYS = ("commit", "gaslaw", "cap", "pump", "blaw", "tuner")
+# CP_SP.flags bits (opendbc/sunnypilot/car/honda/values_ext.py HondaFlagsSP: ELESYS_PUMP_V6, ELESYS_BRAKE_LAW_V2), with
+# the fixed values as the fallback so a tag never depends on the import working
+PUMP_V6_FLAG = 16
+BRAKE_LAW_V2_FLAG = 32
 LOG_INTERVAL = 60 * RATE_HZ   # a summary line at most once a minute
 
 NIDEC_BRAKE_MAX = 256         # CarControllerParams.NIDEC_BRAKE_MAX: brake fraction -> 0x1FA counts
@@ -179,6 +201,61 @@ def lead_visible(CC) -> bool:
     return True   # not known: kept out of the no-lead sums
 
 
+def _flag_value(name: str, fallback: int) -> int:
+  try:
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    return int(getattr(HondaFlagsSP, name, fallback))
+  except Exception:
+    return fallback
+
+
+def pump_rule_tag(CP_SP) -> str:
+  """'v6' when the controller runs the quieter pump rule (CP_SP flag ELESYS_PUMP_V6), else 'v5'; '-' without CP_SP."""
+  try:
+    return "v6" if int(CP_SP.flags) & _flag_value("ELESYS_PUMP_V6", PUMP_V6_FLAG) else "v5"
+  except Exception:
+    return "-"
+
+
+def brake_law_tag(CP_SP) -> str:
+  """'v2' when the controller runs the measured brake law (CP_SP flag ELESYS_BRAKE_LAW_V2), else 'v1'; '-' without CP_SP."""
+  try:
+    return "v2" if int(CP_SP.flags) & _flag_value("ELESYS_BRAKE_LAW_V2", BRAKE_LAW_V2_FLAG) else "v1"
+  except Exception:
+    return "-"
+
+
+def launch_cap_tag(gas_law: str) -> str:
+  """'1' when the gas law has the launch cap (elesys_gas.py: v2 below LAUNCH_CAP_V_END), '0' when it does not (v1, or
+  another car's law), '-' while the law is not known yet (it arrives with the first interceptor frame)."""
+  law = str(gas_law or "-")
+  if law in ("-", ""):
+    return "-"
+  try:
+    from opendbc.sunnypilot.car.honda.elesys_gas import LAUNCH_CAP_V_END
+    return "1" if law == "v2" and LAUNCH_CAP_V_END > 0.0 else "0"
+  except Exception:
+    return "-"
+
+
+def git_commit_tag(params) -> str:
+  """The running build's commit (Params GitCommit, which manager writes at every start), 9 characters, or '-'."""
+  try:
+    raw = params.get("GitCommit") if params is not None else None
+    if isinstance(raw, bytes):
+      raw = raw.decode(errors="replace")
+    txt = str(raw or "").strip()
+    return txt[:9] if txt and all(c.isalnum() for c in txt[:9]) else "-"
+  except Exception:
+    return "-"
+
+
+def build_tags(CP_SP, params=None, tuner_on: bool = False) -> dict:
+  """Every BUILD_KEYS tag but the gas law and its cap, which the interceptor path reports frame by frame."""
+  return {"commit": git_commit_tag(params), "gaslaw": "-", "cap": "-", "pump": pump_rule_tag(CP_SP),
+          "blaw": brake_law_tag(CP_SP), "tuner": "1" if tuner_on else "0"}
+
+
 class _Mean:
   """Running sum, sum of squares and count. Means, not EMAs: nothing here acts, so nothing can wind up,
   and a plain mean with its count is what combines exactly across drives."""
@@ -244,7 +321,10 @@ def _fmt(values, spec: str) -> str:
 
 
 class HondaShadowLearners:
-  def __init__(self):
+  def __init__(self, build: dict | None = None):
+    # what every line says it was measured on (BUILD_KEYS); the gas law and cap fill in from update()
+    self.build = {k: "-" for k in BUILD_KEYS}
+    self.build.update({k: str(v) for k, v in (build or {}).items() if k in BUILD_KEYS})
     n_speed, n_cmd = len(SPEED_BP), len(BRAKE_COUNT_BP) + 1
     self.brake = [[_Mean() for _ in range(n_cmd)] for _ in range(n_speed)]
     # the command and the achieved accel behind each brake cell, so the table also reads as "delivered
@@ -268,6 +348,7 @@ class HondaShadowLearners:
     self._steady = 0
     self._ramp_ok = 0
     self._clean = 0
+    self._clean_launch = 0   # the same run of clean frames, in any control state (the launch's window, docstring)
     self._long_active = False
     self._frames = 0
     self._dirty = False
@@ -276,9 +357,12 @@ class HondaShadowLearners:
   # --- per 50 Hz frame -------------------------------------------------------------------------------
 
   def update(self, CC, CS, *, pitch: float, pose_fresh: bool, mode_ok: bool,
-             cmd_ref: float, brake_frac: float, gas_cmd: float, brake_gain: float = 1.0) -> None:
+             cmd_ref: float, brake_frac: float, gas_cmd: float, brake_gain: float = 1.0, gas_law: str = "") -> None:
     """One 50 Hz sample. Every keyword argument is a value the tuner already computed for this frame, CC
     and CS are only read; nothing is returned and nothing outside this object is written."""
+    if gas_law:
+      self.build["gaslaw"] = str(gas_law)
+      self.build["cap"] = launch_cap_tag(gas_law)
     long_active = bool(CC.longActive)
     out = CS.out
     counts = _finite(brake_frac, 0.0) * NIDEC_BRAKE_MAX
@@ -291,9 +375,11 @@ class HondaShadowLearners:
     self._prev_ref = ref
     self._steady = self._steady + 1 if ramp <= STEADY_MAX_RAMP else 0
     self._ramp_ok = self._ramp_ok + 1 if ramp <= LAUNCH_MAX_RAMP else 0
-    clean = (long_active and mode_ok and pose_fresh and CC.actuators.longControlState == LongCtrlState.pid
-             and not out.gasPressed and not out.brakePressed and not out.stockAeb)
+    clean_any_state = (long_active and mode_ok and pose_fresh
+                       and not out.gasPressed and not out.brakePressed and not out.stockAeb)
+    clean = clean_any_state and CC.actuators.longControlState == LongCtrlState.pid
     self._clean = self._clean + 1 if clean else 0
+    self._clean_launch = self._clean_launch + 1 if clean_any_state else 0
 
     # the drive's running totals go out at every disengage and once a minute, if anything was added
     disengaged = self._long_active and not long_active
@@ -313,8 +399,10 @@ class HondaShadowLearners:
   def _sample(self, CC, CS, pitch, ref, counts, brake_gain) -> bool:
     """Admit at most one sample into one table. Returns True if it was a launch sample."""
     out = CS.out
-    if self._clean < CLEAN_HOLD or len(self._counts) < WINDOW:
+    # the brake and coast tables need CLEAN_HOLD of PID; a launch the same run in any state (docstring)
+    if self._clean_launch < CLEAN_HOLD or len(self._counts) < WINDOW:
       return False
+    pid_clean = self._clean >= CLEAN_HOLD
     pitch = _finite(pitch)
     v = _finite(out.vEgo)
     a = _finite(out.aEgo)
@@ -328,7 +416,7 @@ class HondaShadowLearners:
 
     if gas_hi <= 0.0:
       sb = speed_band(v)
-      if sb < 0 or self._steady < STEADY_HOLD or not abs(pitch) < MAX_PITCH:
+      if not pid_clean or sb < 0 or self._steady < STEADY_HOLD or not abs(pitch) < MAX_PITCH:
         return False
       if cb_lo >= BRAKE_MIN_COUNTS and cb_hi - cb_lo <= BRAKE_STEADY_COUNTS and count_band(cb_lo) == count_band(cb_hi):
         cb = count_band(counts)
@@ -383,7 +471,9 @@ class HondaShadowLearners:
     cells = [c for row in self.brake for c in row]
     n, ra, rr = self.launch_pooled()
     corr = [x for row in self.brake_corrections() for x in row]
-    return (f"{LOG_TAG} v={LOG_VERSION} " +
+    # tags carry no spaces or '=' (a value that did would split the line's tokens)
+    tags = " ".join(f"{k}={str(self.build.get(k, '-')).replace(' ', '_').replace('=', '_') or '-'}" for k in BUILD_KEYS)
+    return (f"{LOG_TAG} v={LOG_VERSION} {tags} " +
             f"bspd={_fmt(SPEED_BP, 'g')} bcnt={_fmt((BRAKE_MIN_COUNTS,) + BRAKE_COUNT_BP, 'g')} " +
             f"bn={_fmt([c.n for c in cells], 'd')} be={_fmt([c.mean() for c in cells], '+.3f')} " +
             f"bsd={_fmt([c.std() for c in cells], '.3f')} bcorr={_fmt(corr, '+.3f')} " +
@@ -404,3 +494,9 @@ class HondaShadowLearners:
     self._dirty = False
     self.lines += 1
     carlog.info(self.line())
+
+  def flush(self) -> None:
+    """The drive's last totals, if anything was admitted since the last line: called once when card exits
+    (HondaDynamicTuner.flush_at_exit), so a drive that ends engaged still ends on its total."""
+    if self._dirty:
+      self.emit()

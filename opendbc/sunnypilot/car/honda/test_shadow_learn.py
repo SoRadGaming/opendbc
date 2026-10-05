@@ -83,7 +83,10 @@ def parse(line):
   out = {}
   for tok in line.split()[1:]:
     k, v = tok.split("=", 1)
-    out[k] = [float(x) for x in v.strip("[]").split(",")] if v.startswith("[") else float(v)
+    if k in sl.BUILD_KEYS:
+      out[k] = v           # tags stay text: a commit can be all digits
+    else:
+      out[k] = [float(x) for x in v.strip("[]").split(",")] if v.startswith("[") else float(v)
   return out
 
 
@@ -162,6 +165,8 @@ class TestGates(unittest.TestCase):
                  "stopping": dict(state=LongCtrlState.stopping), "pose stale": dict(pose_fresh=False)}
     for name, kw in cases.items():
       for oname, okw in overrides.items():
+        if name == "launch" and oname == "stopping":
+          continue   # not an override for a launch any more: its window runs through the stop (next test)
         with self.subTest(f"{name} after {oname}"):
           sh = HondaShadowLearners()
           feed(sh, 200, **(kw | okw))
@@ -170,6 +175,27 @@ class TestGates(unittest.TestCase):
           self.assertEqual(totals(sh), (0, 0, 0), "still inside the clean hold")
           feed(sh, 1, **kw)
           self.assertEqual(sum(totals(sh)), 1, "a clean second later")
+
+  def test_a_launch_from_an_openpilot_held_stop_is_sampled_from_first_wheel_motion(self):
+    # batch 3 (learnaudit G6): 115 t 511, 10f t 303 / 2408 -- control left the stopping state with the car already at
+    # 0.61-1.07 m/s, and a second of PID after that put the first launch sample above 1 m/s. The launch's clean run now
+    # counts through the held stop, so the 0.5-1 m/s slice is sampled while control is still stopping.
+    stopping = LongCtrlState.stopping
+    sh = HondaShadowLearners()
+    feed(sh, 150, v=0.0, a=0.0, ref=-0.5, counts=180.0, state=stopping)      # held at the stop, engaged, no pedals
+    self.assertEqual(totals(sh), (0, 0, 0))
+    feed(sh, sl.WINDOW, v=0.3, a=1.2, ref=1.0, counts=0.0, gas=0.15, state=stopping)   # first motion: creeping off
+    feed(sh, 30, v=0.7, a=1.3, ref=1.0, counts=0.0, gas=0.15, state=stopping)
+    self.assertEqual(sh.launch[0].n, 30, "sampled at 0.7 m/s, still in the stopping state")
+    self.assertEqual(sh.launch_episodes, 1)
+    self.assertEqual(totals(sh)[:2], (0, 0), "the brake and coast tables still need a second of PID")
+    # a driver's pedal still costs the launch a clean second, in any state
+    sh = HondaShadowLearners()
+    feed(sh, 150, v=0.0, a=0.0, ref=-0.5, counts=180.0, state=stopping, gasPressed=True)
+    feed(sh, sl.CLEAN_HOLD - 1, v=0.7, a=1.3, ref=1.0, counts=0.0, gas=0.15, state=stopping)
+    self.assertEqual(totals(sh), (0, 0, 0))
+    feed(sh, 1, v=0.7, a=1.3, ref=1.0, counts=0.0, gas=0.15, state=stopping)
+    self.assertEqual(totals(sh), (0, 0, 1))
 
   def test_jerk_gate_on_the_plant_model(self):
     sh = HondaShadowLearners()
@@ -284,7 +310,7 @@ class TestLog(unittest.TestCase):
       feed(sh, 5, long_active=False)
       self.assertEqual(len(lines), 3)                        # nothing admitted in the window: no line
     d = parse(lines[-1])
-    self.assertTrue(lines[-1].startswith("hondashadow v=1 "))
+    self.assertTrue(lines[-1].startswith("hondashadow v=2 commit=- gaslaw=- cap=- pump=- blaw=- tuner=- "), lines[-1])
     self.assertLess(max(len(x) for x in lines), 1200)
     n_cells = len(sl.SPEED_BP) * (len(sl.BRAKE_COUNT_BP) + 1)
     for k in ("bn", "be", "bsd", "bcorr", "bcb", "bacc"):
@@ -330,13 +356,14 @@ class _CS:
     self.pcm_pedal_gas = 40.0
 
 
-def _build(shadow: bool):
-  params = _Params({"HondaDynamicTuningEnabled": True, eg.GAS_LAW_PARAM: True})
+def _build(shadow: bool, tuning: bool = True, flags: int = 0, store: dict | None = None):
+  params = _Params({"HondaDynamicTuningEnabled": tuning, eg.GAS_LAW_PARAM: True, **(store or {})})
   with mock.patch.object(dt, "_open_params", lambda: params), mock.patch.object(eg, "_open_params", lambda: params):
     CP = CarInterface.get_non_essential_params(PLATFORM)
     CP_SP = CarInterface.get_non_essential_params_sp(CP, PLATFORM)
     CP.openpilotLongitudinalControl = True
     CP_SP.enableGasInterceptor = True
+    CP_SP.flags |= flags
     cc = CarController(PLATFORM.config.dbc_dict, CP, CP_SP)
   if not shadow:
     cc.dynamic_tuner.shadow = None
@@ -424,6 +451,41 @@ class TestNothingActuatedChanges(unittest.TestCase):
     for i in range(10):
       cc_obj.update(_make_cc(-1.0, LongCtrlState.pid, True, 0.0), structs.CarControlSP(), cs, i * int(1e7))
 
+  def test_with_the_tuner_off_the_shadow_runs_and_nothing_actuated_changes(self):
+    # batch 3: the shadow learners and the per-mode counter run with Dynamic Tuning's live parts off (logging mode).
+    # Against a controller whose tuner has no logging mode at all, the CAN and the actuator outputs are identical.
+    lines = []
+    with mock.patch.object(sl.carlog, "info", lambda msg, *a, **k: lines.append(msg)), \
+         mock.patch.object(dt.carlog, "info", lambda msg, *a, **k: lines.append(msg)):
+      for seed in (4, 5):
+        logging_on = _build(True, tuning=False)
+        with mock.patch.object(sl, "shadow_applicable", lambda *a, **k: False):
+          logging_off = _build(True, tuning=False)
+        ta, tb = logging_on.dynamic_tuner, logging_off.dynamic_tuner
+        self.assertEqual((ta.enabled, ta.logging, ta.shadow is not None), (False, True, True))
+        self.assertEqual((tb.enabled, tb.logging, tb.shadow is None), (False, False, True))
+        self.assertIsNone(logging_on.soft_stop, "the soft stop stays with the toggle")
+        cs_a, cs_b = _CS(), _CS()
+        for i, f in enumerate(_scenario(seed)):
+          for cs in (cs_a, cs_b):
+            cs.out.vEgo, cs.out.aEgo, cs.out.standstill = f["v"], f["a"], f["v"] < 0.01
+            cs.out.gasPressed, cs.out.brakePressed = f["gas"], f["brake"]
+          cc = _make_cc(f["accel"], f["state"], f["active"], f["pitch"])
+          act_a, sends_a = logging_on.update(cc, structs.CarControlSP(), cs_a, i * int(1e7))
+          act_b, sends_b = logging_off.update(cc, structs.CarControlSP(), cs_b, i * int(1e7))
+          self.assertEqual([(s[0], bytes(s[1]), s[2]) for s in sends_a], [(s[0], bytes(s[1]), s[2]) for s in sends_b], i)
+          self.assertEqual((act_a.gas, act_a.brake, act_a.accel, act_a.torque), (act_b.gas, act_b.brake, act_b.accel, act_b.torque))
+          self.assertIsNone(ta.filtered_pitch())
+        self.assertEqual(ta.brake_gain(cc, cs_a, 0.3), 1.0)
+        self.assertGreater(sum(totals(ta.shadow)), 0, "the scenario must exercise the shadow")
+        self.assertGreater(ta.mode_moving["D"], 10.0)
+        self.assertEqual(ta.mode_seconds["D"], 0.0, "engaged seconds (persisted, the UI's) stay the tuner's")
+        self.assertIsNone(ta._writer, "nothing is persisted with the toggle off")
+    shadow_lines = [x for x in lines if x.startswith("hondashadow ")]
+    dyn_lines = [x for x in lines if x.startswith("hondadyn ")]
+    self.assertTrue(shadow_lines and all(" tuner=0 " in x and " gaslaw=v2 cap=1 " in x for x in shadow_lines), shadow_lines[:1])
+    self.assertTrue(dyn_lines and all(" tuner=0 " in x for x in dyn_lines))
+
   def test_garbage_in_never_raises(self):
     sh = HondaShadowLearners()
     nan, inf = float("nan"), float("inf")
@@ -435,6 +497,135 @@ class TestNothingActuatedChanges(unittest.TestCase):
       for c in row:
         self.assertTrue(c.n == 0 or math.isfinite(c.mean()))
     self.assertTrue(isinstance(sh.line(), str))
+
+
+class TestBuildTagsAndPersistence(unittest.TestCase):
+  """batch 3: every hondashadow line says what it was measured on, and a drive's totals reach disk at a disengage and
+  at card's exit, not only once a minute."""
+
+  def test_tags_follow_the_flags_the_commit_and_the_gas_law(self):
+    @dataclass
+    class SP:
+      flags: int = 0
+    self.assertEqual((sl.pump_rule_tag(SP(0)), sl.brake_law_tag(SP(0))), ("v5", "v1"))
+    self.assertEqual((sl.pump_rule_tag(SP(16)), sl.brake_law_tag(SP(16))), ("v6", "v1"))
+    self.assertEqual((sl.pump_rule_tag(SP(32 | 8)), sl.brake_law_tag(SP(32 | 8))), ("v5", "v2"), "8 is stock ACC")
+    self.assertEqual((sl.pump_rule_tag(None), sl.brake_law_tag(None)), ("-", "-"))
+    self.assertEqual(sl.git_commit_tag(_Params({"GitCommit": "d995bc95a1b2c3"})), "d995bc95a")
+    self.assertEqual(sl.git_commit_tag(_Params({"GitCommit": b"862540c00aa"})), "862540c00")
+    self.assertEqual([sl.git_commit_tag(p) for p in (_Params({}), None, _Params({"GitCommit": "a b=c"}))], ["-", "-", "-"])
+    self.assertEqual([sl.launch_cap_tag(x) for x in ("v2", "v1", "nidec", "-", "")], ["1", "0", "0", "-", "-"])
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    for name, value in (("ELESYS_PUMP_V6", sl.PUMP_V6_FLAG), ("ELESYS_BRAKE_LAW_V2", sl.BRAKE_LAW_V2_FLAG)):
+      if hasattr(HondaFlagsSP, name):
+        self.assertEqual(int(getattr(HondaFlagsSP, name)), value, f"the fixed contract: {name}")
+    self.assertEqual((sl.PUMP_V6_FLAG, sl.BRAKE_LAW_V2_FLAG), (16, 32))
+
+  def test_the_controller_tags_its_lines(self):
+    lines = []
+    with mock.patch.object(sl.carlog, "info", lambda msg, *a, **k: lines.append(msg)):
+      for flags, pump, blaw in ((0, "v5", "v1"), (sl.PUMP_V6_FLAG | sl.BRAKE_LAW_V2_FLAG, "v6", "v2")):
+        cc_obj = _build(True, flags=flags, store={"GitCommit": "862540c0123456"})
+        tu = cc_obj.dynamic_tuner
+        self.assertEqual(tu.build, {"commit": "862540c01", "gaslaw": "-", "cap": "-", "pump": pump, "blaw": blaw, "tuner": "1"})
+        cs = _CS()
+        cs.out.vEgo = 10.0
+        for i in range(10):
+          cc_obj.update(_make_cc(-1.0, LongCtrlState.pid, True, 0.0), structs.CarControlSP(), cs, i * int(1e7))
+        tu.shadow._dirty = True
+        tu.shadow.emit()
+        d = parse(lines[-1])
+        self.assertEqual({k: d[k] for k in sl.BUILD_KEYS},
+                         {"commit": "862540c01", "gaslaw": "v2", "cap": "1", "pump": pump, "blaw": blaw, "tuner": "1"})
+
+  def test_mode_counter_counts_manual_moving_time(self):
+    tu = _build(True).dynamic_tuner
+    cc = _make_cc(0.0, LongCtrlState.off, False, 0.0)
+    cs = _CS()
+    cs.out.vEgo = 12.0
+    for _ in range(1000):          # 10 s driven by hand
+      tu.update_state(cc, cs)
+    cs.out.vEgo = 0.5
+    for _ in range(500):           # 5 s crawling below MODE_MOVING_SPEED
+      tu.update_state(cc, cs)
+    self.assertAlmostEqual(tu.mode_moving["D"], 10.0, places=6)
+    self.assertEqual(tu.mode_seconds["D"], 0.0)
+    assert "modemov=[10.0,0.0,0.0]" in self._dyn_line(tu)
+
+  @staticmethod
+  def _dyn_line(tu):
+    out = []
+    with mock.patch.object(dt.carlog, "info", lambda msg, *a, **k: out.append(msg)):
+      tu.log_state(0)
+    return out[-1]
+
+  def test_a_disengage_persists_the_drive(self):
+    tu = _build(True).dynamic_tuner
+    tu._writer.put_many = mock.Mock()
+    cs = _CS()
+    cs.out.vEgo = 10.0
+    on, off = _make_cc(-0.5, LongCtrlState.pid, True, 0.0), _make_cc(0.0, LongCtrlState.off, False, 0.0)
+    for frame in range(1, 300):
+      tu.update_state(on, cs)
+      tu.persist(frame)
+    tu._writer.put_many.assert_not_called()
+    tu.update_state(off, cs)
+    tu.persist(300)
+    tu._writer.put_many.assert_called_once()
+    self.assertAlmostEqual(tu._writer.put_many.call_args[0][0]["HondaDynModeSecD"], 2.99, places=6)
+    for frame in range(301, 400):
+      tu.update_state(off, cs)
+      tu.persist(frame)
+    self.assertEqual(tu._writer.put_many.call_count, 1, "once per disengage, not every frame after it")
+
+  def test_exit_flush_writes_synchronously_and_ends_on_the_totals(self):
+    store = {}
+    cc_obj = _build(True, store=store)
+    tu = cc_obj.dynamic_tuner
+    params = tu._params
+    tu.mode_seconds["D"] = 12.5
+    tu.shadow._dirty = True
+    lines = []
+    with mock.patch.object(sl.carlog, "info", lambda msg, *a, **k: lines.append(msg)), \
+         mock.patch.object(dt.carlog, "info", lambda msg, *a, **k: lines.append(msg)):
+      tu.flush_at_exit()
+      tu.flush_at_exit()
+    self.assertEqual(params.store["HondaDynModeSecD"], 12.5)
+    assert "HondaDynBrakeGain" in params.store
+    self.assertEqual([x.split()[0] for x in lines], ["hondashadow", "hondadyn"], "once, the shadow's total then the tuner's")
+
+  def test_write_now_is_never_overtaken_by_an_older_batch(self):
+    import threading
+    import time
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(_Params):
+      def put(self, key, val, block=False):
+        if val == 1.0:
+          started.set()
+          release.wait(2.0)
+        super().put(key, val)
+    p = Slow({})
+    w = dt._ParamWriter(p)
+    w.put_many({"k": 1.0})
+    started.wait(2.0)
+    threading.Timer(0.2, release.set).start()
+    self.assertTrue(w.write_now({"k": 3.0}))    # waits for the batch in flight, then writes last
+    w.put_many({"k": 2.0})                       # anything after the final write is dropped
+    time.sleep(0.2)
+    self.assertEqual(p.store["k"], 3.0)
+
+  def test_exit_flush_is_hooked_only_on_the_device(self):
+    for device, calls in ((True, 1), (False, 0)):
+      with self.subTest(device=device), mock.patch.object(dt, "_device_params", lambda p, d=device: d), \
+           mock.patch("atexit.register") as reg, mock.patch("multiprocessing.util.Finalize") as fin:
+        tu = _build(True).dynamic_tuner
+        self.assertEqual((reg.call_count, fin.call_count), (calls, calls))
+        if calls:
+          self.assertEqual(fin.call_args.kwargs.get("exitpriority"), 10)
+          with mock.patch.object(tu, "flush_at_exit") as flush:
+            reg.call_args[0][0]()          # what the process exit runs
+          flush.assert_called_once()
 
 
 if __name__ == "__main__":

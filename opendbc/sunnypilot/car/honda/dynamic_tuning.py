@@ -25,10 +25,13 @@ Ported from MVL's ACURA_MDX_3G dynamic branch, restructured for this fork:
     only, by request.
 
   * SHADOW LEARNERS (2026-10, shadow_learn.py). On the Elesys Accord with the gas
-    interceptor, with the toggle on (only then: they read this tuner's pitch and
-    plant model), a brake response table and a launch multiplier are measured and
-    logged (`hondashadow` lines) from the values this tuner already computes. They
-    are applied to nothing; see _shadow_update().
+    interceptor and openpilot longitudinal, a brake response table and a launch
+    multiplier are measured and logged (`hondashadow` lines) from the values this
+    tuner already computes. They are applied to nothing; see _shadow_update().
+    FORK(HONDA_ACCORD_9G_AU) batch 3: they run WITH THE TOGGLE OFF too ("logging
+    mode", self.logging): the tuner then still tracks pitch and its plant model for
+    them and for the per-mode counter, writes its `hondadyn` line with tuner=0, and
+    applies and persists nothing -- every live part below stays behind the toggle.
 
   * MVL reads/writes Params directly at the top of opendbc/car/honda/
     carcontroller.py. opendbc has to stay importable without openpilot on the PC
@@ -58,8 +61,9 @@ they are here:
      rate both multiply the same command, so the ceiling is chosen against their
      product, not against either one alone.
 
-Everything here is inert unless HondaDynamicTuningEnabled is set; with the
-toggle off, callers get pass-through values identical to stock.
+Everything that ACTS is inert unless HondaDynamicTuningEnabled is set; with the
+toggle off, callers get pass-through values identical to stock. What still runs
+with it off is logging only (the SHADOW LEARNERS bullet above).
 """
 
 import math
@@ -207,29 +211,36 @@ LEARN_MIN_CMD = 0.4         # m/s^2
 # were retired this gates only the brake learner, which sees a different engine
 # braking in S and was never characterized outside D.
 #
-# MEASURED, all 86 routes logged to 2026-09 (1406 min, 0x188 and 0x221 decoded):
+# MEASURED, FORK(HONDA_ACCORD_9G_AU) batch 3: all 168 routes logged 2025-11-25 to
+# 2026-10-03, sunny_logs AND comma_logs (the 2026-09 table here counted sunny_logs
+# only, which put S at 148 s moving; learnaudit A_synth section 2):
 #
-#   mode          moving     engaged    routes
-#   D, ECON off   65,085 s   33,808 s   most
-#   D, ECON on       467 s       87 s   be, bf, c0
-#   S                148 s       79 s   b1, dd, fc
-#   S + ECON           0 s        0 s   -
+#   mode          moving      engaged    routes
+#   D, ECON off   ~1998 min   ~926 min   almost every route
+#   D, ECON on      7.8 min    1.5 min   be, bf, c0, c1 (all 2026-09-09)
+#   S              19.0 min    3.8 min   11 routes (b1, dd, fc; comma 08, 26, 35, 41, 45, 48, 6f, 70)
+#   S + ECON          0          0       -
 #
-# S decodes through GEAR = 26 (16,164 frames; the 2,975 frames of raw-0 shift
-# transients read GEAR = 0, see carstate.py), and ECON through ECON_STATUS. The
+# S decodes through GEAR = 26 (every S frame reads GEAR_SHIFTER = 0; GEAR = 0 appears
+# only in shift transients, see carstate.py), and ECON through ECON_STATUS. The
 # brake learner was correctly frozen in ECON (modeok=0 on bf and c0). What the
 # data says about the modes, for whoever fits per-mode pedal tables next:
-#   * ECON delivers 0.35-0.48 m/s^2 LESS at the same speed and PCM pedal (>= 40
-#     counts), separately in be, bf and c0; achieved/D-predicted median 0.61,
-#     slope ratio 0.72-0.84. Same rpm per km/h as D, so the same gearing. Mostly
-#     manual driving, one day.
-#   * S runs 1.4-2.5x D's rpm per km/h (lower gears). Within 0.04 m/s^2 of D at
-#     light pedal (30-70 counts), +0.17..+0.57 at 70-100 counts (2-5 s per bin).
-#   * Neither has enough ENGAGED data to fit anything: a steady-pedal admission
-#     rule over the whole month collects ~11 s in ECON and ~28 s in S. So the
-#     per-mode multipliers in elesys_gas.py (MODE_K) are all 1.0, and this module
-#     logs per-mode time and samples (observe_pedal, the hondadyn line) so the
-#     tables can be fitted offline once there is data.
+#   * ECON: the engine computer scales the pedal down -- CAR_GAS / PEDAL_GAS is
+#     0.97 / 0.92 / 0.86 / 0.78 / 0.80 at 0-3 / 3-6 / 6-10 / 10-15 / 15-20 m/s,
+#     the same under openpilot's pedal and the driver's -- and the car delivers
+#     0.34-0.39 m/s^2 LESS at the same speed and pedal (grade-corrected; be, bf and
+#     c0 each agree). Same rpm per km/h as D, so the same gearing. Mostly manual
+#     driving, one day, nothing above 72 km/h.
+#   * S: the same pedal map (CAR_GAS == PEDAL_GAS), lower gears: 1.1-3.8x D's rpm
+#     per km/h. About D's accel at mid pedal, a 1.07-1.39x steeper response over
+#     20-90 counts, and 0.10-0.21 m/s^2 more engine braking off the pedal.
+#   * Neither has enough ENGAGED data to fit anything: steady-pedal samples over
+#     the 168 routes are 379 s manual / 49 s engaged in ECON and 847 s / 70 s in
+#     S. So the per-mode multipliers in elesys_gas.py (MODE_K) are all 1.0, and
+#     this module logs per-mode time and samples (observe_pedal, the hondadyn
+#     line) so the tables can be fitted offline once there is data. Since batch 3
+#     the line also carries ALL moving time per mode, manual driving included
+#     (`modemov`), because the manual drives are where ECON and S data comes from.
 #
 # UNKNOWN gear deliberately still learns. Gear is only decoded on this platform
 # (see the transmissionType note in interface.py); on any other Nidec car
@@ -251,10 +262,12 @@ LEARN_GEARS = ("drive",)    # names from structs.CarState.GearShifter
 # the button. With ECON on the payloads are 000083-family, which the parser
 # accepts as 00008b/00009a/0000a9/0000b8 once the checksum is right.
 #
-# The ECON BUTTON is separate, at 0x37C bit 48, and is deliberately NOT used:
-# it is a momentary press, and what matters is the resulting STATE. 0x37C is
-# also CRUISE_PARAMS in the shared _nidec_common.dbc, so defining a signal there
-# would reach every Nidec Honda for no benefit here.
+# 0x37C byte 6 bit 0 (bit 48) is NOT a button: it is a copy of the same ECON
+# STATE about 40 ms later (1,546,111 of 1,546,113 frames agree; learnaudit, batch
+# 3 -- this comment used to call it a momentary ECON button). It is deliberately
+# not used: ECON_STATUS already carries the state, and 0x37C is also CRUISE_PARAMS
+# in the shared _nidec_common.dbc, so defining a signal there would reach every
+# Nidec Honda for no benefit here.
 LEARN_ECON = (False,)       # learn with ECON off only; ECON remaps the throttle
 
 
@@ -291,9 +304,13 @@ def _econ_tag(econ) -> str:
 # or written; a device that had them keeps the files on disk, unread.
 
 # --- per-mode data, for fitting pedal tables offline -----------------------------
-# Counted only while the tuner is enabled, logged in the hondadyn line per drive,
-# and (seconds only) persisted as running totals so the UI can show how much there is.
-MODE_MOVING_SPEED = 1.0     # m/s; "engaged time" counts longActive frames above this
+# Engaged seconds (`modesec`) and steady-pedal samples (`modeadm`) are counted only
+# while the tuner is enabled, logged in the hondadyn line per drive, and (seconds
+# only) persisted as running totals so the UI can show how much there is.
+# FORK(HONDA_ACCORD_9G_AU) batch 3: ALL moving seconds per mode, engaged or not
+# (`modemov`), are counted whenever the tuner or its logging mode runs. Logging
+# only: never persisted, never read by anything that acts.
+MODE_MOVING_SPEED = 1.0     # m/s; "engaged time" counts longActive frames above this, "moving time" any frame
 # The steady-pedal admission rule the audit fitted its tables with: on top of the
 # ramp dwell, PID state and no driver/AEB override,
 ADMIT_MIN_SPEED = 3.0       # m/s
@@ -334,7 +351,8 @@ PITCH_STALE_FRAMES = 100    # 1 s without a fresh pose -> ramp the feedforward o
 PITCH_FADE_MIN_SPEED = 2.0  # m/s below which the feedforward is fully faded out
 PITCH_FADE_FULL_SPEED = 5.0
 
-PERSIST_INTERVAL = 6000     # frames at 100 Hz -> every 60 s
+PERSIST_INTERVAL = 6000     # frames at 100 Hz -> every 60 s, and (batch 3) at every disengage and at card's exit
+EXIT_FLUSH_TIMEOUT = 1.0    # s the exit flush waits for a write already in flight
 # carlog is forwarded to cloudlog by selfdrive/car/card.py, so these lines land in
 # logMessage and come straight back out of a route as plain text -- no capnp
 # change, no openpilot import, and nothing hijacked out of carControl.actuators
@@ -367,6 +385,12 @@ def _open_params():
     return None
 
 
+def _device_params(params) -> bool:
+  """True for openpilot's own Params (card on the device, or a replay that uses the real store), False for a stand-in."""
+  t = type(params)
+  return t.__name__ == "Params" and t.__module__.startswith("openpilot.common.params")
+
+
 class _ParamWriter:
   """Background writer. Param puts hit disk; doing that from the 100 Hz control
   loop would add jitter, so snapshots are queued and coalesced off-thread."""
@@ -375,6 +399,9 @@ class _ParamWriter:
     self._params = params
     self._queue: Queue = Queue()
     self.write_errors = 0
+    # held while a batch is written, so write_now() can never be overtaken by an older batch
+    self._lock = threading.Lock()
+    self._closed = False
     self._thread = threading.Thread(target=self._run, name="honda-dyn-param-writer", daemon=True)
     self._thread.start()
 
@@ -383,23 +410,46 @@ class _ParamWriter:
     # never observes a torn value
     self._queue.put({k: float(v) for k, v in values.items()})
 
+  def _write(self, pending: dict) -> None:
+    for key, value in pending.items():
+      try:
+        self._params.put(key, value)
+      except Exception:
+        # counted rather than silently dropped, so a missing params_keys.h entry
+        # shows up in debug_values() instead of looking like "nothing to learn"
+        self.write_errors += 1
+
   def _run(self) -> None:
     while True:
       pending = self._queue.get()
-      # Collapse anything that piled up so a slow disk keeps only the newest value per key.
+      with self._lock:
+        if self._closed:
+          continue   # write_now() wrote the final values; whatever this thread held is older
+        # Collapse anything that piled up so a slow disk keeps only the newest value per key.
+        try:
+          while True:
+            pending.update(self._queue.get_nowait())
+        except Empty:
+          pass
+        self._write(pending)
+
+  def write_now(self, values: dict, timeout: float = EXIT_FLUSH_TIMEOUT) -> bool:
+    """FORK(HONDA_ACCORD_9G_AU) batch 3: write these values in THIS thread, last. For card's exit, when the daemon
+    thread is about to die with whatever it holds: waits up to `timeout` for a batch in flight, drops anything still
+    queued (it is older than these values), writes. False if it could not get the lock."""
+    if not self._lock.acquire(timeout=timeout):
+      return False
+    try:
       try:
         while True:
-          pending.update(self._queue.get_nowait())
+          self._queue.get_nowait()
       except Empty:
         pass
-
-      for key, value in pending.items():
-        try:
-          self._params.put(key, value)
-        except Exception:
-          # counted rather than silently dropped, so a missing params_keys.h entry
-          # shows up in debug_values() instead of looking like "nothing to learn"
-          self.write_errors += 1
+      self._write({k: float(v) for k, v in values.items()})
+      self._closed = True
+      return True
+    finally:
+      self._lock.release()
 
 
 def _finite(x, fallback: float = 0.0) -> float:
@@ -433,6 +483,8 @@ class HondaDynamicTuner:
     # the running totals of seconds loaded from the params
     self.slot = "D"
     self.mode_seconds = dict.fromkeys(DRIVE_MODE_SLOTS, 0.0)
+    # FORK(HONDA_ACCORD_9G_AU) batch 3: all moving seconds per slot this drive, engaged or not -- logging only
+    self.mode_moving = dict.fromkeys(DRIVE_MODE_SLOTS, 0.0)
     self.mode_admitted = dict.fromkeys(DRIVE_MODE_SLOTS, 0)
     self.mode_seconds_loaded = {s: self._get_float(k) for s, k in MODE_SEC_KEYS.items()}
     self._pedal_window: deque = deque(maxlen=ADMIT_WINDOW)
@@ -477,12 +529,24 @@ class HondaDynamicTuner:
     self.long_active = False
 
     # SHADOW learners (shadow_learn.py): the brake response table and the launch multiplier, measured and
-    # logged, never applied. Elesys Accord with the interceptor only, and only with the tuner on (they read its pitch and plant
-    # model). The three values below are copies of this frame's commands, recorded where they are computed.
-    self.shadow = self._build_shadow(CP, CP_SP) if self.enabled else None
+    # logged, never applied. Elesys Accord with the interceptor only. The three values below are copies of this
+    # frame's commands, recorded where they are computed.
+    # FORK(HONDA_ACCORD_9G_AU) batch 3: built with the toggle OFF too -- LOGGING MODE (self.logging): the tuner then
+    # tracks pitch and its plant model for them and counts the per-mode moving time, and applies and persists
+    # nothing. Still never where the tuner does not apply (no openpilot longitudinal: stock ACC mode, Bosch).
+    # `build` is what every line says it was measured on (shadow_learn.BUILD_KEYS): the pump rule and the brake
+    # law from CP_SP.flags, the commit, whether the live parts are on; the gas law follows from observe_pedal().
+    self.build = self._build_tags(CP_SP, self._params, self.enabled)
+    self.shadow = self._build_shadow(CP, CP_SP, self.build) if self.applicable else None
+    self.logging = self.shadow is not None
     self._shadow_brake_frac = 0.0
     self._shadow_brake_gain = 1.0
     self._shadow_gas = 0.0
+
+    # per-drive totals are persisted at every disengage and when card exits, not only every PERSIST_INTERVAL
+    self._persist_due = False
+    self._flushed = False
+    self._register_exit_flush()
 
   @staticmethod
   def _is_applicable(CP, CP_SP) -> bool:
@@ -527,13 +591,67 @@ class HondaDynamicTuner:
     """Rule 2: writes the *converged* brake estimate, never the live one. A value
     that railed during a transient is never written, so it cannot come back as
     next drive's starting point. The per-mode seconds are counters, not learned
-    values, and are written as running totals."""
-    if self._writer is None or not self.enabled or frame % PERSIST_INTERVAL != 0:
+    values, and are written as running totals.
+    FORK(HONDA_ACCORD_9G_AU) batch 3: also on the frame after a disengage (update_state sets _persist_due), and once
+    more when card exits (flush_at_exit), so the end of a drive is no longer up to a minute short."""
+    if self._writer is None or not self.enabled:
       return
+    if frame % PERSIST_INTERVAL != 0 and not self._persist_due:
+      return
+    self._persist_due = False
+    self._writer.put_many(self._persist_values())
+
+  def _persist_values(self) -> dict:
     values = {"HondaDynBrakeGain": self.brake_gain_converged}
     # plain floats only: put_many() does float(v) in THIS thread, the control thread
     values.update({key: self.mode_seconds_total(slot) for slot, key in MODE_SEC_KEYS.items()})
-    self._writer.put_many(values)
+    return values
+
+  def _register_exit_flush(self) -> None:
+    """FORK(HONDA_ACCORD_9G_AU) batch 3: run flush_at_exit() when card exits at ignition-off. manager stops card with
+    SIGINT; card runs as a multiprocessing child, which leaves through os._exit() -- atexit handlers do NOT run there,
+    multiprocessing's own finalizers do (util._exit_function). So both are registered (atexit for a card run on its
+    own, a process replay, a test), through a weak reference so a finished tuner is not kept alive, and the flush
+    runs once. Only when there is something to flush (the writer, tuner on, or the shadow learners) and only on the
+    device's own Params: a test's or a replay's stand-in Params is not hooked into its process's exit."""
+    if (self._writer is None and self.shadow is None) or not _device_params(self._params):
+      return
+    try:
+      import atexit
+      import weakref
+      from multiprocessing import util as mp_util
+      ref = weakref.ref(self)
+
+      def _flush():
+        tuner = ref()
+        if tuner is not None:
+          tuner.flush_at_exit()
+      atexit.register(_flush)
+      mp_util.Finalize(None, _flush, exitpriority=10)
+    except Exception:
+      pass
+
+  def flush_at_exit(self) -> None:
+    """The drive's last totals: the persisted values written synchronously (the writer is a daemon thread and dies
+    with the process), the shadow learners' last line, a last hondadyn line. Once; never raises."""
+    if self._flushed:
+      return
+    self._flushed = True
+    try:
+      if self._writer is not None and self.enabled:
+        self._writer.write_now(self._persist_values())
+    except Exception:
+      pass
+    try:
+      if self.shadow is not None:
+        self.shadow.flush()
+    except Exception:
+      pass
+    try:
+      if self.enabled or self.logging:
+        self._emit_log_line()
+    except Exception:
+      pass
 
   def mode_seconds_total(self, slot: str) -> float:
     """The running total for a slot: what was loaded at ignition plus this drive."""
@@ -579,12 +697,19 @@ class HondaDynamicTuner:
     # disengaged frames is meaningless (target pins at 0.0, so the gate opens
     # trivially) and that is exactly how the old telemetry read 88% while the
     # learner was getting ~1 s of real samples per drive.
+    # FORK(HONDA_ACCORD_9G_AU) batch 3: a disengage persists this drive's totals on the next persist() call
+    if self.long_active and not CC.longActive:
+      self._persist_due = True
     self.long_active = bool(CC.longActive)
 
     # per-mode engaged time, the same slots the gas law uses (elesys_gas.drive_mode_slot)
     self.slot = drive_mode_slot(*mode)
-    if self.enabled and self.long_active and _finite(CS.out.vEgo) > MODE_MOVING_SPEED:
+    moving = _finite(CS.out.vEgo) > MODE_MOVING_SPEED
+    if self.enabled and self.long_active and moving:
       self.mode_seconds[self.slot] = self.mode_seconds.get(self.slot, 0.0) + DT_CTRL
+    # FORK(HONDA_ACCORD_9G_AU) batch 3: and ALL moving time, manual included -- logging only (`modemov`)
+    if (self.enabled or self.logging) and moving:
+      self.mode_moving[self.slot] = self.mode_moving.get(self.slot, 0.0) + DT_CTRL
 
     # The dwell now watches JERK, not drift from the window start. A sustained
     # ramp is exactly what the lag model below is for, so admitting it is the
@@ -654,27 +779,19 @@ class HondaDynamicTuner:
     outside the PID state. Advances the pitch filter, so it must be called
     exactly once per control frame."""
     if not self.enabled:
-      self.pitch = 0.0
+      # FORK(HONDA_ACCORD_9G_AU) batch 3: in logging mode the shadow learners still need the grade, so the filter
+      # is advanced -- and the feedforward is still exactly 0.0. With the toggle off nothing that acts reads
+      # self.pitch: filtered_pitch() answers None, the soft stop is not built, the pedal counter needs the toggle.
+      if self.logging:
+        try:
+          self._track_pitch(CC)
+        except Exception:
+          self.pitch = 0.0
+      else:
+        self.pitch = 0.0
       return 0.0
 
-    # A stale or non-finite pose must decay the feedforward out rather than
-    # freezing the last slope in forever.
-    raw = None
-    if len(CC.orientationNED) == 3:
-      candidate = _finite(CC.orientationNED[1], float("nan"))
-      if math.isfinite(candidate) and abs(candidate) < math.pi / 2:
-        raw = candidate
-
-    if raw is None:
-      self._pose_stale = min(self._pose_stale + 1, PITCH_STALE_FRAMES)
-      if self._pose_stale >= PITCH_STALE_FRAMES:
-        raw = 0.0                      # ramp out through the filter
-      else:
-        raw = self.pitch_filter.x      # brief dropout: hold
-    else:
-      self._pose_stale = 0
-
-    self.pitch = float(self.pitch_filter.update(raw))
+    self._track_pitch(CC)
     accel = math.sin(self.pitch) * ACCELERATION_DUE_TO_GRAVITY
 
     # Fade out at low speed and outside the PID state. On an uphill the term is
@@ -702,6 +819,27 @@ class HondaDynamicTuner:
       return 0.0
     fade = float(np.interp(_finite(CS.out.vEgo), [PITCH_FADE_MIN_SPEED, PITCH_FADE_FULL_SPEED], [0.0, 1.0]))
     return float(np.clip(accel * fade, -PITCH_ACCEL_LIMIT, PITCH_ACCEL_LIMIT))
+
+  def _track_pitch(self, CC) -> None:
+    """Advance the pitch filter from this frame's pose into self.pitch."""
+    # A stale or non-finite pose must decay the feedforward out rather than
+    # freezing the last slope in forever.
+    raw = None
+    if len(CC.orientationNED) == 3:
+      candidate = _finite(CC.orientationNED[1], float("nan"))
+      if math.isfinite(candidate) and abs(candidate) < math.pi / 2:
+        raw = candidate
+
+    if raw is None:
+      self._pose_stale = min(self._pose_stale + 1, PITCH_STALE_FRAMES)
+      if self._pose_stale >= PITCH_STALE_FRAMES:
+        raw = 0.0                      # ramp out through the filter
+      else:
+        raw = self.pitch_filter.x      # brief dropout: hold
+    else:
+      self._pose_stale = 0
+
+    self.pitch = float(self.pitch_filter.update(raw))
 
   def filtered_pitch(self):
     """The filtered pitch in radians (nose-up positive) for a consumer outside the PID state --
@@ -814,12 +952,21 @@ class HondaDynamicTuner:
   # --- shadow learners (measured and logged, never applied) --------------------------------------
 
   @staticmethod
-  def _build_shadow(CP, CP_SP):
+  def _build_tags(CP_SP, params, enabled: bool) -> dict:
+    """shadow_learn.build_tags(), or all '-' if that cannot be had. Runs in CarController.__init__: never raises."""
+    try:
+      from opendbc.sunnypilot.car.honda.shadow_learn import build_tags
+      return build_tags(CP_SP, params, enabled)
+    except Exception:
+      return {"commit": "-", "gaslaw": "-", "cap": "-", "pump": "-", "blaw": "-", "tuner": "1" if enabled else "0"}
+
+  @staticmethod
+  def _build_shadow(CP, CP_SP, build: dict | None = None):
     """The shadow learners on the Elesys Accord with the interceptor, else None. Runs in CarController.__init__,
     so anything that goes wrong leaves the tuner without them, logged, rather than raising."""
     try:
       from opendbc.sunnypilot.car.honda.shadow_learn import HondaShadowLearners, shadow_applicable
-      return HondaShadowLearners() if shadow_applicable(CP, CP_SP) else None
+      return HondaShadowLearners(build) if shadow_applicable(CP, CP_SP) else None
     except Exception:
       try:
         carlog.exception(f"{LOG_TAG} shadow learners not started")
@@ -836,7 +983,7 @@ class HondaDynamicTuner:
     try:
       self.shadow.update(CC, CS, pitch=self.pitch, pose_fresh=self._pose_stale == 0, mode_ok=self.mode_ok,
                          cmd_ref=self.cmd_ref, brake_frac=self._shadow_brake_frac, gas_cmd=self._shadow_gas,
-                         brake_gain=self._shadow_brake_gain)
+                         brake_gain=self._shadow_brake_gain, gas_law=self.gas_law)
     except Exception:
       self.shadow = None
       try:
@@ -849,10 +996,11 @@ class HondaDynamicTuner:
   def brake_gain(self, CC, CS, apply_brake_frac: float) -> float:
     """Learned multiplier on the base brake command. This is what replaces
     hand-editing the brake divisor in compute_gb_honda_elesys()."""
+    # a copy for the shadow learners (_shadow_update); read by nothing else. FORK(HONDA_ACCORD_9G_AU) batch 3: taken
+    # before the toggle check, because the shadow learners run with the toggle off too (logging mode)
+    self._shadow_brake_frac = _finite(apply_brake_frac)
     if not self.enabled:
       return 1.0
-    # a copy for the shadow learners (_shadow_update); read by nothing else
-    self._shadow_brake_frac = _finite(apply_brake_frac)
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
 
@@ -924,29 +1072,38 @@ class HondaDynamicTuner:
 
   def log_state(self, frame: int) -> None:
     """Emit the learned state into the route log. Without this there is no way to
-    watch convergence, or to work out after the fact why a learn went wrong."""
-    if not self.enabled or frame % LOG_INTERVAL != 0:
+    watch convergence, or to work out after the fact why a learn went wrong.
+    FORK(HONDA_ACCORD_9G_AU) batch 3: in logging mode (toggle off) too, marked tuner=0 -- there the brake fields are
+    the stock 1.000 and only the bookkeeping (modemov, gear, econ) and the build tags mean anything."""
+    if not (self.enabled or self.logging) or frame % LOG_INTERVAL != 0:
       return
     try:
-      v = self.debug_values()
-      # lists in [...] in DRIVE_MODE_SLOTS order (D, ECON, S), so parse_hondadyn.py reads them as
-      # float lists: modesec = engaged moving seconds this drive, modeadm = steady-pedal samples
-      # (50 Hz) this drive, modetot = running total of seconds, as persisted
-      sec = ",".join(f"{v['mode_seconds'][s]:.1f}" for s in DRIVE_MODE_SLOTS)
-      adm = ",".join(f"{v['mode_admitted'][s]:d}" for s in DRIVE_MODE_SLOTS)
-      tot = ",".join(f"{v['mode_seconds_total'][s]:.0f}" for s in DRIVE_MODE_SLOTS)
-      carlog.info(
-        f"{LOG_TAG} gaslaw={v['gas_law']} slot={v['slot']} " +
-        f"modesec=[{sec}] modeadm=[{adm}] modetot=[{tot}] " +
-        f"brake={v['brake_gain']:.3f} brakec={v['brake_gain_converged']:.3f} " +
-        f"pitch={v['pitch']:+.4f} " +
-        f"settle={self._settle} settles={self._settle_steady} eng={int(v['long_active'])} " +
-        f"aref={v['accel_ref']:+.3f} aerr={v['accel_error']:+.3f} " +
-        f"stale={v['pose_stale']} werr={v['write_errors']} " +
-        f"gear={v['drive_mode'][0] or '-'} econ={_econ_tag(v['drive_mode'][1])} " +
-        f"modeok={int(v['mode_ok'])}")
+      self._emit_log_line()
     except Exception:
       pass
+
+  def _emit_log_line(self) -> None:
+    v = self.debug_values()
+    # lists in [...] in DRIVE_MODE_SLOTS order (D, ECON, S), so parse_hondadyn.py reads them as
+    # float lists: modesec = engaged moving seconds this drive, modeadm = steady-pedal samples
+    # (50 Hz) this drive, modetot = running total of seconds, as persisted, modemov = ALL moving
+    # seconds this drive, manual included (batch 3, logging only)
+    sec = ",".join(f"{v['mode_seconds'][s]:.1f}" for s in DRIVE_MODE_SLOTS)
+    mov = ",".join(f"{v['mode_moving'][s]:.1f}" for s in DRIVE_MODE_SLOTS)
+    adm = ",".join(f"{v['mode_admitted'][s]:d}" for s in DRIVE_MODE_SLOTS)
+    tot = ",".join(f"{v['mode_seconds_total'][s]:.0f}" for s in DRIVE_MODE_SLOTS)
+    b = self.build
+    carlog.info(
+      f"{LOG_TAG} gaslaw={v['gas_law']} slot={v['slot']} " +
+      f"modesec=[{sec}] modeadm=[{adm}] modetot=[{tot}] modemov=[{mov}] " +
+      f"brake={v['brake_gain']:.3f} brakec={v['brake_gain_converged']:.3f} " +
+      f"pitch={v['pitch']:+.4f} " +
+      f"settle={self._settle} settles={self._settle_steady} eng={int(v['long_active'])} " +
+      f"aref={v['accel_ref']:+.3f} aerr={v['accel_error']:+.3f} " +
+      f"stale={v['pose_stale']} werr={v['write_errors']} " +
+      f"gear={v['drive_mode'][0] or '-'} econ={_econ_tag(v['drive_mode'][1])} " +
+      f"modeok={int(v['mode_ok'])} tuner={int(bool(self.enabled))} " +
+      f"pump={b.get('pump', '-')} blaw={b.get('blaw', '-')} commit={b.get('commit', '-')}")
 
   def debug_values(self) -> dict:
     return {
@@ -954,6 +1111,7 @@ class HondaDynamicTuner:
       "gas_law": self.gas_law,
       "slot": self.slot,
       "mode_seconds": {s: float(self.mode_seconds.get(s, 0.0)) for s in DRIVE_MODE_SLOTS},
+      "mode_moving": {s: float(self.mode_moving.get(s, 0.0)) for s in DRIVE_MODE_SLOTS},
       "mode_admitted": {s: int(self.mode_admitted.get(s, 0)) for s in DRIVE_MODE_SLOTS},
       "mode_seconds_total": {s: self.mode_seconds_total(s) for s in DRIVE_MODE_SLOTS},
       # BOTH as gains. brake_gain_converged is stored as an OFFSET (the param
