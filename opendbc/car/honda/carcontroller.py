@@ -200,73 +200,70 @@ def brake_pump_hysteresis_elesys(apply_brake, v_ego, brake_anchor, last_pump_ts,
   return pump_on, brake_anchor, last_pump_ts
 
 
-# FORK(HONDA_ACCORD_9G_AU): pump rule C1 ("v6"), selected by HondaFlagsSP.ELESYS_PUMP_V6 (the HondaElesysPumpV6 setting,
-# on by default). With the flag clear the v5 rule above runs, unchanged. Study: pump2 (2026-10), replayed over the 66
-# current-era routes (8.23 engaged hours, 107 stops; today's rule replayed matches the logged pump bit on 99.58% of
-# 428k braking frames). What the VSA's pump is FOR, measured on 0x1A4 ripple and decel: a RISE in the command is
-# delivered only while the motor runs (unpumped rises of 6-25 counts gave -0.01 m/s^2 per 100 counts against -1.09
-# pumped); a steady command holds without it (no measurable loss up to ~3 s at cb < 80, ~2 s at 80-200); a release
-# needs nothing; and a standstill hold, once built, held through 15-30 s gaps on 83 holds (52 s on a ~10% downhill).
-# So C1 pumps to deliver rises, and nothing else:
-#  - `level` is the command the last burst DELIVERED (follows releases down, 0 after a release to 0). A burst fires
-#    when the command rises past level by the same deadband as v5 (12/6/3 counts over cb 0/60/200), so the first
-#    burst of every application comes at ~12 counts and every rise is delivered to within its deadband.
-#  - a burst that is still running extends while the command keeps climbing by EXT = max(2, deadband/2), so an apply
-#    ramp stays one smooth run (v5's `rise and in_run`, at half the deadband).
-#  - v5's 3 s refractory becomes a 1 s minimum gap (bypassed by a +15 rise, never applied to the first burst): the
-#    deadband, not the refractory, caused most undelivered rises.
-#  - at standstill a burst may only BUILD a hold (level < 100): one hold-build burst on a stop reached at a light
-#    command, none once the hold is there. No 30 s top-up (58 starts, 31 s of pump on V5 that changed nothing logged).
-#    DEVIATION from the pseudo-code (batch 3 fix round 1, evidence: the soft stop): a standstill rise of more than
-#    ELESYS_PUMP_BIG_RISE over the delivered level is delivered too. The soft stop (elesys_stop.py, on with the tuner)
-#    caps the rolling command at ~125 counts and raises it to the 189 hold 0.55 s after the wheels read zero; without
-#    this the delivered level >= 100 blocked that rise for the whole stop, so the hold was the cap, never topped up -
-#    a state no logged hold has tested (pump2's holds were 143-253 counts). v5 delivered the same rise with its
-#    big-rise trigger. Cost, replayed open loop on the 66 V5 routes (no soft stop ran there): +1 start of 2021, 1 of
-#    107 stops. Still no top-up: a steady hold never re-pumps.
+# FORK(HONDA_ACCORD_9G_AU): pump rule C1b, selected by HondaFlagsSP.ELESYS_PUMP_C1B (the HondaElesysPumpC1b setting,
+# "Quiet pump at stops", on by default). With the flag clear the v5 rule above runs, unchanged. C1b replaces rule C1
+# (batch 3, 2026-10-05: flag 16, HondaElesysPumpV6; retired 2026-10-06 - routes that ran it carry flag 16 and pump=v6).
+# Studies: pump2 (what the pump is for) and c1weak (did C1 brake weaker), replayed over the 66 current-era routes
+# (8.23 engaged hours, 142.9 braking minutes, 107 stops). What the VSA's pump is FOR, measured on 0x1A4 ripple and
+# decel: a RISE in the command is delivered only while the motor runs (unpumped rises of 6-25 counts gave -0.01 m/s^2
+# per 100 counts against -1.09 pumped); a steady command holds without it (no measurable loss up to ~3 s at cb < 80,
+# ~2 s at 80-200); a release needs nothing; and a standstill hold, once built, held through 15-30 s gaps on 83 holds
+# (52 s on a ~10% downhill). So C1b pumps while braking much as v5 did, and stays quiet once a stop is held:
+#  - `level` is the command the last burst DELIVERED: it follows the command up while the pump runs, follows releases
+#    of more than 6 counts down, and is 0 after a release to 0 - so level == 0 means "no burst yet in this application".
+#  - the FIRST frame of every application is a burst. C1 waited for the command to pass its deadband (~11 counts, a
+#    median 0.12 s and up to 2.1 s late) and never pumped 435 of 1671 applications; that was the only C1 element that
+#    lines up in time with its possible onset softness (c1weak, unresolved either way, so it goes back).
+#  - after that a burst fires whenever the command rises past level by v5's deadband (12/6/3 counts over cb 0/60/200),
+#    with no minimum gap: C1's 1 s gap was the one element with a measurable cost (undelivered braking -29% without
+#    it). A running burst extends while the command keeps climbing by EXT = max(2, deadband/2), so a ramp is one run.
+#  - continuous runs: moving at v >= 2.5 m/s and cb > 200 (2905e73d), and v5's crawl run at 0.15 <= v < 2.5 m/s and
+#    cb > 100. The crawl run is RESTORED: the soft stop's 125-count cap (elesys_stop.py, CAR doc 7.8) was sized so that
+#    this run keeps pumping through the final approach; C1 dropped it and pumped 39-51% of that zone.
+#  - at standstill (v < 0.15) a burst may only BUILD a hold (level < 100), or deliver a rise of more than
+#    ELESYS_PUMP_BIG_RISE over the delivered level (the soft stop's rise to the 189 hold, batch 3 fix round 1). A steady
+#    hold is never topped up: v5's 30 s top-up re-pumped 60 times more than 5 s into a stop and changed nothing logged.
 #  - moving at cb >= 100 with no burst for 6 s: one burst. The firm-braking dry bound, and the creep guard - a hold
 #    that starts to roll is moving again, and fires at once if its last burst was 6 s or more ago.
-#  - kept: the continuous run at v >= 2.5 and cb > 200 (2905e73d; unresolved whether it is needed, 2.6% of pump time).
-#  - dropped: the crawl continuous run (0.15 <= v < 2.5, cb > 100; added for sound, no under-braking without it) and
-#    the light-braking backstop (in practice an onset trigger: 859 of its 2,467 starts were the first frame of an
-#    application; 13 refreshed a steady hold).
-# Replayed open loop on V5: pump time -2.4%, starts -18.1% (2467 -> 2021), standstill starts 122 -> 64 (hold builds
-# only), longest moving pump-off at cb >= 100 5.30 -> 5.06 s. Cost: applications peaking under ~12 counts (~0.1 m/s^2)
-# never pump (439 of 1765 vs 210), and the longest moving pump-off at light braking grows 11.5 -> 14.3 s - below cb 100
-# that relies on the deadband to catch any bleed (the PI raises the command), which is inferred, not measured.
-# Proof plan and abort criteria: docs/fork/CAR-HONDA-ACCORD-9G-AU.md 7.2; route check: sunnypilot/tools/brake_route_check.py.
-ELESYS_PUMP_C1_EXT_MIN = 2         # counts; a running burst extends on a climb of max(this, EXT_FRAC * deadband)
-ELESYS_PUMP_C1_EXT_FRAC = 0.5
-ELESYS_PUMP_C1_MIN_GAP = 1.0       # s of quiet after a burst before a rise under ELESYS_PUMP_BIG_RISE may fire again
-ELESYS_PUMP_C1_FIRM = 200          # counts; moving faster than 2.5 m/s above this, the pump runs continuously
-ELESYS_PUMP_C1_TOPUP_CB = 100      # counts; moving at or above this, a burst at least every TOPUP_S
-ELESYS_PUMP_C1_TOPUP_S = 6.0
+# Replayed open loop on the 66 routes, C1b against v5 (C1 in brackets): starts 2620 vs 2467 (2022); pump time per
+# engaged hour 368 vs 304 s (297); command above the ~25-count dead zone left undelivered 1781 vs 3957 count*s (2670);
+# applications never pumped 0 vs 208 (435); standstill bursts per stop 0.51 vs 1.07 (0.52); re-pumps more than 5 s into
+# a stop 1 vs 60 (1); longest moving pump-off at cb >= 100 4.00 vs 5.30 s (5.06). It gives back C1's moving noise win
+# and keeps its standstill one. Open loop: only the differences between rules mean anything.
+# Acceptance checks: docs/fork/CAR-HONDA-ACCORD-9G-AU.md 7.2; route check: sunnypilot/tools/brake_route_check.py.
+ELESYS_PUMP_C1B_EXT_MIN = 2         # counts; a running burst extends on a climb of max(this, EXT_FRAC * deadband)
+ELESYS_PUMP_C1B_EXT_FRAC = 0.5
+ELESYS_PUMP_C1B_FIRM = 200          # counts; moving at 2.5 m/s or more above this, the pump runs continuously
+ELESYS_PUMP_C1B_CRAWL = 100         # counts; crawling (0.15 <= v < 2.5 m/s) above this, the pump runs continuously
+ELESYS_PUMP_C1B_TOPUP_CB = 100      # counts; moving at or above this, a burst at least every TOPUP_S
+ELESYS_PUMP_C1B_TOPUP_S = 6.0
 # counts delivered; at standstill a burst builds a hold up to here, then only a rise of more than ELESYS_PUMP_BIG_RISE
 # over the delivered level fires (the soft stop's rise to the hold)
-ELESYS_PUMP_C1_HOLD_OK = 100
+ELESYS_PUMP_C1B_HOLD_OK = 100
 
 
-def brake_pump_c1_elesys(apply_brake, v_ego, level, trig, last_pump_ts, ts):
-  """Pump rule C1. State: level (command the last burst delivered), trig (command at the last trigger), last_pump_ts.
-  Returns (pump_on, level, trig, last_pump_ts). A non-finite v_ego counts as moving below 2.5 m/s, as in v5."""
+def brake_pump_c1b_elesys(apply_brake, v_ego, level, trig, last_pump_ts, ts):
+  """Pump rule C1b. State: level (command the last burst delivered), trig (command at the last trigger), last_pump_ts.
+  Returns (pump_on, level, trig, last_pump_ts). A non-finite v_ego counts as moving, in neither continuous band, as in
+  v5."""
   if apply_brake <= 0:
     return False, 0, trig, last_pump_ts
-  if v_ego >= 2.5 and apply_brake > ELESYS_PUMP_C1_FIRM:  # 2905e73d, unchanged
-    return True, max(level, apply_brake), apply_brake, ts
+  if (v_ego >= 2.5 and apply_brake > ELESYS_PUMP_C1B_FIRM) or (0.15 <= v_ego < 2.5 and apply_brake > ELESYS_PUMP_C1B_CRAWL):
+    return True, max(level, apply_brake), apply_brake, ts  # 2905e73d, and v5's crawl run
 
   deadband = float(np.interp(apply_brake, ELESYS_PUMP_DEADBAND_BP, ELESYS_PUMP_DEADBAND_V))
   if ts - last_pump_ts < ELESYS_PUMP_RUN:
     # running: a burst may finish building what the command is still climbing to
-    if apply_brake >= trig + max(ELESYS_PUMP_C1_EXT_MIN, ELESYS_PUMP_C1_EXT_FRAC * deadband):
+    if apply_brake >= trig + max(ELESYS_PUMP_C1B_EXT_MIN, ELESYS_PUMP_C1B_EXT_FRAC * deadband):
       last_pump_ts, trig = ts, apply_brake
   else:
     still = v_ego < 0.15
-    gap_ok = (level == 0 or ts - last_pump_ts >= ELESYS_PUMP_RUN + ELESYS_PUMP_C1_MIN_GAP or
-              apply_brake > level + ELESYS_PUMP_BIG_RISE)
     hold_rise = apply_brake > level + ELESYS_PUMP_BIG_RISE  # at standstill: the soft stop's rise to the hold
-    if (not still or level < ELESYS_PUMP_C1_HOLD_OK or hold_rise) and apply_brake > level + deadband and gap_ok:
-      last_pump_ts, trig = ts, apply_brake  # the first burst of an application, or a real rise
-    elif not still and apply_brake >= ELESYS_PUMP_C1_TOPUP_CB and ts - last_pump_ts >= ELESYS_PUMP_C1_TOPUP_S:
+    if level == 0:
+      last_pump_ts, trig = ts, apply_brake  # the first frame of an application
+    elif (not still or level < ELESYS_PUMP_C1B_HOLD_OK or hold_rise) and apply_brake > level + deadband:
+      last_pump_ts, trig = ts, apply_brake  # a rise past the deadband, or the one hold-build burst at standstill
+    elif not still and apply_brake >= ELESYS_PUMP_C1B_TOPUP_CB and ts - last_pump_ts >= ELESYS_PUMP_C1B_TOPUP_S:
       last_pump_ts, trig = ts, apply_brake  # firm-braking dry bound, and the creep guard
 
   if apply_brake < level - 6:  # releases need no pump
@@ -351,8 +348,9 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.soft_stop = ElesysSoftStop() if (CP.carFingerprint in HONDA_ELESYS and self.dynamic_tuner.enabled) else None
     # FORK(HONDA_ACCORD_9G_AU): stock ACC mode (HondaElesysStockAcc): 0x0E4 and 0x500 only, see below
     self.elesys_stock_acc = bool(CP_SP.flags & HondaFlagsSP.ELESYS_STOCK_ACC)
-    # FORK(HONDA_ACCORD_9G_AU): pump rule C1 (HondaElesysPumpV6), else v5; fixed for the drive by _initialize_honda
-    self.elesys_pump_v6 = bool(CP_SP.flags & HondaFlagsSP.ELESYS_PUMP_V6)
+    # FORK(HONDA_ACCORD_9G_AU): pump rule C1b (HondaElesysPumpC1b), else v5; fixed for the drive by _initialize_honda.
+    # Flag 16 (the retired rule C1) selects nothing any more: an old CarParamsSP that carries it runs v5.
+    self.elesys_pump_c1b = bool(CP_SP.flags & HondaFlagsSP.ELESYS_PUMP_C1B)
     # FORK(HONDA_ACCORD_9G_AU): brake law v2 (HondaElesysBrakeLawV2, elesys_brake.py), fixed for the drive; it needs gas
     # law v2, and the tuner then holds the brake gain at 1.0. Clear: nothing of it runs.
     self.elesys_brake_v2 = brake_law_v2_enabled(CP, CP_SP, self.elesys_gas)
@@ -364,7 +362,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.apply_brake_last = 0
     self.last_pump_ts = 0.
     self.pump_brake_anchor = 0
-    self.pump_level = 0  # FORK(HONDA_ACCORD_9G_AU): pump rule C1's state, unused by v5
+    self.pump_level = 0  # FORK(HONDA_ACCORD_9G_AU): pump rule C1b's state, unused by v5
     self.pump_trig = 0
     self.stopping_counter = 0
 
@@ -548,8 +546,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           # override so nothing delays getting off the brakes.
           if self.dynamic_tuner.enabled and CC.longActive and not CS.out.gasPressed and not CS.out.brakePressed:
             apply_brake = max(self.apply_brake_last - 32, apply_brake)
-          if self.CP.carFingerprint in HONDA_ELESYS and self.elesys_pump_v6:  # FORK(HONDA_ACCORD_9G_AU): pump rule C1
-            pump_on, self.pump_level, self.pump_trig, self.last_pump_ts = brake_pump_c1_elesys(
+          if self.CP.carFingerprint in HONDA_ELESYS and self.elesys_pump_c1b:  # FORK(HONDA_ACCORD_9G_AU): pump rule C1b
+            pump_on, self.pump_level, self.pump_trig, self.last_pump_ts = brake_pump_c1b_elesys(
               apply_brake, CS.out.vEgo, self.pump_level, self.pump_trig, self.last_pump_ts, ts)
           elif self.CP.carFingerprint in HONDA_ELESYS:
             pump_on, self.pump_brake_anchor, self.last_pump_ts = brake_pump_hysteresis_elesys(

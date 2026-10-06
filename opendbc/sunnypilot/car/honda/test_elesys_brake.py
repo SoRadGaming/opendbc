@@ -365,7 +365,7 @@ class TestCarControllerBrakeLaw(unittest.TestCase):
     self.assertFalse(_controller(0)[0].elesys_brake_v2)
     self.assertFalse(_controller(V2 | HondaFlagsSP.ELESYS_STOCK_ACC.value)[0].elesys_brake_v2)
     self.assertFalse(_controller(V2, car=CAR.HONDA_CIVIC)[0].elesys_brake_v2)
-    self.assertTrue(_controller(V2 | HondaFlagsSP.ELESYS_PUMP_V6.value)[0].elesys_brake_v2)
+    self.assertTrue(_controller(V2 | HondaFlagsSP.ELESYS_PUMP_C1B.value)[0].elesys_brake_v2)
 
   def test_non_finite_inputs_never_raise(self):
     # update() must never raise (no 0x1FA -> BRAKE_ERROR): NaN/inf speed or accel, mixed into a v2 drive

@@ -1,8 +1,9 @@
-"""FORK(HONDA_ACCORD_9G_AU): the brake pump rule (HondaElesysPumpV6) and the brake law (HondaElesysBrakeLawV2).
+"""FORK(HONDA_ACCORD_9G_AU): the brake pump rule (HondaElesysPumpC1b) and the brake law (HondaElesysBrakeLawV2).
 
 _initialize_honda (opendbc/sunnypilot/car/interfaces.py) reads both once, at ignition, into CarParamsSP.flags -
-ELESYS_PUMP_V6 = 16 and ELESYS_BRAKE_LAW_V2 = 32 - for HONDA_ELESYS with openpilot longitudinal only, never in stock
+ELESYS_PUMP_C1B = 64 and ELESYS_BRAKE_LAW_V2 = 32 - for HONDA_ELESYS with openpilot longitudinal only, never in stock
 ACC mode. Nothing else in CarParams or CarParamsSP may move, and with both off they are byte-identical to no hook.
+Flag 16 belonged to the retired rule C1 (HondaElesysPumpV6): reserved, never set, and its old key is not read.
 """
 import copy
 import unittest
@@ -14,10 +15,11 @@ from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
 from opendbc.sunnypilot.car.interfaces import setup_interfaces
 
 ELESYS_CAR = CAR.HONDA_ACCORD_9G_AU
-PUMP = "HondaElesysPumpV6"
+PUMP = "HondaElesysPumpC1b"
+RETIRED_PUMP = "HondaElesysPumpV6"   # the retired rule C1's key
 LAW = "HondaElesysBrakeLawV2"
 STOCK_ACC = "HondaElesysStockAcc"
-BOTH = HondaFlagsSP.ELESYS_PUMP_V6 | HondaFlagsSP.ELESYS_BRAKE_LAW_V2
+BOTH = HondaFlagsSP.ELESYS_PUMP_C1B | HondaFlagsSP.ELESYS_BRAKE_LAW_V2
 
 
 def _params(car=ELESYS_CAR, pedal=True, params_list=None, hook=True):
@@ -35,8 +37,9 @@ def _params(car=ELESYS_CAR, pedal=True, params_list=None, hook=True):
 
 class TestPumpBrakeLawFlags(unittest.TestCase):
   def test_values_are_the_contract(self):
-    self.assertEqual(HondaFlagsSP.ELESYS_PUMP_V6, 16)
+    self.assertEqual(HondaFlagsSP.ELESYS_PUMP_C1B, 64)
     self.assertEqual(HondaFlagsSP.ELESYS_BRAKE_LAW_V2, 32)
+    self.assertEqual(HondaFlagsSP.ELESYS_PUMP_V6, 16)   # reserved: the retired rule C1, never set again
     self.assertEqual(HondaFlagsSP.ELESYS_STOCK_ACC, 8)
     # one bit each, none shared
     flags = [f.value for f in HondaFlagsSP]
@@ -57,7 +60,7 @@ class TestPumpBrakeLawFlags(unittest.TestCase):
   def test_each_setting_sets_only_its_bit(self):
     base_cp, base_sp = _params(params_list=[{PUMP: False, LAW: False}])
     base_bytes = base_cp.to_bytes()
-    for values, expect in (((True, False), HondaFlagsSP.ELESYS_PUMP_V6), ((False, True), HondaFlagsSP.ELESYS_BRAKE_LAW_V2),
+    for values, expect in (((True, False), HondaFlagsSP.ELESYS_PUMP_C1B), ((False, True), HondaFlagsSP.ELESYS_BRAKE_LAW_V2),
                            (("1", "1"), BOTH), ((1, 1), BOTH), ((b"1", b"1"), BOTH)):
       CP, CP_SP = _params(params_list=[{PUMP: values[0], LAW: values[1]}])
       self.assertEqual(CP.to_bytes(), base_bytes, msg=str(values))
@@ -66,10 +69,21 @@ class TestPumpBrakeLawFlags(unittest.TestCase):
       expect_sp.flags |= expect.value
       self.assertEqual(repr(CP_SP), repr(expect_sp), msg=str(values))
 
+  def test_the_retired_c1_key_and_flag_are_never_set(self):
+    # the owner's old "Quieter brake pump" = 1 (or 0) must not reach the flags: C1b has its own key, and flag 16 is dead
+    base_cp, base_sp = _params(params_list=[{PUMP: False, LAW: False}])
+    base_bytes = base_cp.to_bytes()
+    for retired in (True, "1", False):
+      CP, CP_SP = _params(params_list=[{RETIRED_PUMP: retired, PUMP: False, LAW: False}])
+      self.assertEqual(CP.to_bytes(), base_bytes)
+      self.assertEqual(repr(CP_SP), repr(base_sp))
+    _, CP_SP = _params(params_list=[{RETIRED_PUMP: False, PUMP: True}])
+    self.assertEqual(CP_SP.flags & (BOTH | HondaFlagsSP.ELESYS_PUMP_V6), HondaFlagsSP.ELESYS_PUMP_C1B)
+
   def test_never_in_stock_acc_mode(self):
     _, CP_SP = _params(params_list=[{STOCK_ACC: "1", PUMP: True, LAW: True}])
     self.assertTrue(CP_SP.flags & HondaFlagsSP.ELESYS_STOCK_ACC)
-    self.assertEqual(CP_SP.flags & BOTH, 0)
+    self.assertEqual(CP_SP.flags & (BOTH | HondaFlagsSP.ELESYS_PUMP_V6), 0)
 
   def test_only_with_openpilot_longitudinal(self):
     CP, CP_SP = _params(hook=False)

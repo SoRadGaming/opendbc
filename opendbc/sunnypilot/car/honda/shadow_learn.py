@@ -67,9 +67,10 @@ ignition); the per-cell counts are in the line, so routes are combined offline b
 Format: `key=value` tokens, lists in [...] (row-major for the brake table: speed band, then command
 band), `nan` for an empty cell -- the same shape parse_hondadyn.py already reads. From v=2 every line
 starts with what it was measured on, BUILD_KEYS: `commit` (GitCommit, 9 characters), `gaslaw` (v1/v2),
-`cap` (1 = the launch cap is in the gas law), `pump` (v5 = the pump rule up to batch 2, v6 = the quieter
-rule C1, CP_SP flag 16), `blaw` (v1 = the /2.6 brake law, v2 = the measured law, CP_SP flag 32) and
-`tuner` (Dynamic Tuning's live parts on or off): shadow_learn_report.py never pools lines that differ in
+`cap` (1 = the launch cap is in the gas law), `pump` (v5 = the pump rule up to batch 2, c1b = rule C1b,
+"Quiet pump at stops", CP_SP flag 64; v6 = the retired rule C1, flag 16, on routes of 2026-10-05/06),
+`blaw` (v1 = the /2.6 brake law, v2 = the measured law, CP_SP flag 32) and `tuner` (Dynamic Tuning's live
+parts on or off): shadow_learn_report.py never pools lines that differ in
 any of them.
 """
 
@@ -87,10 +88,11 @@ RATE_HZ = 50                  # called once per 50 Hz gas/brake frame
 
 # What a line was measured on, in the order the line carries them. "-" = not known.
 BUILD_KEYS = ("commit", "gaslaw", "cap", "pump", "blaw", "tuner")
-# CP_SP.flags bits (opendbc/sunnypilot/car/honda/values_ext.py HondaFlagsSP: ELESYS_PUMP_V6, ELESYS_BRAKE_LAW_V2), with
-# the fixed values as the fallback so a tag never depends on the import working
-PUMP_V6_FLAG = 16
+# CP_SP.flags bits (opendbc/sunnypilot/car/honda/values_ext.py HondaFlagsSP: ELESYS_BRAKE_LAW_V2, ELESYS_PUMP_C1B),
+# with the fixed values as the fallback so a tag never depends on the import working. Flag 16 (the retired rule C1) is
+# never set by this build, so no line it writes says v6.
 BRAKE_LAW_V2_FLAG = 32
+PUMP_C1B_FLAG = 64
 LOG_INTERVAL = 60 * RATE_HZ   # a summary line at most once a minute
 
 NIDEC_BRAKE_MAX = 256         # CarControllerParams.NIDEC_BRAKE_MAX: brake fraction -> 0x1FA counts
@@ -210,9 +212,9 @@ def _flag_value(name: str, fallback: int) -> int:
 
 
 def pump_rule_tag(CP_SP) -> str:
-  """'v6' when the controller runs the quieter pump rule (CP_SP flag ELESYS_PUMP_V6), else 'v5'; '-' without CP_SP."""
+  """'c1b' when the controller runs pump rule C1b (CP_SP flag ELESYS_PUMP_C1B), else 'v5'; '-' without CP_SP."""
   try:
-    return "v6" if int(CP_SP.flags) & _flag_value("ELESYS_PUMP_V6", PUMP_V6_FLAG) else "v5"
+    return "c1b" if int(CP_SP.flags) & _flag_value("ELESYS_PUMP_C1B", PUMP_C1B_FLAG) else "v5"
   except Exception:
     return "-"
 
