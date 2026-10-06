@@ -196,9 +196,10 @@ def _initialize_honda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_
     # where nothing longitudinal is sent. Read here, once, so the route's CarParamsSP records what it ran; the
     # controller reads only CP_SP.flags. A key missing from params_dict (opendbc without openpilot) is off, i.e. the
     # rule and law before these settings; on the device card always passes both, with params_keys.h's defaults.
+    # The pump rule is C1b (HondaElesysPumpC1b, flag 64); the retired C1's key and flag 16 are not read or set.
     elif CP.openpilotLongitudinalControl:
-      if _param_is_on(params_dict.get("HondaElesysPumpV6")):
-        CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_V6.value
+      if _param_is_on(params_dict.get("HondaElesysPumpC1b")):
+        CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_C1B.value
       if _param_is_on(params_dict.get("HondaElesysBrakeLawV2")):
         CP_SP.flags |= HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value
 

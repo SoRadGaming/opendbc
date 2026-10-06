@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from opendbc.car import Bus
 from opendbc.car.honda import hondacan
 from opendbc.car.honda.carcontroller import (brake_pump_hysteresis, brake_pump_hysteresis_elesys,
-                                             brake_pump_c1_elesys,  # FORK(HONDA_ACCORD_9G_AU): pump rule C1
+                                             brake_pump_c1b_elesys,  # FORK(HONDA_ACCORD_9G_AU): pump rule C1b
                                              compute_gas_brake, compute_gb_honda_elesys,
                                              compute_gb_honda_nidec)
 from opendbc.sunnypilot.car.honda.gas_interceptor import elesys_gas_multiplier
@@ -360,8 +360,8 @@ class TestBrakePumpHysteresis(unittest.TestCase):
       pump, last = brake_pump_hysteresis(i + 1, i, last, i * 0.01)
       self.assertTrue(pump)
 
-class _C1:
-  """Pump rule C1 driven the way CarController drives it: one call per 0x1FA frame (every other 100 Hz frame), with
+class _C1b:
+  """Pump rule C1b driven the way CarController drives it: one call per 0x1FA frame (every other 100 Hz frame), with
   ts = frame * 0.01 exactly as the controller computes it."""
   DT = 0.02
 
@@ -370,7 +370,7 @@ class _C1:
 
   def step(self, cb, v=10.0):
     ts = self.frame * 0.01
-    p, self.level, self.trig, self.last = brake_pump_c1_elesys(cb, v, self.level, self.trig, self.last, ts)
+    p, self.level, self.trig, self.last = brake_pump_c1b_elesys(cb, v, self.level, self.trig, self.last, ts)
     self.frame += 2
     return p
 
@@ -382,176 +382,283 @@ class _C1:
     return sum(1 for a, b in zip([False, *on], on, strict=False) if b and not a)
 
 
-class TestBrakePumpC1(unittest.TestCase):
-  """FORK(HONDA_ACCORD_9G_AU): pump rule C1 (HondaFlagsSP.ELESYS_PUMP_V6). The pump delivers RISES in the command and
-  nothing else: a first burst at ~12 counts, one per rise past the deadband (after a 1 s gap unless the rise is big),
-  bursts at standstill only to build a hold, a burst at least every 6 s moving at cb >= 100 (dry bound + creep guard),
-  and the continuous run at v >= 2.5 / cb > 200. No 30 s top-up, no crawl run, no light-braking backstop."""
+class TestBrakePumpC1b(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU): pump rule C1b (HondaFlagsSP.ELESYS_PUMP_C1B, "Quiet pump at stops"). A burst at the
+  first frame of every application, one per rise past the deadband with no minimum gap, the continuous runs at
+  v >= 2.5 / cb > 200 and (v5's crawl run) 0.15 <= v < 2.5 / cb > 100, a burst at least every 6 s moving at cb >= 100
+  (dry bound + creep guard), and at standstill bursts only to build a hold. No 30 s top-up, no light-braking backstop."""
 
-  def test_onset_burst_at_about_twelve_counts(self):
-    c = _C1()
+  def test_onset_burst_at_the_first_frame(self):
+    c = _C1b()
     c.hold(0, 1.0)
-    first = next(cb for cb in range(1, 30) if c.step(cb))
-    self.assertEqual(first, 11)   # 11 > 0 + interp(11, [0, 60, 200], [12, 6, 3]) = 10.9
-    # an application that never passes the deadband never pumps
-    c = _C1()
-    self.assertFalse(any(c.hold(10, 10.0)))
+    self.assertTrue(c.step(1))                # the first frame, at 1 count: C1 waited for 11
+    # an application that never passes the deadband still gets its one burst, and only that
+    c = _C1b()
+    on = c.hold(10, 10.0)
+    self.assertEqual(_C1b.starts(on), 1)
+    self.assertTrue(on[0])
+    self.assertEqual(sum(on), 25)
+
+  def test_every_application_bursts_at_its_first_frame(self):
+    c = _C1b()
+    on = []
+    for cb in (3, 8, 20, 5, 60):              # five applications, 1 s each, 1 s apart
+      on += c.hold(0, 1.0)
+      app = c.hold(cb, 1.0)
+      self.assertTrue(app[0], f"the first frame of the {cb}-count application")
+      on += app
+    self.assertEqual(_C1b.starts(on), 5)
+    # an application that starts while the last one's burst is still running is pumped from its first frame too
+    c = _C1b()
+    c.hold(40, 0.2)
+    self.assertFalse(c.step(0))
+    self.assertTrue(c.step(30))
 
   def test_onset_is_one_half_second_burst_and_then_quiet(self):
-    c = _C1()
+    c = _C1b()
     on = c.hold(40, 20.0)
-    self.assertEqual(_C1.starts(on), 1)
+    self.assertEqual(_C1b.starts(on), 1)
     self.assertEqual(sum(on), 25)                        # 0.5 s at 50 Hz
     self.assertTrue(all(on[:25]) and not any(on[25:]))   # no light-braking backstop: 19.5 s dry at cb 40
 
   def test_rises_versus_the_deadband(self):
     for level, small, big_enough in ((50, 5, 7), (150, 3, 5), (190, 2, 4)):
-      c = _C1()
+      c = _C1b()
       c.hold(level, 3.0)
       self.assertFalse(any(c.hold(level + small, 2.0)), msg=f"+{small} at {level} is inside the deadband")
-      c = _C1()
+      c = _C1b()
       c.hold(level, 3.0)
       self.assertTrue(any(c.hold(level + big_enough, 0.1)), msg=f"+{big_enough} at {level} is a rise")
 
   def test_deadband_is_measured_from_the_delivered_level(self):
     # two +5 steps 2 s apart at cb 50: each is inside the deadband of ~6.5, but the second takes the command 10 past
     # what the last burst delivered, so it fires - drift cannot creep away undelivered
-    c = _C1()
+    c = _C1b()
     c.hold(50, 3.0)
     self.assertFalse(any(c.hold(55, 2.0)))
     self.assertTrue(any(c.hold(60, 2.0)))
 
-  def test_min_gap_then_allowed(self):
-    c = _C1()
+  def test_rises_need_no_gap(self):
+    # C1 blocked a rise for 1 s after a burst unless it was over 15 counts; C1b has no minimum gap
+    c = _C1b()
     c.hold(60, 0.6)                           # burst 0-0.5 s
-    self.assertFalse(any(c.hold(70, 0.86)))   # +10, a rise, but 0.6-1.44 s after the trigger: blocked
-    on = c.hold(70, 0.1)                      # 1.46-1.54 s: fires at RUN + MIN_GAP = 1.5 s
-    self.assertEqual(on, [False, False, True, True, True])
-
-  def test_big_rise_bypasses_the_min_gap(self):
-    c = _C1()
+    self.assertTrue(c.step(70))               # +10 at 0.6 s: fires at once (C1: blocked until 1.5 s)
+    # the deadband alone gates re-triggers: +5 at cb 60 never fires however long after the burst
+    c = _C1b()
     c.hold(60, 0.6)
-    self.assertTrue(c.step(76))               # +16 > BIG 15, 0.6 s after the trigger
+    self.assertFalse(any(c.hold(65, 5.0)))
+    # a staircase of +8 every 0.6 s: every step is its own burst, each the moment it arrives
+    c = _C1b()
+    c.hold(60, 0.6)
+    for cb in range(68, 100, 8):
+      on = c.hold(cb, 0.6)
+      self.assertTrue(on[0], f"step to {cb}")
+      self.assertEqual(_C1b.starts(on), 1)
 
   def test_running_burst_extends_while_the_command_climbs(self):
-    # an apply ramp is one smooth run: +3 counts a frame from 20 to 180
-    c = _C1()
-    ramp = [c.step(cb) for cb in range(20, 181, 3)]
-    on = ramp + c.hold(180, 2.0)
-    self.assertEqual(_C1.starts(on), 1)
+    # an apply ramp is one smooth run: +3 counts a frame from 20 to 98 (under the crawl and firm bands either way)
+    c = _C1b()
+    ramp = [c.step(cb) for cb in range(20, 99, 3)]
+    on = ramp + c.hold(98, 2.0)
+    self.assertEqual(_C1b.starts(on), 1)
     self.assertTrue(all(ramp))
     # a climb slower than EXT (= max(2, deadband / 2)) does not extend: +2 every 0.3 s at cb 30 (EXT 4.5)
-    c = _C1()
+    c = _C1b()
     on = c.hold(30, 0.3) + c.hold(32, 0.3) + c.hold(34, 0.3) + c.hold(34, 2.0)
     self.assertEqual(sum(on), 25)
 
   def test_steady_moving_hold_needs_no_pump_below_100(self):
-    c = _C1()
-    self.assertEqual(_C1.starts(c.hold(90, 60.0)), 1)
+    c = _C1b()
+    self.assertEqual(_C1b.starts(c.hold(90, 60.0)), 1)
 
   def test_moving_at_100_or_more_bursts_every_six_seconds(self):
-    c = _C1()
+    c = _C1b()
     on = c.hold(120, 30.0)
-    self.assertEqual(_C1.starts(on), 5)       # 0, 6, 12, 18, 24 s
+    self.assertEqual(_C1b.starts(on), 5)       # 0, 6, 12, 18, 24 s
     self.assertEqual(sum(on), 5 * 25)
+
+  def test_firm_moving_braking_is_continuous(self):
+    c = _C1b()
+    self.assertTrue(all(c.hold(201, 30.0, v=15.0)))
+    self.assertTrue(all(c.hold(253, 30.0, v=2.5)))
+    c = _C1b()
+    on = c.hold(200, 30.0, v=15.0)            # cb > 200 exactly: at 200 the burst rules govern
+    self.assertLess(sum(on) / len(on), 0.15)
+
+  def test_crawl_run_above_100_counts_below_2_5_m_s(self):
+    # v5's crawl continuous run, restored: 0.15 <= v < 2.5 m/s and cb > 100 keeps the pump on, every frame
+    c = _C1b()
+    on = [c.step(150, v=2.4 - i * 0.0088) for i in range(250)]   # 5 s, 2.4 -> 0.2 m/s: the final approach
+    self.assertTrue(all(on))
+    for cb, v in ((101, 0.15), (125, 1.0), (253, 2.0), (101, 2.49)):
+      c = _C1b()
+      self.assertTrue(all(c.hold(cb, 10.0, v=v)), msg=f"cb {cb} at {v} m/s")
+    # its edges: 100 counts is not above 100, 0.14 m/s is standstill, 2.5 m/s is the firm band's (cb > 200 there)
+    for cb, v in ((100, 1.0), (150, 0.14), (150, 2.5)):
+      c = _C1b()
+      self.assertLess(sum(c.hold(cb, 30.0, v=v)) / 1500, 0.15, msg=f"cb {cb} at {v} m/s")
+
+  def test_crawl_approach_into_a_firm_hold_then_silence(self):
+    # the stop reached in the crawl run at 150 counts: the run tails out (<= 0.5 s) at standstill, and the built hold
+    # is never topped up - no 30 s top-up, nothing for two minutes
+    c = _C1b()
+    c.hold(150, 3.0, v=1.0)
+    on = c.hold(150, 120.0, v=0.0)
+    self.assertLessEqual(sum(on), 25)
+    self.assertFalse(any(on[25:]))
+    self.assertEqual(c.level, 150)
 
   def test_standstill_hold_reached_firm_never_tops_up(self):
     # stop reached at the hold (V5's stops: ~185 counts when the wheels stop, hold 189): the hold is already there
     # (level >= 100) and the last 4 counts are inside BIG_RISE, so nothing pumps while stopped - no 30 s top-up
-    c = _C1()
+    c = _C1b()
     c.hold(185, 2.0, v=3.0)
     on = c.hold(189, 120.0, v=0.0)
     self.assertFalse(any(on))
     self.assertEqual(c.level, 185)
 
   def test_the_soft_stops_rise_to_the_hold_is_delivered_once(self):
-    # fix round 1 (finding 2): approach at cb 150 (pumped while moving), the soft stop's cap of 125 while rolling, then
-    # its 125 -> 189 rise at standstill (250 counts/s = 5 per 0x1FA frame). The pseudo-code's HOLD_OK alone left the
-    # delivered level at 125 for the whole stop; a rise of more than BIG_RISE over it is delivered - one burst - and a
-    # steady hold still never re-pumps
-    c = _C1()
+    # approach at cb 150 (pumped while moving), the soft stop's cap of 125 while rolling (now inside the crawl run),
+    # then its 125 -> 189 rise at standstill (250 counts/s = 5 per 0x1FA frame): delivered in one run - the crawl run's
+    # tail extends through the climb - and a steady hold never re-pumps
+    c = _C1b()
     c.hold(150, 2.0, v=3.0)
-    c.hold(125, 1.0, v=0.5)
-    self.assertEqual(c.level, 125)
+    self.assertTrue(all(c.hold(125, 1.0, v=0.5)))
     on = [c.step(cb, v=0.0) for cb in range(125, 190, 5)] + c.hold(189, 120.0, v=0.0)
-    self.assertEqual(_C1.starts(on), 1)
+    self.assertEqual(_C1b.starts(on), 1)
+    self.assertTrue(all(on[:13]), "the whole rise is pumped")
     self.assertGreaterEqual(c.level, 189)
     self.assertFalse(any(on[-5000:]), "no top-up after it")
+    # the same rise with the crawl run long over (the wheels stopped 2 s before): one hold-rise burst, as in C1
+    c = _C1b()
+    c.hold(150, 2.0, v=3.0)
+    c.hold(125, 1.0, v=0.5)
+    c.hold(125, 2.0, v=0.0)
+    self.assertEqual(c.level, 125)
+    on = [c.step(cb, v=0.0) for cb in range(125, 190, 5)] + c.hold(189, 120.0, v=0.0)
+    self.assertEqual(_C1b.starts(on), 1)
+    self.assertGreaterEqual(c.level, 189)
 
   def test_standstill_hold_reached_light_gets_one_hold_build_burst(self):
     # stop reached at cb 40: the 40 -> 189 rise at standstill builds the hold - one burst, extended through the
     # ramp, then nothing for two minutes
-    c = _C1()
+    c = _C1b()
     c.hold(40, 3.0, v=1.0)
     on = c.hold(125, 0.1, v=0.0) + [c.step(cb, v=0.0) for cb in range(127, 190, 2)] + c.hold(189, 120.0, v=0.0)
-    self.assertEqual(_C1.starts(on), 1)
+    self.assertEqual(_C1b.starts(on), 1)
     self.assertGreaterEqual(c.level, 189)
     # and once the delivered level is 100 or more a standstill rise fires only past BIG_RISE (15)
-    c = _C1()
+    c = _C1b()
+    self.assertTrue(c.step(100, v=0.0))      # an application that starts at standstill: its first-frame burst
     c.hold(100, 1.0, v=0.0)
     self.assertFalse(any(c.hold(115, 5.0, v=0.0)))
     self.assertTrue(any(c.hold(116, 0.1, v=0.0)))
 
-  def test_creep_guard(self):
-    # a built hold that starts to roll is moving again: at cb >= 100 with no burst for 6 s it fires at once
-    c = _C1()
+  def test_a_hold_that_rolls_is_pumped_at_once(self):
+    # above 100 counts a hold that starts to roll is in the crawl run: pumped from the first moving frame, even
+    # within 6 s of the last burst (C1 waited for its 6 s creep guard)
+    c = _C1b()
     c.hold(189, 1.0, v=0.0)
-    self.assertFalse(any(c.hold(189, 20.0, v=0.0)))
-    self.assertTrue(c.step(189, v=0.3))
-    # but not within 6 s of the last burst
-    c = _C1()
-    c.hold(189, 4.0, v=0.0)
-    self.assertFalse(c.step(189, v=0.3))
+    self.assertFalse(any(c.hold(189, 4.0, v=0.0)))
+    self.assertTrue(all(c.hold(189, 1.0, v=0.3)))
 
-  def test_firm_moving_braking_is_continuous(self):
-    c = _C1()
-    self.assertTrue(all(c.hold(201, 30.0, v=15.0)))
-    self.assertTrue(all(c.hold(253, 30.0, v=2.5)))
-    c = _C1()
-    on = c.hold(200, 30.0, v=15.0)            # cb > 200 exactly: at 200 the burst rules govern
-    self.assertLess(sum(on) / len(on), 0.15)
-
-  def test_no_crawl_continuous_run(self):
-    # v5 pinned the pump on at 0.15 <= v < 2.5 and cb > 100; C1 does not
-    c = _C1()
-    on = [c.step(150, v=2.4 - i * 0.0088) for i in range(250)]   # 5 s, 2.4 -> 0.2 m/s
-    self.assertEqual(_C1.starts(on), 1)
-    self.assertEqual(sum(on), 25)
-    c = _C1()
-    self.assertLess(sum(c.hold(253, 30.0, v=2.0)) / 1500, 0.15)
+  def test_creep_guard(self):
+    # at exactly 100 counts (below the crawl run) the creep guard is what catches the roll: a burst at once when the
+    # last one was 6 s or more ago, none within 6 s
+    c = _C1b()
+    c.hold(100, 1.0, v=0.0)
+    self.assertFalse(any(c.hold(100, 20.0, v=0.0)))
+    self.assertTrue(c.step(100, v=0.3))
+    c = _C1b()
+    c.hold(100, 4.0, v=0.0)
+    self.assertFalse(c.step(100, v=0.3))
 
   def test_release_needs_no_pump_and_rearms(self):
-    c = _C1()
+    c = _C1b()
     c.hold(253, 2.0, v=15.0)
     c.hold(60, 0.5, v=15.0)                          # the last firm frame's run tails out (<= 0.5 s), as in v5
     self.assertFalse(any(c.hold(60, 3.0, v=15.0)))   # release to 60: no pump, the level follows it down
     self.assertEqual(c.level, 60)
     self.assertTrue(any(c.hold(67, 0.1, v=15.0)))    # a rise from the released level fires
     # a release inside the jitter band (6 counts) keeps the level
-    c = _C1()
+    c = _C1b()
     c.hold(80, 2.0)
     c.hold(75, 1.0)
     self.assertEqual(c.level, 80)
 
   def test_release_to_zero_resets_and_the_next_application_bursts_at_once(self):
-    c = _C1()
+    c = _C1b()
     c.hold(60, 0.6)
     c.step(0)
     self.assertEqual(c.level, 0)
-    self.assertTrue(c.step(20))               # first burst of an application: no minimum gap
+    self.assertTrue(c.step(2))                # first frame of an application: a burst, however small
 
   def test_no_pump_without_brake(self):
-    p, level, _, _ = brake_pump_c1_elesys(0, 0.0, 150, 150, 0.0, 0.1)   # even inside a running burst
+    p, level, _, _ = brake_pump_c1b_elesys(0, 0.0, 150, 150, 0.0, 0.1)   # even inside a running burst
     self.assertFalse(p)
     self.assertEqual(level, 0)
-    p, _, _, _ = brake_pump_c1_elesys(0, 15.0, 0, 0, -1e9, 5.0)
+    p, _, _, _ = brake_pump_c1b_elesys(0, 15.0, 0, 0, -1e9, 5.0)
+    self.assertFalse(p)
+    p, _, _, _ = brake_pump_c1b_elesys(0, 1.0, 0, 0, -1e9, 5.0)          # not in the crawl run either
     self.assertFalse(p)
 
-  def test_non_finite_speed_counts_as_moving_below_firm(self):
-    # as in v5: a NaN vEgo is neither still nor firm, so a hold still gets its 6 s bound
-    c = _C1()
+  def test_non_finite_speed_counts_as_moving_outside_both_runs(self):
+    # as in v5: a NaN vEgo is neither still, crawling nor firm, so a hold still gets its 6 s bound
+    c = _C1b()
     on = c.hold(150, 13.0, v=float("nan"))
-    self.assertEqual(_C1.starts(on), 3)
+    self.assertEqual(_C1b.starts(on), 3)
+
+  def test_matches_the_c1weak_reference(self):
+    # c1weak's replay rule (final/replay2.py c1x(onset_first=True, min_gap=0.0, crawl=True)), transcribed: the rule
+    # its replay table was computed with. A random command/speed trace must give the same pump bit on every frame.
+    def ref(cbs, vs, ts):
+      out = []
+      level = trig = 0.
+      last = -1e9
+      for ab, ve, t in zip(cbs, vs, ts, strict=True):
+        if ab <= 0:
+          level = 0.
+          out.append(False)
+          continue
+        if (ve >= 2.5 and ab > 200) or (0.15 <= ve < 2.5 and ab > 100):
+          level, trig, last = max(level, ab), ab, t
+          out.append(True)
+          continue
+        db = float(np.interp(ab, [0., 60., 200.], [12., 6., 3.]))
+        if t - last < 0.5:
+          if ab >= trig + max(2, 0.5 * db):
+            last, trig = t, ab
+        elif level == 0:
+          last, trig = t, ab
+        elif (ve >= 0.15 or level < 100 or ab > level + 15) and ab > level + db:
+          last, trig = t, ab
+        elif ve >= 0.15 and ab >= 100 and t - last >= 6.0:
+          last, trig = t, ab
+        if ab < level - 6:
+          level = ab
+        on = t - last < 0.5
+        if on:
+          level = max(level, ab)
+        out.append(on)
+      return out
+    rng = np.random.default_rng(7)
+    n = 30000
+    cb = np.zeros(n)
+    v = np.zeros(n)
+    x, sp = 0.0, 10.0
+    for i in range(n):
+      if rng.random() < 0.01:
+        x = 0.0 if rng.random() < 0.3 else float(rng.choice([rng.uniform(1, 40), rng.uniform(40, 260)]))
+      x = max(0.0, x + rng.normal(0, 1.5))
+      sp = float(np.clip(sp + rng.normal(0, 0.15) - 0.002 * x, 0.0, 30.0))
+      if rng.random() < 0.002:
+        sp = float(rng.choice([0.0, 0.1, 1.0, 2.4, 2.5, 12.0]))
+      cb[i], v[i] = round(x), sp
+    ts = [2 * i * 0.01 for i in range(n)]   # as _C1b computes it, bit for bit
+    c = _C1b()
+    got = [c.step(int(a), float(b)) for a, b in zip(cb, v, strict=True)]
+    self.assertEqual(got, ref(cb, v, ts))
+    self.assertGreater(sum(got), 1000)
 
 
 class TestElesysPumpRuleSelection(unittest.TestCase):
@@ -592,10 +699,10 @@ class TestElesysPumpRuleSelection(unittest.TestCase):
                     any(x & m for x, m in zip(f[0][:7], pump_mask, strict=True))))
     return out
 
-  def test_flag_clear_is_v5_and_flag_set_is_c1(self):
+  def test_flag_clear_is_v5_and_flag_set_is_c1b(self):
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
     v5 = self._run(0)
-    c1 = self._run(HondaFlagsSP.ELESYS_PUMP_V6.value)
+    c1 = self._run(HondaFlagsSP.ELESYS_PUMP_C1B.value)
     self.assertEqual(len(v5), len(c1))
     self.assertTrue(any(cb > 0 for _, cb, _, _, _ in v5))
     anchor, last = 0, 0.0
@@ -603,34 +710,40 @@ class TestElesysPumpRuleSelection(unittest.TestCase):
     for (f5, cb5, v, ts, p5), (f1, cb1, _, _, p1) in zip(v5, c1, strict=True):
       self.assertEqual(cb5, cb1)              # the pump rule changes only the pump bit
       exp5, anchor, last = brake_pump_hysteresis_elesys(cb5, v, anchor, last, ts)
-      exp1, level, trig, last1 = brake_pump_c1_elesys(cb1, v, level, trig, last1, ts)
+      exp1, level, trig, last1 = brake_pump_c1b_elesys(cb1, v, level, trig, last1, ts)
       self.assertEqual(p5, exp5, msg=f"v5 at {ts:.2f} s")
-      self.assertEqual(p1, exp1, msg=f"C1 at {ts:.2f} s")
+      self.assertEqual(p1, exp1, msg=f"C1b at {ts:.2f} s")
       if p5 == p1:
         self.assertEqual(f5, f1)
-    # the scenario tells the rules apart: v5 tops a standstill hold up at 30 s, C1 never re-pumps a built hold
+    # the scenario tells the rules apart: v5 tops a standstill hold up at 30 s, C1b never re-pumps a built hold
     self.assertTrue(any(p for _, _, v, ts, p in v5 if v == 0.0 and ts > 20.0))
     self.assertFalse(any(p for _, _, v, ts, p in c1 if v == 0.0 and ts > 20.0))
 
+  def test_the_retired_c1_flag_runs_v5(self):
+    # flag 16 (the retired rule C1) selects nothing: an old CarParamsSP that carries it sends v5's 0x1FA, frame for frame
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    self.assertEqual(self._run(HondaFlagsSP.ELESYS_PUMP_V6.value), self._run(0))
+
   def test_brake_law_flag_alone_leaves_the_pump_on_v5(self):
-    # flag 32 belongs to the brake law; on its own it must not select C1
+    # flag 32 belongs to the brake law; on its own it must not select C1b
     from opendbc.car.honda.carcontroller import CarController
     from opendbc.car.honda.interface import CarInterface
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
-    self.assertEqual(HondaFlagsSP.ELESYS_PUMP_V6, 16)
+    self.assertEqual(HondaFlagsSP.ELESYS_PUMP_C1B, 64)
     self.assertEqual(HondaFlagsSP.ELESYS_BRAKE_LAW_V2, 32)
     CP = CarInterface.get_non_essential_params(ELESYS_CAR)
     CP_SP = CarInterface.get_non_essential_params_sp(CP, ELESYS_CAR)
-    CP_SP.flags |= HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value
-    self.assertFalse(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_v6)
-    CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_V6.value
-    self.assertTrue(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_v6)
+    CP_SP.flags |= HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value | HondaFlagsSP.ELESYS_PUMP_V6.value
+    self.assertFalse(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_c1b)
+    CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_C1B.value
+    self.assertTrue(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_c1b)
 
 
-class TestElesysC1WithTheSoftStop(unittest.TestCase):
-  """FORK(HONDA_ACCORD_9G_AU) fix round 1 (finding 2): the real CarController with the tuner on, so the soft stop is
-  built, and C1 selected. The soft stop caps the rolling command at ~125 counts and raises it to the hold after the
-  wheels read zero; C1 must deliver that rise (one burst at standstill), and not top the hold up afterwards."""
+class TestElesysC1bWithTheSoftStop(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU): the real CarController with the tuner on, so the soft stop is built, and C1b selected.
+  The soft stop caps the rolling command at ~125 counts and raises it to the hold after the wheels read zero; C1b must
+  pump the capped approach (the crawl run, which the cap was sized for), deliver the rise to the hold, and not top the
+  hold up afterwards."""
 
   def _run(self, flags):
     from unittest import mock
@@ -684,16 +797,16 @@ class TestElesysC1WithTheSoftStop(unittest.TestCase):
         out.append((t, v, cs.out.standstill, cc_obj.apply_brake_last, cc_obj.pump_level))
     return cc_obj, out
 
-  def test_c1_delivers_the_soft_stops_hold(self):
+  def test_c1b_delivers_the_soft_stops_hold(self):
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
-    cc_obj, out = self._run(HondaFlagsSP.ELESYS_PUMP_V6.value)
+    cc_obj, out = self._run(HondaFlagsSP.ELESYS_PUMP_C1B.value)
     t_stop = next(t for t, v, _, _, _ in out if v <= 0.9)
     rolling = [cb for t, v, _, cb, _ in out if t >= t_stop and v > 0.0]
     self.assertTrue(rolling and max(rolling) <= 130, f"the soft stop caps the rolling command: {max(rolling or [0])}")
     held = [cb for t, v, ss, cb, _ in out if ss and t > 10.0]
     self.assertGreaterEqual(min(held), 180, "the hold the soft stop rises to")
     level_end = out[-1][4]
-    self.assertGreaterEqual(level_end, min(held), "C1 delivered the hold (the pseudo-code alone left it at the cap)")
+    self.assertGreaterEqual(level_end, min(held), "C1b delivered the hold (C1's pseudo-code alone left it at the cap)")
     # one burst at standstill, delivering the rise, none for the rest of the 30 s hold
     t_still = next(t for t, v, ss, _, _ in out if ss)
     levels_after = [lv for t, _, ss, _, lv in out if ss and t > t_still + 3.0]

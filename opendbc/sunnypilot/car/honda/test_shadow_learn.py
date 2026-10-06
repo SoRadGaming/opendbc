@@ -508,7 +508,9 @@ class TestBuildTagsAndPersistence(unittest.TestCase):
     class SP:
       flags: int = 0
     self.assertEqual((sl.pump_rule_tag(SP(0)), sl.brake_law_tag(SP(0))), ("v5", "v1"))
-    self.assertEqual((sl.pump_rule_tag(SP(16)), sl.brake_law_tag(SP(16))), ("v6", "v1"))
+    self.assertEqual((sl.pump_rule_tag(SP(64)), sl.brake_law_tag(SP(64))), ("c1b", "v1"))
+    # 16 is the retired rule C1: this build never sets it, and an old CarParamsSP carrying it runs v5 here
+    self.assertEqual((sl.pump_rule_tag(SP(16)), sl.brake_law_tag(SP(16))), ("v5", "v1"))
     self.assertEqual((sl.pump_rule_tag(SP(32 | 8)), sl.brake_law_tag(SP(32 | 8))), ("v5", "v2"), "8 is stock ACC")
     self.assertEqual((sl.pump_rule_tag(None), sl.brake_law_tag(None)), ("-", "-"))
     self.assertEqual(sl.git_commit_tag(_Params({"GitCommit": "d995bc95a1b2c3"})), "d995bc95a")
@@ -516,15 +518,15 @@ class TestBuildTagsAndPersistence(unittest.TestCase):
     self.assertEqual([sl.git_commit_tag(p) for p in (_Params({}), None, _Params({"GitCommit": "a b=c"}))], ["-", "-", "-"])
     self.assertEqual([sl.launch_cap_tag(x) for x in ("v2", "v1", "nidec", "-", "")], ["1", "0", "0", "-", "-"])
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
-    for name, value in (("ELESYS_PUMP_V6", sl.PUMP_V6_FLAG), ("ELESYS_BRAKE_LAW_V2", sl.BRAKE_LAW_V2_FLAG)):
+    for name, value in (("ELESYS_PUMP_C1B", sl.PUMP_C1B_FLAG), ("ELESYS_BRAKE_LAW_V2", sl.BRAKE_LAW_V2_FLAG)):
       if hasattr(HondaFlagsSP, name):
         self.assertEqual(int(getattr(HondaFlagsSP, name)), value, f"the fixed contract: {name}")
-    self.assertEqual((sl.PUMP_V6_FLAG, sl.BRAKE_LAW_V2_FLAG), (16, 32))
+    self.assertEqual((sl.PUMP_C1B_FLAG, sl.BRAKE_LAW_V2_FLAG), (64, 32))
 
   def test_the_controller_tags_its_lines(self):
     lines = []
     with mock.patch.object(sl.carlog, "info", lambda msg, *a, **k: lines.append(msg)):
-      for flags, pump, blaw in ((0, "v5", "v1"), (sl.PUMP_V6_FLAG | sl.BRAKE_LAW_V2_FLAG, "v6", "v2")):
+      for flags, pump, blaw in ((0, "v5", "v1"), (sl.PUMP_C1B_FLAG | sl.BRAKE_LAW_V2_FLAG, "c1b", "v2"), (16, "v5", "v1")):
         cc_obj = _build(True, flags=flags, store={"GitCommit": "862540c0123456"})
         tu = cc_obj.dynamic_tuner
         self.assertEqual(tu.build, {"commit": "862540c01", "gaslaw": "-", "cap": "-", "pump": pump, "blaw": blaw, "tuner": "1"})
