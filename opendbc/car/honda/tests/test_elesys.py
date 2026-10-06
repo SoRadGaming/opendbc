@@ -743,10 +743,11 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
   """FORK(HONDA_ACCORD_9G_AU): the real CarController with the tuner on, so the soft stop is built, and C1b selected.
   The soft stop caps the rolling command at ~125 counts and raises it to the hold after the wheels read zero; C1b must
   pump the capped approach (the crawl run, which the cap was sized for), deliver the rise to the hold, and not top the
-  hold up afterwards."""
+  hold up afterwards. The pump is read where the car reads it: BRAKE_PUMP_REQUEST in the 0x1FA the controller sends."""
 
   def _run(self, flags):
     from unittest import mock
+    from opendbc.can import CANPacker
     from opendbc.car import gen_empty_fingerprint, structs
     from opendbc.car.honda.carcontroller import CarController
     from opendbc.car.honda.interface import CarInterface
@@ -773,6 +774,10 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
       CP_SP.flags |= flags
       cc_obj = CarController(DBC[ELESYS_CAR], CP, CP_SP)
     self.assertIsNotNone(cc_obj.soft_stop, "the tuner on builds the soft stop")
+    packer = CANPacker(DBC[ELESYS_CAR][Bus.pt])
+    off = _as_tuple(packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 0}))[1]
+    on = _as_tuple(packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 1}))[1]
+    pump_mask = bytes(a ^ b for a, b in zip(off[:7], on[:7], strict=True))
     cs = _FakeCS()
     out = []
     v, stopping = 6.0, False
@@ -792,25 +797,45 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
       cc.actuators.accel = (-1.0 if v > 3.0 else -0.2) if not stopping else -0.8
       cc.actuators.longControlState = structs.CarControl.Actuators.LongControlState.stopping if stopping else \
         structs.CarControl.Actuators.LongControlState.pid
-      cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, int(t * 1e9))
-      if i % 2 == 0:
-        out.append((t, v, cs.out.standstill, cc_obj.apply_brake_last, cc_obj.pump_level))
+      _, sends = cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, int(t * 1e9))
+      f = [d for a, d, _ in map(_as_tuple, sends) if a == 0x1FA]
+      if f:
+        pump = any(x & m for x, m in zip(f[0][:7], pump_mask, strict=True))
+        out.append((t, v, cs.out.standstill, cc_obj.apply_brake_last, cc_obj.pump_level, pump))
     return cc_obj, out
 
   def test_c1b_delivers_the_soft_stops_hold(self):
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
     cc_obj, out = self._run(HondaFlagsSP.ELESYS_PUMP_C1B.value)
-    t_stop = next(t for t, v, _, _, _ in out if v <= 0.9)
-    rolling = [cb for t, v, _, cb, _ in out if t >= t_stop and v > 0.0]
+    self.assertGreater(len(out), 1900, "a 0x1FA every other frame")
+    t_stop = next(t for t, v, *_ in out if v <= 0.9)
+    rolling = [cb for t, v, _, cb, *_ in out if t >= t_stop and v > 0.0]
     self.assertTrue(rolling and max(rolling) <= 130, f"the soft stop caps the rolling command: {max(rolling or [0])}")
-    held = [cb for t, v, ss, cb, _ in out if ss and t > 10.0]
+    held = [cb for t, v, ss, cb, *_ in out if ss and t > 10.0]
     self.assertGreaterEqual(min(held), 180, "the hold the soft stop rises to")
     level_end = out[-1][4]
     self.assertGreaterEqual(level_end, min(held), "C1b delivered the hold (C1's pseudo-code alone left it at the cap)")
     # one burst at standstill, delivering the rise, none for the rest of the 30 s hold
-    t_still = next(t for t, v, ss, _, _ in out if ss)
-    levels_after = [lv for t, _, ss, _, lv in out if ss and t > t_still + 3.0]
+    t_still = next(t for t, v, ss, *_ in out if ss)
+    levels_after = [lv for t, _, ss, _, lv, _ in out if ss and t > t_still + 3.0]
     self.assertEqual(min(levels_after), max(levels_after), "no top-up: the delivered level never moves again")
+    self.assertFalse(any(p for t, _, ss, _, _, p in out if ss and t > t_still + 3.0), "the 0x1FA pump bit stays off")
+
+  def test_c1b_pumps_the_capped_approach_through_the_crawl_run(self):
+    # what the soft stop's 125 cap was sized for: every rolling 0x1FA at 0.15 <= v < 2.5 with the command above 100
+    # carries the pump bit - the crawl run C1b restores (C1 had it on for 39% of that zone on route 120's stop)
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    _, out = self._run(HondaFlagsSP.ELESYS_PUMP_C1B.value)
+    crawl = [(t, cb, p) for t, v, _, cb, _, p in out if 0.15 <= v < 2.5 and cb > 100]
+    self.assertGreater(len(crawl), 50, "the capped approach spends time in the crawl zone above 100 counts")
+    self.assertTrue(all(p for _, _, p in crawl), [x for x in crawl if not x[2]][:5])
+    # v5 has the same run; with the flag clear the same approach pumps it too
+    _, out5 = self._run(0)
+    crawl5 = [p for t, v, _, cb, _, p in out5 if 0.15 <= v < 2.5 and cb > 100]
+    self.assertTrue(crawl5 and all(crawl5))
+
+
+class TestElesysGasMultiplier(unittest.TestCase):
   """Golden pedal-multiplier curve -- deliberately duplicated so any change to the deployed
   curve fails a test until it has been re-measured.
 
