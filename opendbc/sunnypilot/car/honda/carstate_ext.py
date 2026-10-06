@@ -66,6 +66,7 @@ class CarStateExt:
     self._linbus_gw_ts = 0
     self._linbus_grant_stale = LINBUS_GRANT_STALE_FRAMES
     self._linbus_grant_ts = 0
+    self._linbus_grant_seq = 0
     self._linbus_grant_logged = None
     self._steer_torque_last = None
     self._steer_torque_held = 0
@@ -263,10 +264,16 @@ class CarStateExt:
     if ts != self._linbus_grant_ts:
       self._linbus_grant_ts = ts
       self._linbus_grant_stale = 0
+      # grantSeq: one step per frame that actually arrived, never on a frame that is only
+      # still inside the 500 ms window. grantValid cannot tell the two apart, and MADS must:
+      # it may end a driver-override pause only on a NEW frame that says the override is
+      # over (route 121 t=57.40 resumed on staleness alone, 2.4 s before the board spoke).
+      self._linbus_grant_seq = (self._linbus_grant_seq + 1) & 0xFFFFFFFF
     else:
       self._linbus_grant_stale = min(self._linbus_grant_stale + 1, LINBUS_GRANT_STALE_FRAMES)
 
     valid = self._linbus_grant_stale < LINBUS_GRANT_STALE_FRAMES and ts != 0
+    ret_sp.linbusGateway.grantSeq = self._linbus_grant_seq
     state = int(g["STATE"])
     reason = int(g["REASON"])
     retry_in = int(g["RETRY_IN"])

@@ -85,12 +85,13 @@ the 2026-09 merge.
 * `opendbc/sunnypilot/car/honda/carstate_ext.py` (0):
   * `_update_linbus_gateway()` decodes `0x704`. It sets `linbusGateway.present = True` every frame on every
     `HONDA_ELESYS` car, board or no board;
-  * `_update_linbus_grant()` decodes `0x70B`;
+  * `_update_linbus_grant()` decodes `0x70B`, and since 2026-10-06 counts the frames that arrive (`grantSeq`, one
+    step per new frame; MADS ends its driver-override pause only when it moves);
   * `_update_driver_torque_validity()` and `_eps_lin_driver_torque_valid()` substitute `0x700 EPS_LIN_RAW` when
     `0x18F` is latched (`SERIAL_TORQUE_TO_CAN = -64.5`);
   * constants `LINBUS_*_STALE_FRAMES`, `STEER_TORQUE_STALE_FRAMES`, `GRANT_STATES_STEERING`, `GRANT_RETRY_KEY_CYCLE`.
 * `opendbc/car/structs.py` (0): `CarControlSP.LateralControl`, `CarStateSP.driverTorqueStale`, and the
-  `CarStateSP.LinbusGateway` control fields. (Area C, 2026-10-03: `CarStateSP.vsaFault` and `vsaStoredFault`; the names
+  `CarStateSP.LinbusGateway` control fields (since 2026-10-06 also `grantSeq`, sunnypilot `custom.capnp` `@27`). (Area C, 2026-10-03: `CarStateSP.vsaFault` and `vsaStoredFault`; the names
   must match sunnypilot's `custom.capnp` `@3`/`@4`, pinned by its `test_vsa_fault_alert.py`.)
 * `opendbc/dbc/generator/honda/_sunnypilot_linbus_gw.dbc` (0): `0x500 SP_HUD_STATUS`, `0x700 EPS_LIN_RAW`,
   `0x704 GW_ACTIVE`, `0x70B GW_STEER_GRANT`. It must not use a signal named `COUNTER` or `CHECKSUM` on the board's

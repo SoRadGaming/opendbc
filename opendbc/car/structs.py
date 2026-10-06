@@ -217,3 +217,6 @@ class CarStateSP:
     fwReadOnly: bool = auto_field()
     boardUid: int = auto_field()
     fwBuildValid: bool = auto_field()
+    # GW_STEER_GRANT (0x70B): +1 per frame that actually arrived (grantValid also covers the
+    # 500 ms after one). Same lockstep rule: cereal/custom.capnp grantSeq @27.
+    grantSeq: int = auto_field()

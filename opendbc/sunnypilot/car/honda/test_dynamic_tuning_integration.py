@@ -670,11 +670,13 @@ def grant_step(i, values=None):
 
 g = grant_step(0, None)
 check("no 0x70B has ever arrived -> not valid, NOT granted", not g.grantValid and not g.granted)
+check("grantSeq is 0 until the first frame", g.grantSeq == 0, f"{g.grantSeq}")
 
 g = grant_step(1, {"STATE": GRANT_ACTIVE, "REASON": 0, "AUTHORITY": 80, "EPS_ACK": 1,
                    "EPS_FRESH": 1, "CAM_LKAS_ON": 1, "APPLIED": 40, "MOTOR_TORQUE": -16,
                    "RETRY_IN": 0, "GRANT_COUNTER": 7})
 check("a frame arrives -> valid and granted", g.grantValid and g.granted)
+check("grantSeq steps on the frame that arrived", g.grantSeq == 1, f"{g.grantSeq}")
 check("STATE, REASON and AUTHORITY decode", g.grantState == GRANT_ACTIVE and g.grantReason == 0 and g.authority == 80,
       f"{g.grantState} {g.grantReason} {g.authority}")
 check("the EPS bits decode", g.epsAck and g.epsFresh and g.camLkasOn and not g.epsLatched)
@@ -710,11 +712,17 @@ check("LIMITED counts as granted", g.granted)
 g = grant_step(6, {"STATE": REQUESTED, "REASON": 3, "GRANT_COUNTER": 12})
 check("REQUESTED does not", not g.granted)
 
+check("grantSeq steps once per frame that arrived", g.grantSeq == 6, f"{g.grantSeq}")
 for i in range(7, 7 + 49):
   g = grant_step(i, None)
 check("still valid one frame inside the 500 ms window", g.grantValid)
+# THE difference between grantValid and grantSeq, and why MADS reads the second to end a
+# driver-override pause: the window holds the last frame as valid for 500 ms, but nothing new
+# arrived in it (route 121 t=57.40 resumed on exactly this).
+check("grantSeq does not move while the window only holds the last frame", g.grantSeq == 6, f"{g.grantSeq}")
 g = grant_step(57, None)
 check("stale after 50 frames -> not valid and NOT granted", not g.grantValid and not g.granted)
+check("grantSeq survives staleness: it is a count, not a validity", g.grantSeq == 6, f"{g.grantSeq}")
 check("a stale frame reports nothing rather than the last thing it heard",
       g.grantState == 0 and g.grantReason == 0 and g.authority == 0 and not g.epsAck)
 
