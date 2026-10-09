@@ -13,11 +13,14 @@ class HondaFlagsSP(IntFlag):
   EPS_MODIFIED = 2
   HYBRID_ALT_BRAKEHOLD = 4
   ELESYS_STOCK_ACC = 8  # FORK(HONDA_ACCORD_9G_AU): HondaElesysStockAcc, set by _initialize_honda (sunnypilot/car/interfaces.py)
-  # FORK(HONDA_ACCORD_9G_AU): HondaElesysBrakeLawV2 / HondaElesysPumpC1b, set by _initialize_honda with openpilot long.
+  # FORK(HONDA_ACCORD_9G_AU): HondaElesysPumpC1b, set by _initialize_honda with openpilot long.
   # 16 is RESERVED, never set: the retired brake pump rule C1 (batch 3, HondaElesysPumpV6, 2026-10-05 to 2026-10-06).
   # Routes that ran C1 carry it, and the route tools read it as C1; the controller ignores it (runs v5). Do not reuse.
   ELESYS_PUMP_V6 = 16
-  ELESYS_BRAKE_LAW_V2 = 32  # the measured brake law; clear = today's law
+  # 32 is RESERVED, never set: the retired brake law v2 (batch 3, HondaElesysBrakeLawV2, 2026-10-05 to 2026-10-09, off
+  # by default and never accepted). Routes with it set carry it, and brake_route_check reads it; the controller ignores
+  # it (today's brake law runs). Do not reuse.
+  ELESYS_BRAKE_LAW_V2 = 32
   ELESYS_PUMP_C1B = 64  # the brake pump rule C1b (carcontroller.brake_pump_c1b_elesys); clear = v5
 
 

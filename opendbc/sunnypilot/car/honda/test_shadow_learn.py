@@ -511,22 +511,24 @@ class TestBuildTagsAndPersistence(unittest.TestCase):
     self.assertEqual((sl.pump_rule_tag(SP(64)), sl.brake_law_tag(SP(64))), ("c1b", "v1"))
     # 16 is the retired rule C1: this build never sets it, and an old CarParamsSP carrying it runs v5 here
     self.assertEqual((sl.pump_rule_tag(SP(16)), sl.brake_law_tag(SP(16))), ("v5", "v1"))
-    self.assertEqual((sl.pump_rule_tag(SP(32 | 8)), sl.brake_law_tag(SP(32 | 8))), ("v5", "v2"), "8 is stock ACC")
+    # 32 is the retired brake law v2: this build never sets it, and an old CarParamsSP carrying it runs v1 here
+    self.assertEqual((sl.pump_rule_tag(SP(32 | 8)), sl.brake_law_tag(SP(32 | 8))), ("v5", "v1"), "8 is stock ACC")
+    self.assertEqual((sl.pump_rule_tag(SP(32 | 64)), sl.brake_law_tag(SP(32 | 64))), ("c1b", "v1"))
     self.assertEqual((sl.pump_rule_tag(None), sl.brake_law_tag(None)), ("-", "-"))
     self.assertEqual(sl.git_commit_tag(_Params({"GitCommit": "d995bc95a1b2c3"})), "d995bc95a")
     self.assertEqual(sl.git_commit_tag(_Params({"GitCommit": b"862540c00aa"})), "862540c00")
     self.assertEqual([sl.git_commit_tag(p) for p in (_Params({}), None, _Params({"GitCommit": "a b=c"}))], ["-", "-", "-"])
     self.assertEqual([sl.launch_cap_tag(x) for x in ("v2", "v1", "nidec", "-", "")], ["1", "0", "0", "-", "-"])
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
-    for name, value in (("ELESYS_PUMP_C1B", sl.PUMP_C1B_FLAG), ("ELESYS_BRAKE_LAW_V2", sl.BRAKE_LAW_V2_FLAG)):
-      if hasattr(HondaFlagsSP, name):
-        self.assertEqual(int(getattr(HondaFlagsSP, name)), value, f"the fixed contract: {name}")
-    self.assertEqual((sl.PUMP_C1B_FLAG, sl.BRAKE_LAW_V2_FLAG), (64, 32))
+    self.assertEqual(int(HondaFlagsSP.ELESYS_PUMP_C1B), sl.PUMP_C1B_FLAG, "the fixed contract: ELESYS_PUMP_C1B")
+    self.assertEqual(sl.PUMP_C1B_FLAG, 64)
+    self.assertFalse(hasattr(sl, "BRAKE_LAW_V2_FLAG"), "brake law v2 is retired: nothing here reads flag 32")
 
   def test_the_controller_tags_its_lines(self):
     lines = []
     with mock.patch.object(sl.carlog, "info", lambda msg, *a, **k: lines.append(msg)):
-      for flags, pump, blaw in ((0, "v5", "v1"), (sl.PUMP_C1B_FLAG | sl.BRAKE_LAW_V2_FLAG, "c1b", "v2"), (16, "v5", "v1")):
+      # 16 and 32 are the retired rule C1 and the retired brake law v2: an old CarParamsSP carrying them runs v5 / v1
+      for flags, pump, blaw in ((0, "v5", "v1"), (sl.PUMP_C1B_FLAG | 32, "c1b", "v1"), (16, "v5", "v1")):
         cc_obj = _build(True, flags=flags, store={"GitCommit": "862540c0123456"})
         tu = cc_obj.dynamic_tuner
         self.assertEqual(tu.build, {"commit": "862540c01", "gaslaw": "-", "cap": "-", "pump": pump, "blaw": blaw, "tuner": "1"})
