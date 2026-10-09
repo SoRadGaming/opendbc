@@ -69,7 +69,8 @@ band), `nan` for an empty cell -- the same shape parse_hondadyn.py already reads
 starts with what it was measured on, BUILD_KEYS: `commit` (GitCommit, 9 characters), `gaslaw` (v1/v2),
 `cap` (1 = the launch cap is in the gas law), `pump` (v5 = the pump rule up to batch 2, c1b = rule C1b,
 "Quiet pump at stops", CP_SP flag 64; v6 = the retired rule C1, flag 16, on routes of 2026-10-05/06),
-`blaw` (v1 = the /2.6 brake law, v2 = the measured law, CP_SP flag 32) and `tuner` (Dynamic Tuning's live
+`blaw` (v1 = the /2.6 brake law; v2 = the retired measured law, CP_SP flag 32, never written since 2026-10-09
+when it was removed) and `tuner` (Dynamic Tuning's live
 parts on or off): shadow_learn_report.py never pools lines that differ in
 any of them.
 """
@@ -88,10 +89,9 @@ RATE_HZ = 50                  # called once per 50 Hz gas/brake frame
 
 # What a line was measured on, in the order the line carries them. "-" = not known.
 BUILD_KEYS = ("commit", "gaslaw", "cap", "pump", "blaw", "tuner")
-# CP_SP.flags bits (opendbc/sunnypilot/car/honda/values_ext.py HondaFlagsSP: ELESYS_BRAKE_LAW_V2, ELESYS_PUMP_C1B),
-# with the fixed values as the fallback so a tag never depends on the import working. Flag 16 (the retired rule C1) is
-# never set by this build, so no line it writes says v6.
-BRAKE_LAW_V2_FLAG = 32
+# CP_SP.flags bit (opendbc/sunnypilot/car/honda/values_ext.py HondaFlagsSP.ELESYS_PUMP_C1B), with the fixed value as the
+# fallback so a tag never depends on the import working. Flags 16 (the retired rule C1) and 32 (the retired brake law
+# v2) are never set by this build, so no line it writes says pump=v6 or blaw=v2.
 PUMP_C1B_FLAG = 64
 LOG_INTERVAL = 60 * RATE_HZ   # a summary line at most once a minute
 
@@ -220,9 +220,11 @@ def pump_rule_tag(CP_SP) -> str:
 
 
 def brake_law_tag(CP_SP) -> str:
-  """'v2' when the controller runs the measured brake law (CP_SP flag ELESYS_BRAKE_LAW_V2), else 'v1'; '-' without CP_SP."""
+  """'v1', the only brake law since the measured law v2 was removed (2026-10-09; an old CarParamsSP carrying its flag 32
+  runs v1 too); '-' without CP_SP. The tag stays so lines keep their shape and old v2 lines are never pooled with these."""
   try:
-    return "v2" if int(CP_SP.flags) & _flag_value("ELESYS_BRAKE_LAW_V2", BRAKE_LAW_V2_FLAG) else "v1"
+    int(CP_SP.flags)
+    return "v1"
   except Exception:
     return "-"
 

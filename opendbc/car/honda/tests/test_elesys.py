@@ -724,8 +724,16 @@ class TestElesysPumpRuleSelection(unittest.TestCase):
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
     self.assertEqual(self._run(HondaFlagsSP.ELESYS_PUMP_V6.value), self._run(0))
 
+  def test_the_retired_brake_law_flag_runs_todays_law(self):
+    # flag 32 (the retired brake law v2, removed 2026-10-09) selects nothing: an old CarParamsSP that carries it sends
+    # today's 0x1FA, frame for frame, with either pump rule
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    law, c1b = HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value, HondaFlagsSP.ELESYS_PUMP_C1B.value
+    self.assertEqual(self._run(law), self._run(0))
+    self.assertEqual(self._run(law | c1b), self._run(c1b))
+
   def test_brake_law_flag_alone_leaves_the_pump_on_v5(self):
-    # flag 32 belongs to the brake law; on its own it must not select C1b
+    # flag 32 belonged to the retired brake law; on its own it must not select C1b
     from opendbc.car.honda.carcontroller import CarController
     from opendbc.car.honda.interface import CarInterface
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP

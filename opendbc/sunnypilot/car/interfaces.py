@@ -192,16 +192,15 @@ def _initialize_honda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_
       safety_param = CP.safetyConfigs[-1].safetyParam & ~HondaSafetyFlags.ELESYS_SCM_STANDDOWN.value
       CP.safetyConfigs[-1].safetyParam = safety_param | HondaSafetyFlags.ELESYS_STOCK_ACC.value
       carlog.warning("Honda ELESYS stock ACC mode: openpilot longitudinal off, all frames forwarded")
-    # FORK(HONDA_ACCORD_9G_AU): the brake pump rule and the brake law, openpilot long only - never in stock ACC mode,
-    # where nothing longitudinal is sent. Read here, once, so the route's CarParamsSP records what it ran; the
-    # controller reads only CP_SP.flags. A key missing from params_dict (opendbc without openpilot) is off, i.e. the
-    # rule and law before these settings; on the device card always passes both, with params_keys.h's defaults.
-    # The pump rule is C1b (HondaElesysPumpC1b, flag 64); the retired C1's key and flag 16 are not read or set.
+    # FORK(HONDA_ACCORD_9G_AU): the brake pump rule, openpilot long only - never in stock ACC mode, where nothing
+    # longitudinal is sent. Read here, once, so the route's CarParamsSP records what it ran; the controller reads only
+    # CP_SP.flags. A key missing from params_dict (opendbc without openpilot) is off, i.e. the rule before this
+    # setting; on the device card always passes it, with params_keys.h's default.
+    # The pump rule is C1b (HondaElesysPumpC1b, flag 64); the retired C1's key and flag 16 are not read or set, nor
+    # are the retired brake law v2's key (HondaElesysBrakeLawV2) and flag 32.
     elif CP.openpilotLongitudinalControl:
       if _param_is_on(params_dict.get("HondaElesysPumpC1b")):
         CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_C1B.value
-      if _param_is_on(params_dict.get("HondaElesysBrakeLawV2")):
-        CP_SP.flags |= HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value
 
 
 # FORK(HONDA_ACCORD_9G_AU): a BOOL param as card hands it over (bool from Params, or "1"/1/b"1"); anything else is off
