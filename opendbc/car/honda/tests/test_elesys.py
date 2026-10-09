@@ -727,24 +727,14 @@ class TestElesysPumpRuleSelection(unittest.TestCase):
   def test_the_retired_brake_law_flag_runs_todays_law(self):
     # flag 32 (the retired brake law v2, removed 2026-10-09) selects nothing: an old CarParamsSP that carries it sends
     # today's 0x1FA, frame for frame, with either pump rule
+    # (it subsumes round 4's 'flag 32 alone leaves the pump on v5': on its own it sends v5's frames, so it cannot
+    # select C1b). The numbers stay reserved: 32 is never reused, 64 is C1b
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    self.assertEqual((HondaFlagsSP.ELESYS_BRAKE_LAW_V2, HondaFlagsSP.ELESYS_PUMP_C1B), (32, 64))
     law, c1b = HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value, HondaFlagsSP.ELESYS_PUMP_C1B.value
     self.assertEqual(self._run(law), self._run(0))
     self.assertEqual(self._run(law | c1b), self._run(c1b))
-
-  def test_brake_law_flag_alone_leaves_the_pump_on_v5(self):
-    # flag 32 belonged to the retired brake law; on its own it must not select C1b
-    from opendbc.car.honda.carcontroller import CarController
-    from opendbc.car.honda.interface import CarInterface
-    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
-    self.assertEqual(HondaFlagsSP.ELESYS_PUMP_C1B, 64)
-    self.assertEqual(HondaFlagsSP.ELESYS_BRAKE_LAW_V2, 32)
-    CP = CarInterface.get_non_essential_params(ELESYS_CAR)
-    CP_SP = CarInterface.get_non_essential_params_sp(CP, ELESYS_CAR)
-    CP_SP.flags |= HondaFlagsSP.ELESYS_BRAKE_LAW_V2.value | HondaFlagsSP.ELESYS_PUMP_V6.value
-    self.assertFalse(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_c1b)
-    CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_C1B.value
-    self.assertTrue(CarController(DBC[ELESYS_CAR], CP, CP_SP).elesys_pump_c1b)
+    self.assertEqual(self._run(law | HondaFlagsSP.ELESYS_PUMP_V6.value), self._run(0), "with the retired C1 flag too")
 
 
 class TestElesysC1bWithTheSoftStop(unittest.TestCase):

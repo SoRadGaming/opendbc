@@ -222,11 +222,7 @@ def pump_rule_tag(CP_SP) -> str:
 def brake_law_tag(CP_SP) -> str:
   """'v1', the only brake law since the measured law v2 was removed (2026-10-09; an old CarParamsSP carrying its flag 32
   runs v1 too); '-' without CP_SP. The tag stays so lines keep their shape and old v2 lines are never pooled with these."""
-  try:
-    int(CP_SP.flags)
-    return "v1"
-  except Exception:
-    return "-"
+  return "-" if CP_SP is None else "v1"
 
 
 def launch_cap_tag(gas_law: str) -> str:
