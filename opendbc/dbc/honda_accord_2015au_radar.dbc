@@ -29,7 +29,7 @@ BO_ 1040 RADAR_TRACK_A0: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ NEW_SIGNAL_1 : 55|5@0+ (1,0) [0|31] "" XXX
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
@@ -40,7 +40,7 @@ BO_ 1041 RADAR_TRACK_A1: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -50,7 +50,7 @@ BO_ 1042 RADAR_TRACK_A2: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -60,7 +60,7 @@ BO_ 1043 RADAR_TRACK_A3: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -70,7 +70,7 @@ BO_ 1044 RADAR_TRACK_A4: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -80,7 +80,7 @@ BO_ 1045 RADAR_TRACK_A5: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -90,7 +90,7 @@ BO_ 1046 RADAR_TRACK_A6: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -100,7 +100,7 @@ BO_ 1047 RADAR_TRACK_A7: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -110,7 +110,7 @@ BO_ 1056 RADAR_TRACK_B0: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -120,7 +120,7 @@ BO_ 1057 RADAR_TRACK_B1: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -130,7 +130,7 @@ BO_ 1058 RADAR_TRACK_B2: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -140,7 +140,7 @@ BO_ 1059 RADAR_TRACK_B3: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -150,7 +150,7 @@ BO_ 1060 RADAR_TRACK_B4: 8 RADAR
  SG_ FLAG_B21 : 21|1@0+ (1,0) [0|1] "" EON
  SG_ FLAG_B22 : 22|1@0+ (1,0) [0|1] "" EON
  SG_ NEW_TRACK : 23|1@0+ (1,0) [0|1] "" EON
- SG_ REL_SPEED : 37|14@0- (0.0078125,0) [-64|64] "m/s" EON
+ SG_ REL_SPEED : 37|14@0- (0.015625,0) [-128|128] "m/s" EON
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
@@ -162,3 +162,16 @@ BO_ 1279 RADAR_STATUS_4FF: 8 RADAR
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" EON
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" EON
 
+CM_ SG_ 1040 REL_SPEED "Range rate, negative = closing. Scale 0.015625 m/s (1/64), measured 2026-10-09: on bus 1 d(LONG_DIST)/dt = 2.01-2.03 x the old 1/128 decode on routes 113 and 120 (A group; B 2.00-2.01 by median ratio), and a stationary object read -0.50 x vEgo at 1/128. The 1/128 scale this file carried until then halved every radar vRel. 14-bit signed: byte 4 bits 7:6 are never set. Same on all 13 track messages.";
+CM_ SG_ 1041 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1042 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1043 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1044 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1045 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1046 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1047 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1056 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1057 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1058 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1059 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";
+CM_ SG_ 1060 REL_SPEED "Range rate, negative = closing, 0.015625 m/s: see 1040 REL_SPEED.";

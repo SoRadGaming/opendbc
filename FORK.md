@@ -27,7 +27,7 @@ The full merge guide and the per-area documents live in the sunnypilot repo, und
 | fork HEAD | `8bd6e314` (upstream `f95f996f` merged into the fork's `c61cfd9b`), then the review-fix commit. That becomes `sp-master` and sunnypilot's pinned pointer. |
 | upstream commits not in the fork | 0 on 2026-09-27 |
 | fork commits since the fork point | 40 at `8bd6e314` (39 excluding merges). A merge keeps history, so this counts every fork commit since `b9712d20`; use the diff to see what the fork carries. |
-| files changed | 31, plus this file (36 since the 2026-10 batch: `elesys_gas.py`, `test_elesys_gas.py`, `elesys_stop.py`, `test_elesys_stop.py` and `torque_data/override.toml` are new to the list; 39 since 2026-10-03: `vsa_fault.py`, `test_vsa_fault.py` and `fixtures/vsa_fault_frames.json.gz`; 44 since 2026-10-04, stock ACC mode: `sunnypilot/car/interfaces.py`, `sunnypilot/car/honda/values_ext.py`, `car/honda/tests/test_elesys_stock_acc.py`, `safety/tests/libsafety/safety.c` and `libsafety_py.py`; 48 since 2026-10-05, batch 2 merged beside it: `safety/sunnypilot/mads.h`, `safety/tests/mads_common.py`, `sunnypilot/car/honda/shadow_learn.py` and `test_shadow_learn.py`) |
+| files changed | 31, plus this file (36 since the 2026-10 batch: `elesys_gas.py`, `test_elesys_gas.py`, `elesys_stop.py`, `test_elesys_stop.py` and `torque_data/override.toml` are new to the list; 39 since 2026-10-03: `vsa_fault.py`, `test_vsa_fault.py` and `fixtures/vsa_fault_frames.json.gz`; 44 since 2026-10-04, stock ACC mode: `sunnypilot/car/interfaces.py`, `sunnypilot/car/honda/values_ext.py`, `car/honda/tests/test_elesys_stock_acc.py`, `safety/tests/libsafety/safety.c` and `libsafety_py.py`; 48 since 2026-10-05, batch 2 merged beside it: `safety/sunnypilot/mads.h`, `safety/tests/mads_common.py`, `sunnypilot/car/honda/shadow_learn.py` and `test_shadow_learn.py`; since 2026-10-09 also `car/honda/tests/test_elesys_radar.py`, the radar's speed scale) |
 
 **Branches.** This fork's GitHub default branch is `master` (`fe144714`), not `sp-master`. The submodule clone in the
 Windows checkout (`S:/OP/sp-live/opendbc_repo`) fetches only `master`
@@ -257,6 +257,9 @@ the 2026-09 merge.
   frames that carstate does not read; their Honda checksum and counter were checked on 7.6 and 0.76 million logged
   frames), `_honda_elesys_base.dbc`, `_lkas_hud_4byte.dbc`,
   `_nidec_scm_group_a_elesys.dbc`, `_gearbox_legacy.dbc`, `honda_accord_2015au_radar.dbc` (all 0).
+  `honda_accord_2015au_radar.dbc` (hand-written): since 2026-10-09 `REL_SPEED` on the 13 track messages is 1/64 m/s.
+  It was 1/128, which halved every radar `vRel`: on the logged bus 1, d(`LONG_DIST`)/dt was 2.01-2.03 x the old
+  decode (sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` 4.8).
   `_honda_elesys_base.dbc` is a *modified* copy of `_honda_common.dbc`. The intended differences are: 7-byte
   `CAMERA_MESSAGES` (`0x35E`) and `STALK_STATUS` (`0x374`, no `WIPER_SWITCH`, `COUNTER`/`CHECKSUM` at 53/51), no
   `STEER_MOTOR_TORQUE.UNKNOWN_TORQUE_STATE_BIT`, `CM_ BO_` for 304/316, a header comment, and (2026-10-03) the
@@ -268,7 +271,8 @@ the 2026-09 merge.
   2560 scale and steering delay), `opendbc/sunnypilot/car/honda/test_dynamic_tuning.py`,
   `test_dynamic_tuning_integration.py` (C: sections 1-6, 9, 16-19 and 17b), `test_elesys_gas.py`, `test_elesys_stop.py`,
   `test_vsa_fault.py` (2026-10-03; real frames of routes 110-113, 10f and comma route 69 from
-  `fixtures/vsa_fault_frames.json.gz`, through the real `CarInterface`).
+  `fixtures/vsa_fault_frames.json.gz`, through the real `CarInterface`), `car/honda/tests/test_elesys_radar.py`
+  (2026-10-09; the radar's `REL_SPEED` scale on logged frames of route 113, through the real `RadarInterface`).
 
 ## Merging upstream: the short version
 
@@ -311,6 +315,7 @@ python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                 
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 28 tests: the soft final stop
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_brake                          # 29 tests: brake law v2 (batch 3)
 python -m unittest opendbc.car.honda.tests.test_elesys_stock_acc                          # 17 tests: stock ACC mode
+python -m unittest opendbc.car.honda.tests.test_elesys_radar                              # 4 tests: the radar's REL_SPEED scale
 python -m unittest opendbc.sunnypilot.car.honda.test_shadow_learn                          # 21 tests: the shadow learners
 python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault
 python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 1091 run, OK (skipped=73) (2026-10-05, stock ACC mode + batch 2)
