@@ -273,6 +273,31 @@ def brake_pump_c1b_elesys(apply_brake, v_ego, level, trig, last_pump_ts, ts):
   return pump_on, level, trig, last_pump_ts
 
 
+# FORK(HONDA_ACCORD_9G_AU): no aero credit at full brake (owner decision 2026-10-12; longfid synth section 3F).
+#
+# apply_brake = brake_last - wind_brake: upstream takes the drag the car gets for free off the brake, so a steady request
+# lands the same decel at every speed. At FULL brake that only lowers the ceiling. The request has asked for all the brake
+# there is, and the credit takes counts off it: full brake topped out at 236 counts at 60 km/h (measured 235-236, route 121
+# t243-247, plan -2.25 to -3.02 m/s^2), 245 at 30 and 223 at 100 km/h, against 253 standing still. So once brake_last sits
+# at its ceiling the credit is skipped, and full brake is 253 counts at every speed (brake gain 1.0).
+#
+# The ceiling is 0.99, not 1.0: actuator_hysteresis() holds a rising request brake_hyst_gap (0.01) under itself, so a
+# request of 1.0 leaves brake_last at exactly 0.99 and "brake_last >= 1.0" is never true. 0.99 x 256 = 253.4; the clip at
+# NIDEC_BRAKE_MAX - 1 = 255 (panda's max_brake is 255) binds only with a learned brake gain of 1.0062 or more.
+#
+# What it touches: every frame below the ceiling is bit-identical to before. Reaching the ceiling, the command rises by
+# the credit (0 to 38 counts, 0 to 35 m/s) in one 50 Hz frame - a rise above 200 counts, where both pump rules (v5 and
+# C1b) already run the pump continuously while moving. Leaving it, the credit comes back and the 32 counts/frame release
+# limiter smooths the step. The soft stop's ceiling still applies after this. Stock AEB is untouched: panda forwards the
+# CMBS 0x1FA while its brake is >= openpilot's, and a real CMBS brake is 320-1022 counts (S:/OP/CMBS_AEB_bitmap.md).
+ELESYS_FULL_BRAKE = 0.99 - 1e-6   # actuator_hysteresis()'s ceiling (1.0 - brake_hyst_gap), less float slack
+
+
+def elesys_wind_credit(brake_last: float, wind_credit: float) -> float:
+  """The aero credit to take off brake_last: none once the brake request is full."""
+  return 0.0 if brake_last >= ELESYS_FULL_BRAKE else wind_credit
+
+
 def process_hud_alert(hud_alert):
   alert_fcw = False
   alert_steer_required = False
@@ -513,7 +538,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           can_sends.extend(hondacan.create_acc_commands(self.packer, self.CAN, CC.enabled, CC.longActive, self.accel, self.gas,
                                                         self.stopping_counter, self.CP))
         else:
-          apply_brake = np.clip(self.brake_last - wind_brake * self.dynamic_tuner.wind_scale(), 0.0, 1.0)
+          wind_credit = wind_brake * self.dynamic_tuner.wind_scale()
+          if self.CP.carFingerprint in HONDA_ELESYS:  # FORK(HONDA_ACCORD_9G_AU): none at full brake, see ELESYS_FULL_BRAKE
+            wind_credit = elesys_wind_credit(self.brake_last, wind_credit)
+          apply_brake = np.clip(self.brake_last - wind_credit, 0.0, 1.0)
           # FORK(HONDA_ACCORD_9G_AU): never raise here. A non-finite vEgo makes wind_brake NaN, and the int() below
           # raised; an exception in update() means no 0x1FA at all, and the VSA latches BRAKE_ERROR ~1.0 s later.
           # Fall back to the brake without the aero credit, the more-braking side. Finite values are untouched.

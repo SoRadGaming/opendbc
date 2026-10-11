@@ -53,6 +53,17 @@ EPS_LIN_RAW_STALE_FRAMES = 25
 # STEER_THRESHOLD, torqued, driver monitoring and the lane-change nudge working unchanged.
 SERIAL_TORQUE_TO_CAN = -64.5
 
+# FORK(HONDA_ACCORD_9G_AU): steeringPressed is debounced, through upstream's CarStateBase.update_steering_pressed() with
+# the count Hyundai, VW, Ford, Tesla and PSA use (owner decision 2026-10-12). At this car's STEER_THRESHOLD of 600 the
+# flag sits just above the noise floor - 10 serial counts on the board's mirror - with 57-104 press onsets a minute on
+# routes 115-130, and 38-45% of the pressed frames on 115/120 were blips under 100 ms. Each blip freezes the lateral
+# integrator, restarts torqued's and lagd's 2 s no-learning window and blanks the "steer required" alert for 2 s.
+# The counter climbs on a pressed frame and falls on any other, clipped to 0..11, and reads pressed above 5: a press
+# registers on its 6th consecutive frame (50 ms late), a blip of 5 frames or fewer never does, and a press held for
+# 11 frames or more needs 6 clear frames to release. The threshold stays 600 (the lane-change nudge fix, b7d15a98) and
+# the board's own driver-torque hand-back does not read this flag.
+STEERING_PRESSED_MIN_COUNT = 5
+
 # SCM_BUTTONS.FUEL_LEVEL is clamped by the meter at 105 (~52 L of a ~60 L tank), so this is
 # "fraction of the gauge", not fraction of the tank. See _nidec_scm_group_a_elesys.dbc.
 FUEL_LEVEL_FULL = 105.0
@@ -161,12 +172,14 @@ class CarStateExt:
     if latched and self._eps_lin_driver_torque_valid(cp):
       # Same quantity, live, at the same 100 Hz, from the one device that can still see it.
       ret.steeringTorque = SERIAL_TORQUE_TO_CAN * cp.vl["EPS_LIN_RAW"]["STEER_TORQUE"]
-      ret.steeringPressed = abs(ret.steeringTorque) > STEER_THRESHOLD.get(self.CP.carFingerprint, 1200)
       latched = False
 
     ret_sp.driverTorqueStale = latched
-    if latched:
-      ret.steeringPressed = False
+    # FORK(HONDA_ACCORD_9G_AU): steeringPressed is decided here, once per frame, from the FINAL torque - 0x18F's, or
+    # the board's mirror substituted above - and debounced; this overwrites upstream's carstate.py line. A latched value
+    # counts as not pressed, and while it is latched the output is False outright, as before.
+    pressed = not latched and abs(ret.steeringTorque) > STEER_THRESHOLD.get(self.CP.carFingerprint, 1200)
+    ret.steeringPressed = self.update_steering_pressed(pressed, STEERING_PRESSED_MIN_COUNT) and not latched
 
   def _eps_lin_driver_torque_valid(self, cp: CANParser) -> bool:
     """Is the board's EPS mirror fresh enough, and did the EPS frame behind it check out?

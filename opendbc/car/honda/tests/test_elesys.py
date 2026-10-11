@@ -1534,5 +1534,325 @@ class TestElesysTorqueScale(unittest.TestCase):
     self.assertLessEqual(max(steps) * self.GW_LIN_AUTHORITY / steer_max, 8.1)
 
 
+def _elesys_long_controller(tuner):
+  """The real Elesys CarController with openpilot longitudinal (interceptor fingerprint) and pump rule C1b, the tuner
+  on or off. Off, the learned brake gain is exactly 1.0, so counts are the law's own."""
+  from unittest import mock
+  from opendbc.car import gen_empty_fingerprint
+  from opendbc.car.honda.carcontroller import CarController
+  from opendbc.car.honda.interface import CarInterface
+  from opendbc.sunnypilot.car.honda import dynamic_tuning as dt
+  from opendbc.sunnypilot.car.honda import elesys_gas as eg
+  from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+
+  class _P:
+    store = {"HondaDynamicTuningEnabled": tuner, eg.GAS_LAW_PARAM: True}
+
+    def get(self, key, block=False, return_default=False):
+      return self.store.get(key, dt._PARAM_SPEC[key][0] if key in dt._PARAM_SPEC else None)
+
+    def get_bool(self, key, block=False):
+      return bool(self.store.get(key, False))
+
+    def put(self, key, val, block=False):
+      pass
+  fp = gen_empty_fingerprint()
+  fp[0][0x188] = 8
+  fp[0][0x201] = 6
+  with mock.patch.object(dt, "_open_params", lambda: _P()), mock.patch.object(eg, "_open_params", lambda: _P()):
+    CP = CarInterface.get_params(ELESYS_CAR, fp, [], False, False, False)
+    CP_SP = CarInterface.get_params_sp(CP, ELESYS_CAR, fp, [], False, False, False)
+    CP_SP.flags |= HondaFlagsSP.ELESYS_PUMP_C1B.value
+    return CarController(DBC[ELESYS_CAR], CP, CP_SP)
+
+
+def _brake_frames(cc_obj, v_kph, accels, frame0=0):
+  """Drive cc_obj at a steady speed through one longitudinal request per 100 Hz frame, the car delivering exactly what
+  was asked. Returns, for every frame that sent a 0x1FA: (frame, brake_last, COMPUTER_BRAKE on the wire, the 0x1FA
+  payload, the brake learner's live factor)."""
+  from opendbc.car import structs
+  cs = _FakeCS()
+  cs.out.vEgo = cs.out.vEgoRaw = v_kph / 3.6
+  out = []
+  for k, accel in enumerate(accels):
+    i = frame0 + k
+    cc = structs.CarControl.new_message()
+    cc.enabled = cc.longActive = True
+    cc.orientationNED = [0.0, 0.0, 0.0]
+    cc.actuators.accel = float(accel)
+    cc.actuators.longControlState = structs.CarControl.Actuators.LongControlState.pid
+    cs.out.aEgo = float(accel)
+    _, sends = cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, i * int(1e7))
+    f = [d for a, d, _ in map(_as_tuple, sends) if a == 0x1FA]
+    if f:
+      out.append((i, cc_obj.brake_last, (f[0][0] << 2) | (f[0][1] >> 6), f[0], cc_obj.dynamic_tuner.brake_pid_factor))
+  return out
+
+
+def _wind_brake(v_kph):
+  return float(np.interp(v_kph / 3.6, [0.0, 2.3, 35.0], [0.001, 0.002, 0.15]))
+
+
+def _old_rule():
+  """The controller as it was: the aero credit taken at full brake too."""
+  from unittest import mock
+  import opendbc.car.honda.carcontroller as hcc
+  return mock.patch.object(hcc, "elesys_wind_credit", lambda brake_last, credit: credit)
+
+
+class TestElesysFullBrakeNoWindCredit(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU), owner decision 2026-10-12: at full brake the aero credit is not taken off the brake
+  (carcontroller.py, ELESYS_FULL_BRAKE). Full brake used to top out at (0.99 - wind_brake) x 256: 245 counts at 30 km/h,
+  236 at 60 (measured 235-236 on route 121), 223 at 100. Now it is 0.99 x 256 = 253 at every speed with a brake gain of
+  1.0. Below full brake nothing changes, which is checked against the same controller with the old rule patched in."""
+
+  FULL = int(0.99 * 256)   # 253: actuator_hysteresis() leaves a request of 1.0 at 0.99
+
+  def test_full_brake_reaches_the_ceiling_at_any_speed(self):
+    for kph, before in ((30, 245), (60, 236), (100, 223)):
+      self.assertEqual(int(np.clip((0.99 - _wind_brake(kph)) * 256, 0, 255)), before, msg=f"the old ceiling at {kph}")
+      with _old_rule():
+        old = _brake_frames(_elesys_long_controller(tuner=False), kph, [-4.0] * 300)
+      self.assertEqual(old[-1][2], before, msg=f"the old controller at {kph}")
+      frames = _brake_frames(_elesys_long_controller(tuner=False), kph, [-4.0] * 300)
+      full = [cb for _, bl, cb, *_ in frames if bl >= 0.99 - 1e-6]
+      self.assertTrue(full, msg=f"{kph} km/h never reached full brake")
+      self.assertEqual(set(full), {self.FULL}, msg=f"{kph} km/h")
+      self.assertEqual(frames[-1][2], self.FULL, msg=f"{kph} km/h")
+
+  def test_with_the_tuner_on_the_learned_gain_still_applies(self):
+    # the release limiter, the soft stop and the brake learner are built; full brake is 0.99 x gain x 256, clipped to 255
+    for kph in (30, 60, 100):
+      cc_obj = _elesys_long_controller(tuner=True)
+      frames = _brake_frames(cc_obj, kph, [-4.0] * 300)
+      gain = cc_obj.dynamic_tuner._shadow_brake_gain
+      self.assertEqual(frames[-1][2], int(np.clip(0.99 * gain * 256, 0, 255)), msg=f"{kph} km/h, gain {gain}")
+      self.assertGreater(frames[-1][2], int((0.99 - _wind_brake(kph)) * gain * 256), msg=f"{kph} km/h")
+
+  def test_brake_last_reaches_the_threshold_only_at_a_full_request(self):
+    from opendbc.car import DT_CTRL, rate_limit
+    from opendbc.car.honda.carcontroller import ELESYS_FULL_BRAKE, actuator_hysteresis
+    for req, full in ((1.0, True), (0.999, False), (0.995, False), (0.9, False)):
+      braking, steady, last = False, 0., 0.
+      for _ in range(300):
+        pre, braking, steady = actuator_hysteresis(req, braking, steady)
+        last = rate_limit(pre, last, -2., DT_CTRL)
+      self.assertEqual(last >= ELESYS_FULL_BRAKE, full, msg=f"request {req}: brake_last {last!r}")
+    self.assertLess(ELESYS_FULL_BRAKE, 0.99)
+
+  @staticmethod
+  def _trace(rng):
+    # light, firm, full, part release, release, full again, firm, release: every phase long enough to settle
+    phases = [(-0.5, 200), (-1.8, 200), (-4.0, 250), (-2.4, 120), (0.3, 120), (-3.5, 250), (-1.5, 300), (0.3, 100)]
+    return [a + float(rng.normal(0, 0.05)) for a, n in phases for _ in range(n)]
+
+  def test_every_frame_below_full_brake_is_unchanged(self):
+    rng = np.random.default_rng(20261012)
+    for kph in (15, 45, 80, 110):
+      accels = self._trace(rng)
+      new = _brake_frames(_elesys_long_controller(tuner=False), kph, accels)
+      with _old_rule():
+        old = _brake_frames(_elesys_long_controller(tuner=False), kph, accels)
+      self.assertEqual(len(new), len(old))
+      n_full = 0
+      for (i, bl, cb, dat, _), (_, bl_o, cb_o, dat_o, _) in zip(new, old, strict=True):
+        self.assertEqual(bl, bl_o)
+        if bl >= 0.99 - 1e-6:
+          n_full += 1
+          self.assertEqual(cb, self.FULL)
+          self.assertGreaterEqual(cb, cb_o)
+        else:
+          self.assertEqual(dat, dat_o, msg=f"{kph} km/h frame {i}: {cb_o} -> {cb} below full brake")
+      self.assertGreater(n_full, 100, msg="the trace must reach full brake")
+
+  def test_with_the_tuner_on_only_the_limiter_and_the_learner_carry_it_past_full_brake(self):
+    # tuner on, two things can carry the change past the last full-brake frame: the 32 counts/frame release limiter
+    # walking down from the higher command, and the brake learner, whose error is weighted by the commanded fraction
+    # (0.99 at full brake now, not 0.99 - wind). Before the first full-brake frame everything is identical.
+    rng = np.random.default_rng(7)
+    for kph in (15, 45, 80, 110):
+      accels = self._trace(rng)
+      new = _brake_frames(_elesys_long_controller(tuner=True), kph, accels)
+      with _old_rule():
+        old = _brake_frames(_elesys_long_controller(tuner=True), kph, accels)
+      first_full = next(k for k, f in enumerate(new) if f[1] >= 0.99 - 1e-6)
+      self.assertEqual([f[3] for f in new[:first_full]], [f[3] for f in old[:first_full]])
+      for k in range(first_full, len(new)):
+        (i, bl, cb, dat, pf), (_, _, cb_o, dat_o, pf_o) = new[k], old[k]
+        if bl >= 0.99 - 1e-6 or dat == dat_o:
+          continue
+        walking = new[k - 1][2] - 32 == cb          # the release limiter is what set this frame
+        self.assertTrue(walking or pf != pf_o, msg=f"{kph} km/h frame {i}: {cb_o} -> {cb}, factor {pf_o} -> {pf}")
+
+  def test_release_limiter_unchanged(self):
+    # tuner on, longActive: leaving full brake at 100 km/h the credit (30 counts) comes back and then the request falls
+    # to nothing; the command still falls at most 32 counts per 50 Hz frame, all the way down, as before
+    accels = [-4.0] * 300 + [-2.4] * 100 + [0.3] * 200
+    frames = _brake_frames(_elesys_long_controller(tuner=True), 100, accels)
+    cbs = [f[2] for f in frames]
+    self.assertGreaterEqual(max(cbs), self.FULL - 2)
+    drops = [a - b for a, b in zip(cbs, cbs[1:], strict=False)]
+    self.assertLessEqual(max(drops), 32)
+    self.assertGreater(drops.count(32), 3, "the limiter is what bounds the release")
+    self.assertEqual(cbs[-1], 0)
+    with _old_rule():
+      old = [f[2] for f in _brake_frames(_elesys_long_controller(tuner=True), 100, accels)]
+    self.assertLessEqual(max(a - b for a, b in zip(old, old[1:], strict=False)), 32)
+    self.assertEqual(cbs[-60:], old[-60:], "released, both are 0")
+
+  def test_non_finite_speed_at_full_brake_still_sends(self):
+    # a NaN vEgo must not raise in update() (no 0x1FA means a VSA BRAKE_ERROR a second later): a frame every 20 ms
+    frames = _brake_frames(_elesys_long_controller(tuner=True), float("nan"), [-4.0] * 300)
+    self.assertEqual(len(frames), 150)
+    self.assertTrue(all(0 <= f[2] <= 255 for f in frames))
+
+  def test_pump_runs_at_full_brake(self):
+    from opendbc.can import CANPacker
+    packer = CANPacker(DBC[ELESYS_CAR][Bus.pt])
+    off = _as_tuple(packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 0}))[1]
+    on = _as_tuple(packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 1}))[1]
+    mask = bytes(a ^ b for a, b in zip(off[:7], on[:7], strict=True))
+    frames = _brake_frames(_elesys_long_controller(tuner=True), 60, [-4.0] * 300)
+    full = [f[3] for f in frames if f[1] >= 0.99 - 1e-6]
+    self.assertTrue(full and all(any(x & m for x, m in zip(d[:7], mask, strict=True)) for d in full),
+                    msg="C1b runs the pump continuously above 200 counts while moving")
+
+  def test_the_rule(self):
+    from opendbc.car.honda.carcontroller import elesys_wind_credit
+    self.assertEqual(elesys_wind_credit(0.99, 0.067), 0.0)
+    self.assertEqual(elesys_wind_credit(0.98, 0.067), 0.067)
+    self.assertEqual(elesys_wind_credit(0.0, 0.001), 0.001)
+    self.assertTrue(np.isnan(elesys_wind_credit(float("nan"), float("nan"))), "NaN keeps the existing fallback")
+
+  def test_other_hondas_keep_the_credit(self):
+    cc_obj = _controller(NIDEC_CAR)
+    self.assertTrue(cc_obj.CP.openpilotLongitudinalControl)
+    frames = _brake_frames(cc_obj, 60, [-6.0] * 300)
+    self.assertGreater(frames[-1][1], 0.99 - 1e-6)
+    self.assertEqual(frames[-1][2], int((0.99 - _wind_brake(60)) * 256), "upstream's credit at full brake")
+
+
+class TestElesysSteeringPressedDebounce(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU), owner decision 2026-10-12: steeringPressed goes through upstream's
+  CarStateBase.update_steering_pressed() with a count of 5 (carstate_ext.py STEERING_PRESSED_MIN_COUNT), once per frame,
+  from the final torque: 0x18F STEER_TORQUE_SENSOR, or the board's 0x700 mirror while 0x18F is latched. A press
+  registers on its 6th consecutive frame, a blip of 1-5 frames never does, and a long press needs 6 clear frames to
+  release. STEER_THRESHOLD stays 600."""
+
+  def setUp(self, board=0):
+    from opendbc.can import CANPacker
+    from opendbc.car.honda.interface import CarInterface
+    CP = CarInterface.get_non_essential_params(ELESYS_CAR)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, ELESYS_CAR)
+    self.ci = CarInterface(CP, CP_SP)
+    self.packer = CANPacker(DBC[ELESYS_CAR][Bus.pt])
+    self.i = 0
+    self.step(0, 0, board=board)     # lazy VLDict registration drops the first frame of any message
+
+  def setUp_without_board(self):
+    self.setUp(board=None)
+
+  def step(self, torque, control_active=0, board=None):
+    self.i += 1
+    msgs = [self.packer.make_can_msg("STEER_STATUS", 0, {"STEER_TORQUE_SENSOR": torque, "COUNTER": self.i % 4,
+                                                         "STEER_CONTROL_ACTIVE": control_active})]
+    if board is not None:
+      msgs.append(self.packer.make_can_msg("EPS_LIN_RAW", 0, {"STEER_TORQUE": board, "CHECKSUM_OK": 1}))
+    cs, cs_sp = self.ci.update([(self.i * int(1e7), [_as_tuple(m) for m in msgs])])
+    return cs, cs_sp
+
+  def series(self, torques, **kw):
+    return [self.step(t, **kw)[0].steeringPressed for t in torques]
+
+  def clear(self, n=30, **kw):
+    self.series([0] * n, **kw)
+
+  def test_threshold_is_still_600(self):
+    from opendbc.car.honda.values import STEER_THRESHOLD
+    self.assertEqual(STEER_THRESHOLD[ELESYS_CAR], 600)
+    self.assertFalse(any(self.series([600] * 50)), "600 itself is not over the threshold")
+    self.clear()
+    self.assertTrue(self.series([601] * 50)[-1])
+
+  def test_blips_of_one_to_five_frames_do_not_press(self):
+    for k in range(1, 6):
+      for sign in (1, -1):
+        self.clear()
+        self.assertFalse(any(self.series([sign * 900] * k + [0] * 10)), msg=f"{k}-frame blip, sign {sign}")
+
+  def test_six_frames_press_on_the_sixth(self):
+    self.clear()
+    out = self.series([900] * 6)
+    self.assertEqual(out, [False] * 5 + [True])
+
+  def test_release_is_debounced_too(self):
+    self.clear()
+    self.assertTrue(self.series([-2000] * 100)[-1])
+    out = self.series([0] * 8)
+    self.assertEqual(out, [True] * 5 + [False] * 3, "a long press releases on its 6th clear frame")
+    # a press that only just registered releases on the first clear frame (the counter sat at 6)
+    self.clear()
+    self.assertEqual(self.series([900] * 6 + [0] * 2), [False] * 5 + [True, False, False])
+
+  def test_chatter_around_a_held_press_does_not_release(self):
+    self.clear()
+    self.assertTrue(self.series([1500] * 50)[-1])
+    out = self.series([1500, 0, 1500, 0, 0, 1500] * 10)
+    self.assertTrue(all(out), "single dropped frames inside a hold do not flick the flag")
+
+  def _latch(self, torque=-528):
+    # STEER_CONTROL_ACTIVE with a value that stops moving: after 25 identical frames 0x18F is latched and the
+    # board's mirror (0x700, serial counts, x -64.5) stands in for it
+    self.series([torque] * 30, control_active=1, board=0)
+    cs, cs_sp = self.step(torque, control_active=1, board=0)
+    self.assertFalse(cs_sp.driverTorqueStale)
+    self.assertEqual(cs.steeringTorque, 0.0, "the board's mirror is the torque now")
+
+  def test_board_mirror_path_is_debounced_the_same(self):
+    self._latch()
+    for k in range(1, 6):
+      self.series([-528] * 20, control_active=1, board=0)
+      out = [self.step(-528, control_active=1, board=(-12 if j < k else 0))[0].steeringPressed for j in range(k + 10)]
+      self.assertFalse(any(out), msg=f"{k}-frame blip on 0x700")
+    self.series([-528] * 20, control_active=1, board=0)
+    out = [self.step(-528, control_active=1, board=-12)[0].steeringPressed for _ in range(6)]
+    self.assertEqual(out, [False] * 5 + [True], "-12 serial counts = +774 CAN counts, pressed on the 6th frame")
+    out = [self.step(-528, control_active=1, board=-12)[0].steeringPressed for _ in range(20)]
+    self.assertTrue(all(out))
+    out = [self.step(-528, control_active=1, board=0)[0].steeringPressed for _ in range(8)]
+    self.assertEqual(out, [True] * 5 + [False] * 3)
+
+  def test_one_counter_across_both_paths(self):
+    # a driver holds +900 while LKAS engages: 0x18F reads it for 24 frames and then latches (25 identical frames),
+    # and the board's mirror (-14 serial = +903) carries on. The flag registers once and never drops at the seam.
+    self.clear()
+    out = [self.step(900, control_active=1, board=-14)[0].steeringPressed for _ in range(60)]
+    self.assertEqual(out[:5], [False] * 5)
+    self.assertTrue(all(out[5:]), msg=f"{out}")
+    # and back: the car's sensor comes live again (the value moves) with the same push, no blip at the seam
+    out = [self.step(900 + (j % 2), control_active=1, board=-14)[0].steeringPressed for j in range(20)]
+    self.assertTrue(all(out), msg=f"{out}")
+
+  def test_latched_with_no_board_is_not_pressed(self):
+    self.setUp_without_board()
+    out = [self.step(2000, control_active=1)[0].steeringPressed for _ in range(40)]
+    self.assertTrue(out[20], "live 0x18F, pressed after the debounce")
+    self.assertFalse(any(out[26:]), "latched with no board frame: False outright, as before")
+
+  def test_other_hondas_are_not_debounced(self):
+    from opendbc.can import CANPacker
+    from opendbc.car.honda.interface import CarInterface
+    CP = CarInterface.get_non_essential_params(NIDEC_CAR)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, NIDEC_CAR)
+    ci = CarInterface(CP, CP_SP)
+    packer = CANPacker(DBC[NIDEC_CAR][Bus.pt])
+    out = []
+    for i, tq in enumerate([0, 0, 1500, 0, 0]):   # over the CR-V's 1200
+      msg = packer.make_can_msg("STEER_STATUS", 0, {"STEER_TORQUE_SENSOR": tq, "COUNTER": i % 4})
+      cs, _ = ci.update([((i + 1) * int(1e7), [_as_tuple(msg)])])
+      out.append(cs.steeringPressed)
+    self.assertEqual(out[2:], [True, False, False], "upstream's single-frame flag")
+
+
 if __name__ == "__main__":
   unittest.main()
