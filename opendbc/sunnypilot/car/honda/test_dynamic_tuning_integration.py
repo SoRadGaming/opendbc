@@ -414,7 +414,7 @@ for i in range(55, 55 + 49):
   g = gw_step(i, [])
 check("blinkerCapped held one frame inside the window", g.valid and g.blinkerCapped)
 g = gw_step(104, [])
-check("stale 0x704 -> not blinkerCapped (no clip, the old report)", not g.valid and not g.blinkerCapped)
+check("stale 0x704 -> not blinkerCapped", not g.valid and not g.blinkerCapped)
 
 # An absent board must NOT cost openpilot its CAN. GW_ACTIVE is registered liveness-exempt:
 # with no frame ever received, its MessageState still reports valid, so it can never be the

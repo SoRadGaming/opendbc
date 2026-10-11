@@ -214,9 +214,10 @@ class CarStateExt:
     # what it WOULD do -- so ENGAGED alone would tell openpilot it is in control when it is
     # not, and the integrator would wind up exactly as it did before this protocol existed.
     ret_sp.linbusGateway.actuating = engaged and not dry_run and valid
-    # INH_BLINKER: the board is holding its command under its lane-change ceiling (50 % of authority while a
-    # turn signal is on and 500 ms after). Fresh frames only, like everything above: a stale 0x704 reads as
-    # no ceiling, and carcontroller then reports what it always did. See GW_BLINK_CEIL in carcontroller.py.
+    # INH_BLINKER: the board is holding its command under its lane-change ceiling (GW_BLINK_CEIL_PCT of its
+    # authority while a turn signal is on and 500 ms after). Fresh frames only, like everything above. Logged,
+    # so a route shows when the cap was on; nothing acts on it - carcontroller deliberately does not clip the
+    # reported torque to it (see the comment at its reported-torque hunk).
     ret_sp.linbusGateway.blinkerCapped = valid and bool(gw["INH_BLINKER"])
 
   def _update_linbus_firmware(self, ret_sp: structs.CarStateSP, cp: CANParser) -> None:

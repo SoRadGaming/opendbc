@@ -75,9 +75,9 @@ the 2026-09 merge.
     a `FORK(HONDA_ELESYS)` hunk that reports `0.0` while `CS.out_sp.linbusGateway.actuating` is False. torqued, the
     `steer_limited_by_safety` check in controlsd and the torque bar read it; `last_torque`, the rate limiter,
     `torqueOutputCan` and `0x0E4` are untouched. A missing or odd `out_sp` answers "actuating", i.e. the old report,
-    so `update()` cannot raise on it. Since 2026-10-12 (lcalert) the same hunk clips the report to `GW_BLINK_CEIL`
-    (0.5, the board's `GW_BLINK_CEIL_PCT` 50) while `linbus_gateway_blinker_capped(CS)` (`0x704 INH_BLINKER` from a
-    fresh frame); missing or odd state answers "not capped", the old report;
+    so `update()` cannot raise on it. The board's lane-change ceiling (`0x704 INH_BLINKER`) is deliberately NOT
+    reported: clipped to it, the report made the ceiling "limited by safety" and stopped `steerSaturated` for as
+    long as the blinker was on (lcalert, tried and dropped 2026-10-12; the hunk's comment says why);
   * `SP_HUD_STATUS` sent on bus 0 with `lat_ready = CC_SP.mads.enabled or CC.latActive` and `op_state`;
   * `LKAS_HUD` is not sent. The board's Stage 10 image owns `0x33D` on bus 0 (board `df42a0d`), and openpilot reads `LKAS_PROBLEM` back from it.
 * **`opendbc/car/honda/hondacan.py`** (0): `create_steering_control(..., serial_gateway, ldw_left, ldw_right)`,
@@ -87,7 +87,8 @@ the 2026-09 merge.
   liveness-exempt, and changes the call to `CarStateExt.update(self, ret, ret_sp, can_parsers)`.
 * `opendbc/sunnypilot/car/honda/carstate_ext.py` (0):
   * `_update_linbus_gateway()` decodes `0x704`. It sets `linbusGateway.present = True` every frame on every
-    `HONDA_ELESYS` car, board or no board; since 2026-10-12 also `blinkerCapped` (`INH_BLINKER` and fresh);
+    `HONDA_ELESYS` car, board or no board; since 2026-10-12 also `blinkerCapped` (`INH_BLINKER` and fresh; logged,
+    nothing acts on it);
   * `_update_linbus_grant()` decodes `0x70B`, and since 2026-10-06 counts the frames that arrive (`grantSeq`, one
     step per new frame; MADS ends its driver-override pause only when it moves);
   * `_update_driver_torque_validity()` and `_eps_lin_driver_torque_valid()` substitute `0x700 EPS_LIN_RAW` when

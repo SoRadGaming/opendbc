@@ -105,7 +105,7 @@ BO_ 1796 GW_ACTIVE: 8 STM
  SG_ ENGAGED : 48|1@0+ (1,0) [0|1] "" ADAS
 
 CM_ BO_ 1796 "LIN-bus gateway -> sunnypilot. The board's own status, at 10 Hz on the car bus.
-NOT a stock Honda message. Only the three bits sunnypilot acts on are defined here; the board's
+NOT a stock Honda message. Only the three bits sunnypilot reads are defined here; the board's
 own DBC (eps-lkas-gw.dbc) carries the rest, and this file deliberately does not duplicate them
 so there is one place to change when the board's layout moves.
 
@@ -119,9 +119,10 @@ ENGAGED is still set in a dry run, so ENGAGED alone means 'the board has an opin
 'the loop is closed'. Every consumer must read ENGAGED AND NOT DRY_RUN.";
 CM_ SG_ 1796 INH_BLINKER "A turn signal is on, or went off less than 500 ms ago
 (GW_BLINKER_DWELL_MS). Since the board's Stage 8 this is a CEILING, not a stop: while it is set
-the board keeps commanding but clamps to GW_BLINK_CEIL_PCT (50) percent of its authority, i.e.
-+-0.5 of openpilot's full scale (gw_active.c, the S8-1 ceiling). carcontroller.py reports the
-torque clipped to that ceiling while this bit is set, so openpilot sees the cap it is under.";
+the board keeps commanding but clamps to GW_BLINK_CEIL_PCT (50 at board 686e4603) percent of
+its authority (gw_active.c, the S8-1 ceiling). Decoded into carStateSP.linbusGateway.blinkerCapped
+and logged; openpilot does not act on it. The reported torque is deliberately not clipped to the
+ceiling, which would stop the steerSaturated alert while the blinker is on (carcontroller.py).";
 
 BO_ 1792 EPS_LIN_RAW: 8 STM
  SG_ STEER_TORQUE : 40|8@1- (2,0) [-256|254] "counts" ADAS

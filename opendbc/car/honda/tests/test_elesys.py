@@ -1404,102 +1404,50 @@ class TestElesysReportedTorqueSeam(unittest.TestCase):
     self.assertEqual(reported, 0.0)
     self.assertGreater(last, 0.4)                     # the command itself never stopped
 
-  def test_inh_blinker_clips_the_report_through_the_real_parser(self):
-    # 0x704 INH_BLINKER -> carstate_ext blinkerCapped -> the report is held at the board's ceiling
+  def test_inh_blinker_is_decoded_and_the_report_stays_the_command(self):
+    # 0x704 INH_BLINKER -> carstate_ext blinkerCapped (logged), and the report is NOT clipped to the board's
+    # ceiling: a railed request under it must still be able to saturate (TestElesysBlinkerCeilingNotReported)
     self._hold({"ENGAGED": 1, "DRY_RUN": 0}, frames=60)
-    gw, reported, last = self._hold({"ENGAGED": 1, "DRY_RUN": 0, "INH_BLINKER": 1}, frames=5)
-    self.assertTrue(gw.actuating and gw.blinkerCapped)
-    self.assertGreater(last, 0.45)
-    self.assertLessEqual(last, 0.5 + 1e-6)          # the request is 0.5: at the ceiling, nothing to clip
-    gw, reported, last = self._step({"ENGAGED": 1, "DRY_RUN": 0, "INH_BLINKER": 1}, torque=1.0)
     for _ in range(40):
       gw, reported, last = self._step({"ENGAGED": 1, "DRY_RUN": 0, "INH_BLINKER": 1}, torque=1.0)
-    self.assertAlmostEqual(last, 1.0, places=6)       # the command still ramps to full
-    self.assertAlmostEqual(reported, 0.5, places=6)   # the report says what the board lets through
+    self.assertTrue(gw.actuating and gw.blinkerCapped)
+    self.assertAlmostEqual(last, 1.0, places=6)
+    self.assertAlmostEqual(reported, last, places=6)
     gw, reported, last = self._step({"ENGAGED": 1, "DRY_RUN": 0}, torque=1.0)
     self.assertFalse(gw.blinkerCapped)
-    self.assertAlmostEqual(reported, last, places=6)  # the frame the bit clears, the report is the command again
+    self.assertAlmostEqual(reported, last, places=6)
 
 
-class TestElesysBlinkerCeilingReport(unittest.TestCase):
-  """carOutput's reported torque is clipped to the board's lane-change ceiling (GW_BLINK_CEIL, 0.5) while the
-  latest fresh 0x704 says INH_BLINKER. Report only: last_torque, torqueOutputCan and 0x0E4 are bit-identical
-  to the uncapped run, the sign is kept, and nothing below the ceiling moves."""
+class TestElesysBlinkerCeilingNotReported(unittest.TestCase):
+  """The board's lane-change ceiling (0x704 INH_BLINKER -> blinkerCapped) changes nothing the CarController
+  reports or sends. Clipping the report to it made the ceiling 'limited by safety' in controlsd, which stopped
+  lac.saturated - and openpilot's steerSaturated alert with it - for as long as the blinker was on."""
 
-  def _run(self, car, capped, requests, actuating=None, cs=None):
+  def _run(self, car, capped, requests, actuating=None):
     cc_obj = _controller(car)
-    cs = cs if cs is not None else _FakeCS()
+    cs = _FakeCS()
     out = []
     for i, (cap, req) in enumerate(zip(capped, requests, strict=True)):
       if actuating is not None:
         cs.set_actuating(actuating[i])
-      if cap is not None and hasattr(cs, "out_sp"):
-        cs.out_sp.linbusGateway.blinkerCapped = cap
+      cs.out_sp.linbusGateway.blinkerCapped = cap
       acts, sends = cc_obj.update(_cc(req), structs_CC_SP(), cs, i * int(1e7))
       e4 = [d for a, d, _ in map(_as_tuple, sends) if a in (0xE4, 0x194)]
       self.assertEqual(len(e4), 1)
       out.append((acts.torque, acts.torqueOutputCan, e4[0], cc_obj.last_torque))
     return out
 
-  def test_constant_matches_the_board(self):
-    from opendbc.car.honda.carcontroller import GW_BLINK_CEIL
-    self.assertEqual(GW_BLINK_CEIL, 50 / 100)   # GW_BLINK_CEIL_PCT 50 in EPS-LKAS src/gw_active.c
-
-  def test_clipped_with_its_sign_and_the_wire_is_unchanged(self):
-    n = 160
+  def test_report_and_wire_are_those_of_the_uncapped_run(self):
     req = [1.0] * 70 + [-1.0] * 90
-    capped = self._run(ELESYS_CAR, [True] * n, req)
-    free = self._run(ELESYS_CAR, [False] * n, req)
-    for i, (a, b) in enumerate(zip(capped, free, strict=True)):
-      self.assertEqual(a[1], b[1], msg=f"frame {i}: torqueOutputCan")
-      self.assertEqual(a[2], b[2], msg=f"frame {i}: 0x0E4 bytes")
-      self.assertEqual(a[3], b[3], msg=f"frame {i}: last_torque")
-      self.assertAlmostEqual(a[0], max(-0.5, min(0.5, b[3])), places=6, msg=f"frame {i}")
-      if b[3] != 0.0:
-        self.assertEqual(a[0] > 0, b[3] > 0, msg=f"frame {i}: sign")
-    self.assertAlmostEqual(capped[69][0], 0.5, places=6)
-    self.assertAlmostEqual(capped[69][3], 1.0, places=6)
-    self.assertAlmostEqual(capped[-1][0], -0.5, places=6)
-    self.assertAlmostEqual(capped[-1][3], -1.0, places=6)
-
-  def test_below_the_ceiling_nothing_moves(self):
-    req = [0.3] * 40 + [-0.45] * 60
-    capped = self._run(ELESYS_CAR, [True] * 100, req)
-    free = self._run(ELESYS_CAR, [False] * 100, req)
+    capped = self._run(ELESYS_CAR, [True] * 160, req)
+    free = self._run(ELESYS_CAR, [False] * 160, req)
     self.assertEqual(capped, free)
-
-  def test_cap_lifting_reports_the_command_at_once(self):
-    out = self._run(ELESYS_CAR, [True] * 60 + [False] * 5, [1.0] * 65)
-    self.assertAlmostEqual(out[59][0], 0.5, places=6)
-    self.assertAlmostEqual(out[60][0], out[60][3], places=6)
-    self.assertAlmostEqual(out[60][0], 1.0, places=6)
+    self.assertAlmostEqual(capped[69][0], 1.0, places=6)    # railed, and reported railed
+    self.assertAlmostEqual(capped[-1][0], -1.0, places=6)
 
   def test_not_actuating_still_reports_zero(self):
     out = self._run(ELESYS_CAR, [True] * 40, [1.0] * 40, actuating=[False] * 40)
     self.assertTrue(all(o[0] == 0.0 for o in out))
-
-  def test_default_state_and_odd_state_do_not_clip(self):
-    from opendbc.car import structs
-
-    class Boom:
-      def __bool__(self):
-        raise ValueError("odd")
-
-    cs = _FakeCS()                     # actuating, blinkerCapped left at its default
-    self.assertFalse(structs.CarStateSP().linbusGateway.blinkerCapped)
-    out = self._run(ELESYS_CAR, [None] * 60, [1.0] * 60, cs=cs)
-    self.assertAlmostEqual(out[-1][0], 1.0, places=6)
-    cs = _FakeCS()
-    cs.out_sp.linbusGateway = SimpleNamespace(present=True, valid=True, engaged=True, actuating=True,  # ty: ignore[invalid-assignment]
-                                              blinkerCapped=Boom())
-    out = self._run(ELESYS_CAR, [None] * 60, [1.0] * 60, cs=cs)
-    self.assertAlmostEqual(out[-1][0], 1.0, places=6)
-
-  def test_other_hondas_are_unaffected(self):
-    for car in (CAR.HONDA_CIVIC, CAR.HONDA_ACCORD, CAR.HONDA_CRV):
-      out = self._run(car, [True] * 60, [1.0] * 60)
-      self.assertTrue(all(abs(o[0] - o[3]) < 1e-6 for o in out), msg=str(car))
-      self.assertGreater(out[-1][0], 0.9, msg=str(car))
 
 
 class TestElesysSteerDelay(unittest.TestCase):

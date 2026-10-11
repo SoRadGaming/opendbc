@@ -223,6 +223,6 @@ class CarStateSP:
     # GW_STEER_GRANT (0x70B): +1 per frame that actually arrived (grantValid also covers the
     # 500 ms after one). Same lockstep rule: cereal/custom.capnp grantSeq @27.
     grantSeq: int = auto_field()
-    # GW_ACTIVE (0x704) INH_BLINKER from a fresh frame: the board's 50 % lane-change ceiling is in force.
-    # Same lockstep rule: cereal/custom.capnp blinkerCapped @28.
+    # GW_ACTIVE (0x704) INH_BLINKER from a fresh frame: the board's lane-change ceiling is in force. Logged
+    # only. Same lockstep rule: cereal/custom.capnp blinkerCapped @28.
     blinkerCapped: bool = auto_field()
