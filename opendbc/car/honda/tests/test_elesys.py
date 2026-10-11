@@ -1566,10 +1566,11 @@ def _elesys_long_controller(tuner):
     return CarController(DBC[ELESYS_CAR], CP, CP_SP)
 
 
-def _brake_frames(cc_obj, v_kph, accels, frame0=0):
+def _brake_frames(cc_obj, v_kph, accels, frame0=0, long_active=None):
   """Drive cc_obj at a steady speed through one longitudinal request per 100 Hz frame, the car delivering exactly what
-  was asked. Returns, for every frame that sent a 0x1FA: (frame, brake_last, COMPUTER_BRAKE on the wire, the 0x1FA
-  payload, the brake learner's live factor)."""
+  was asked. long_active, if given, is one bool per frame (enabled and longActive together; default all True). Returns,
+  for every frame that sent a 0x1FA: (frame, brake_last, COMPUTER_BRAKE on the wire, the 0x1FA payload, the brake
+  learner's live factor, the aero credit's scale)."""
   from opendbc.car import structs
   cs = _FakeCS()
   cs.out.vEgo = cs.out.vEgoRaw = v_kph / 3.6
@@ -1577,7 +1578,7 @@ def _brake_frames(cc_obj, v_kph, accels, frame0=0):
   for k, accel in enumerate(accels):
     i = frame0 + k
     cc = structs.CarControl.new_message()
-    cc.enabled = cc.longActive = True
+    cc.enabled = cc.longActive = True if long_active is None else bool(long_active[k])
     cc.orientationNED = [0.0, 0.0, 0.0]
     cc.actuators.accel = float(accel)
     cc.actuators.longControlState = structs.CarControl.Actuators.LongControlState.pid
@@ -1585,7 +1586,8 @@ def _brake_frames(cc_obj, v_kph, accels, frame0=0):
     _, sends = cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, i * int(1e7))
     f = [d for a, d, _ in map(_as_tuple, sends) if a == 0x1FA]
     if f:
-      out.append((i, cc_obj.brake_last, (f[0][0] << 2) | (f[0][1] >> 6), f[0], cc_obj.dynamic_tuner.brake_pid_factor))
+      out.append((i, cc_obj.brake_last, (f[0][0] << 2) | (f[0][1] >> 6), f[0], cc_obj.dynamic_tuner.brake_pid_factor,
+                  cc_obj.wind_credit_scale))
   return out
 
 
@@ -1594,39 +1596,67 @@ def _wind_brake(v_kph):
 
 
 def _old_rule():
-  """The controller as it was: the aero credit taken at full brake too."""
+  """The controller as it was on lcalert: the aero credit taken at full brake too."""
   from unittest import mock
   import opendbc.car.honda.carcontroller as hcc
-  return mock.patch.object(hcc, "elesys_wind_credit", lambda brake_last, credit: credit)
+  return mock.patch.object(hcc, "elesys_wind_credit_scale", lambda brake_last, scale, long_active: 1.0)
+
+
+def _step_rule():
+  """push6's first cut (opendbc c973ec83): the whole credit dropped in the frame brake_last reached the ceiling."""
+  from unittest import mock
+  import opendbc.car.honda.carcontroller as hcc
+  return mock.patch.object(hcc, "elesys_wind_credit_scale",
+                           lambda brake_last, scale, long_active: 0.0 if brake_last >= hcc.ELESYS_FULL_BRAKE else 1.0)
+
+
+def _cbs(frames):
+  return np.array([f[2] for f in frames])
+
+
+def _hover_accels(mean, sigma, seed, n=1000):
+  """A request walked in to `mean` m/s^2 and then held there with Gaussian noise, one value per 100 Hz frame."""
+  rng = np.random.default_rng(seed)
+  return list(np.r_[np.linspace(-1.5, mean, 200), mean + rng.normal(0, sigma, n)])
 
 
 class TestElesysFullBrakeNoWindCredit(unittest.TestCase):
   """FORK(HONDA_ACCORD_9G_AU), owner decision 2026-10-12: at full brake the aero credit is not taken off the brake
   (carcontroller.py, ELESYS_FULL_BRAKE). Full brake used to top out at (0.99 - wind_brake) x 256: 245 counts at 30 km/h,
-  236 at 60 (measured 235-236 on route 121), 223 at 100. Now it is 0.99 x 256 = 253 at every speed with a brake gain of
-  1.0. Below full brake nothing changes, which is checked against the same controller with the old rule patched in."""
+  236 at 60 (measured 235-236 on route 121), 223 at 100, 215 at 126. Now it is 0.99 x 256 = 253 at every speed with a
+  brake gain of 1.0. The credit is ramped out and back (elesys_wind_credit_scale(), 0.1 per 100 Hz frame), not stepped:
+  push6's first cut dropped it in one send (_step_rule). An application that never reaches the ceiling is bit-identical,
+  which is checked against the same controller with the old rule patched in."""
 
   FULL = int(0.99 * 256)   # 253: actuator_hysteresis() leaves a request of 1.0 at 0.99
+  F = 0.99 - 1e-6
 
   def test_full_brake_reaches_the_ceiling_at_any_speed(self):
-    for kph, before in ((30, 245), (60, 236), (100, 223)):
+    for kph, before in ((30, 245), (60, 236), (100, 223), (126, 215)):
       self.assertEqual(int(np.clip((0.99 - _wind_brake(kph)) * 256, 0, 255)), before, msg=f"the old ceiling at {kph}")
       with _old_rule():
         old = _brake_frames(_elesys_long_controller(tuner=False), kph, [-4.0] * 300)
       self.assertEqual(old[-1][2], before, msg=f"the old controller at {kph}")
       frames = _brake_frames(_elesys_long_controller(tuner=False), kph, [-4.0] * 300)
-      full = [cb for _, bl, cb, *_ in frames if bl >= 0.99 - 1e-6]
-      self.assertTrue(full, msg=f"{kph} km/h never reached full brake")
-      self.assertEqual(set(full), {self.FULL}, msg=f"{kph} km/h")
+      first = next(k for k, f in enumerate(frames) if f[1] >= self.F)
+      at_full = frames[first:]
+      self.assertTrue(all(f[1] >= self.F for f in at_full), msg=f"{kph} km/h left full brake")
+      zero = next(k for k, f in enumerate(at_full) if f[5] == 0.0)
+      self.assertLessEqual(zero, 5, msg=f"{kph} km/h: the credit is gone within 5 sends (10 frames)")
+      cbs = [f[2] for f in at_full]
+      self.assertEqual(set(cbs[zero:]), {self.FULL}, msg=f"{kph} km/h")
+      self.assertEqual(cbs, sorted(cbs), msg=f"{kph} km/h: the ramp only climbs")
+      self.assertGreaterEqual(cbs[0], before, msg=f"{kph} km/h")
       self.assertEqual(frames[-1][2], self.FULL, msg=f"{kph} km/h")
 
   def test_with_the_tuner_on_the_learned_gain_still_applies(self):
     # the release limiter, the soft stop and the brake learner are built; full brake is 0.99 x gain x 256, clipped to 255
-    for kph in (30, 60, 100):
+    for kph in (30, 60, 100, 126):
       cc_obj = _elesys_long_controller(tuner=True)
       frames = _brake_frames(cc_obj, kph, [-4.0] * 300)
       gain = cc_obj.dynamic_tuner._shadow_brake_gain
       self.assertEqual(frames[-1][2], int(np.clip(0.99 * gain * 256, 0, 255)), msg=f"{kph} km/h, gain {gain}")
+      self.assertTrue(252 <= frames[-1][2] <= 255, msg=f"{kph} km/h: {frames[-1][2]}")
       self.assertGreater(frames[-1][2], int((0.99 - _wind_brake(kph)) * gain * 256), msg=f"{kph} km/h")
 
   def test_brake_last_reaches_the_threshold_only_at_a_full_request(self):
@@ -1640,13 +1670,85 @@ class TestElesysFullBrakeNoWindCredit(unittest.TestCase):
       self.assertEqual(last >= ELESYS_FULL_BRAKE, full, msg=f"request {req}: brake_last {last!r}")
     self.assertLess(ELESYS_FULL_BRAKE, 0.99)
 
+  def test_entry_is_a_ramp_not_a_step(self):
+    # a request ramped into full brake: brake_last climbs 0.01 per frame (about 5 counts a send), and the credit now
+    # leaves at 0.2 of itself per send (7.7 counts at most), so no send rises more than 10 counts; the step rule's last
+    # send rose by the whole credit (31 at 100 km/h, 39 at 126)
+    accels = list(np.linspace(-1.0, -3.0, 400)) + [-3.0] * 100
+    for tuner in (False, True):
+      for kph in (30, 60, 100, 126):
+        frames = _brake_frames(_elesys_long_controller(tuner=tuner), kph, accels)
+        cbs = _cbs(frames)
+        self.assertLessEqual(np.diff(cbs).max(), 10, msg=f"tuner {tuner} {kph} km/h")
+        self.assertTrue(252 <= cbs[-1] <= 255, msg=f"tuner {tuner} {kph} km/h: {cbs[-1]}")
+        first = next(k for k, f in enumerate(frames) if f[1] >= self.F)
+        self.assertEqual(cbs[first + 5], cbs[-1], msg=f"tuner {tuner} {kph} km/h: at the ceiling 5 sends after full")
+        if kph >= 100:
+          with _step_rule():
+            step = _cbs(_brake_frames(_elesys_long_controller(tuner=tuner), kph, accels))
+          self.assertGreaterEqual(np.diff(step).max(), 30, msg=f"tuner {tuner} {kph} km/h: the step this replaces")
+          self.assertEqual(step[-1], cbs[-1])
+
+  def test_exit_just_below_the_ceiling_is_a_ramp_not_a_step(self):
+    # from full brake to a request of 0.975 (brake_last 0.985) at 126 km/h: the credit (38 counts) comes back over 5
+    # sends, not in one; after that, with the tuner off, every send is the old rule's again
+    accels = [-4.0] * 300 + [-2.535] * 100
+    for tuner in (True, False):
+      frames = _brake_frames(_elesys_long_controller(tuner=tuner), 126, accels)
+      cbs = _cbs(frames)
+      self.assertLessEqual(-np.diff(cbs[140:]).min(), 10, msg=f"tuner {tuner}")
+      self.assertEqual(frames[-1][5], 1.0, "the scale is back at exactly 1.0")
+      with _step_rule():
+        step = _cbs(_brake_frames(_elesys_long_controller(tuner=tuner), 126, accels))
+      self.assertGreaterEqual(-np.diff(step[140:]).min(), 32, msg=f"tuner {tuner}: the step this replaces")
+    with _old_rule():
+      old = _brake_frames(_elesys_long_controller(tuner=False), 126, accels)
+    back = next(k for k in range(150, len(frames)) if frames[k][5] == 1.0)
+    self.assertLessEqual(back, 156, "the credit is fully back within 10 frames")
+    self.assertEqual([f[3] for f in frames[back:]], [f[3] for f in old[back:]])
+
+  def test_a_request_hovering_at_the_ceiling_makes_no_large_steps(self):
+    # a request held at the boundary with noise (0.02-0.05 m/s^2) used to switch the credit in and out whole, sending
+    # steps of 30-43 counts at 110-126 km/h; the ramp keeps every send to 20 or less, within 8 counts (one send of the
+    # ramp) of the old rule's own largest noise step, and cuts the sends stepping 10 counts or more to under half of
+    # the step rule's (0-23% on these traces)
+    for kph in (60, 110, 126):
+      for seed, (mean, sigma) in enumerate(((-2.62, 0.02), (-2.60, 0.05), (-2.58, 0.03), (-2.57, 0.05))):
+        accels = _hover_accels(mean, sigma, seed)
+        new = np.abs(np.diff(_cbs(_brake_frames(_elesys_long_controller(tuner=True), kph, accels))[100:]))
+        with _old_rule():
+          old = np.abs(np.diff(_cbs(_brake_frames(_elesys_long_controller(tuner=True), kph, accels))[100:]))
+        with _step_rule():
+          step = np.abs(np.diff(_cbs(_brake_frames(_elesys_long_controller(tuner=True), kph, accels))[100:]))
+        msg = f"{kph} km/h {mean}+-{sigma}: new max {new.max()} old {old.max()} step {step.max()}"
+        self.assertLessEqual(new.max(), 20, msg=msg)
+        self.assertLessEqual(new.max(), old.max() + 8, msg=msg)
+        self.assertLessEqual((new >= 10).sum() * 2, max((step >= 10).sum(), 2), msg=msg)
+        if kph >= 110 and sigma >= 0.03:
+          self.assertGreaterEqual(step.max(), 30, msg=msg)
+
   @staticmethod
-  def _trace(rng):
+  def _trace(rng, phases=None):
     # light, firm, full, part release, release, full again, firm, release: every phase long enough to settle
-    phases = [(-0.5, 200), (-1.8, 200), (-4.0, 250), (-2.4, 120), (0.3, 120), (-3.5, 250), (-1.5, 300), (0.3, 100)]
+    phases = phases or [(-0.5, 200), (-1.8, 200), (-4.0, 250), (-2.4, 120), (0.3, 120), (-3.5, 250), (-1.5, 300), (0.3, 100)]
     return [a + float(rng.normal(0, 0.05)) for a, n in phases for _ in range(n)]
 
-  def test_every_frame_below_full_brake_is_unchanged(self):
+  def test_an_application_that_never_reaches_full_brake_is_bit_identical(self):
+    rng = np.random.default_rng(1012)
+    phases = [(-0.5, 200), (-1.8, 200), (-2.2, 250), (-1.2, 120), (0.3, 120), (-2.1, 250), (-1.5, 300), (0.3, 100)]
+    for tuner in (False, True):
+      for kph in (15, 45, 80, 126):
+        accels = self._trace(rng, phases)
+        new = _brake_frames(_elesys_long_controller(tuner=tuner), kph, accels)
+        with _old_rule():
+          old = _brake_frames(_elesys_long_controller(tuner=tuner), kph, accels)
+        self.assertTrue(all(f[1] < self.F and f[5] == 1.0 for f in new), msg=f"tuner {tuner} {kph} km/h")
+        self.assertEqual([f[3] for f in new], [f[3] for f in old], msg=f"tuner {tuner} {kph} km/h")
+        self.assertGreater(max(f[2] for f in new), 170, msg="the trace brakes firmly")
+
+  def test_every_frame_with_the_full_credit_is_unchanged(self):
+    # tuner off (no release limiter, no learner): a send differs from the old rule only while the scale is below 1.0,
+    # and there it lies between the old command and full brake
     rng = np.random.default_rng(20261012)
     for kph in (15, 45, 80, 110):
       accels = self._trace(rng)
@@ -1654,32 +1756,36 @@ class TestElesysFullBrakeNoWindCredit(unittest.TestCase):
       with _old_rule():
         old = _brake_frames(_elesys_long_controller(tuner=False), kph, accels)
       self.assertEqual(len(new), len(old))
-      n_full = 0
-      for (i, bl, cb, dat, _), (_, bl_o, cb_o, dat_o, _) in zip(new, old, strict=True):
+      n_full = n_ramp = 0
+      for (i, bl, cb, dat, _, sc), (_, bl_o, cb_o, dat_o, *_) in zip(new, old, strict=True):
         self.assertEqual(bl, bl_o)
-        if bl >= 0.99 - 1e-6:
+        if sc == 1.0:
+          self.assertEqual(dat, dat_o, msg=f"{kph} km/h frame {i}: {cb_o} -> {cb} with the full credit")
+        elif sc == 0.0:
           n_full += 1
-          self.assertEqual(cb, self.FULL)
-          self.assertGreaterEqual(cb, cb_o)
+          self.assertEqual(cb, self.FULL, msg=f"{kph} km/h frame {i}")
         else:
-          self.assertEqual(dat, dat_o, msg=f"{kph} km/h frame {i}: {cb_o} -> {cb} below full brake")
+          n_ramp += 1
+          self.assertTrue(cb_o <= cb <= self.FULL, msg=f"{kph} km/h frame {i}: {cb_o} -> {cb} in the ramp ({sc})")
       self.assertGreater(n_full, 100, msg="the trace must reach full brake")
+      self.assertLessEqual(n_ramp, 4 * 5, msg="two episodes, each at most 5 sends in and 5 out")
 
-  def test_with_the_tuner_on_only_the_limiter_and_the_learner_carry_it_past_full_brake(self):
-    # tuner on, two things can carry the change past the last full-brake frame: the 32 counts/frame release limiter
-    # walking down from the higher command, and the brake learner, whose error is weighted by the commanded fraction
-    # (0.99 at full brake now, not 0.99 - wind). Before the first full-brake frame everything is identical.
+  def test_with_the_tuner_on_only_the_ramp_the_limiter_and_the_learner_carry_it_past_full_brake(self):
+    # tuner on, three things can carry the change past the last full-brake frame: the credit's ramp back (10 frames), the
+    # 32 counts/frame release limiter walking down from the higher command, and the brake learner, whose error is
+    # weighted by the commanded fraction (0.99 at full brake now, not 0.99 - wind). Before the first full-brake frame
+    # everything is identical.
     rng = np.random.default_rng(7)
     for kph in (15, 45, 80, 110):
       accels = self._trace(rng)
       new = _brake_frames(_elesys_long_controller(tuner=True), kph, accels)
       with _old_rule():
         old = _brake_frames(_elesys_long_controller(tuner=True), kph, accels)
-      first_full = next(k for k, f in enumerate(new) if f[1] >= 0.99 - 1e-6)
+      first_full = next(k for k, f in enumerate(new) if f[1] >= self.F)
       self.assertEqual([f[3] for f in new[:first_full]], [f[3] for f in old[:first_full]])
       for k in range(first_full, len(new)):
-        (i, bl, cb, dat, pf), (_, _, cb_o, dat_o, pf_o) = new[k], old[k]
-        if bl >= 0.99 - 1e-6 or dat == dat_o:
+        (i, _, cb, dat, pf, sc), (_, _, cb_o, dat_o, pf_o, _) = new[k], old[k]
+        if sc < 1.0 or dat == dat_o:
           continue
         walking = new[k - 1][2] - 32 == cb          # the release limiter is what set this frame
         self.assertTrue(walking or pf != pf_o, msg=f"{kph} km/h frame {i}: {cb_o} -> {cb}, factor {pf_o} -> {pf}")
@@ -1700,6 +1806,21 @@ class TestElesysFullBrakeNoWindCredit(unittest.TestCase):
     self.assertLessEqual(max(a - b for a, b in zip(old, old[1:], strict=False)), 32)
     self.assertEqual(cbs[-60:], old[-60:], "released, both are 0")
 
+  def test_disengage_resets_the_scale(self):
+    # full brake, 6 frames disengaged, then re-engaged below full brake: the scale is 1.0 from the first disengaged frame,
+    # so the new application starts with the whole credit; tuner off, every send from the disengagement on is the old
+    # rule's
+    accels = [-4.0] * 306 + [-2.0] * 200
+    active = [True] * 300 + [False] * 6 + [True] * 200
+    for tuner in (True, False):
+      frames = _brake_frames(_elesys_long_controller(tuner=tuner), 110, accels, long_active=active)
+      self.assertEqual(frames[149][5], 0.0, "at full brake before the disengagement")
+      self.assertTrue(all(f[5] == 1.0 for f in frames[150:]), msg=f"tuner {tuner}")
+      self.assertTrue(all(f[2] == 0 for f in frames[150:153]), msg=f"tuner {tuner}: no brake while disengaged")
+    with _old_rule():
+      old = _brake_frames(_elesys_long_controller(tuner=False), 110, accels, long_active=active)
+    self.assertEqual([f[3] for f in frames[150:]], [f[3] for f in old[150:]])
+
   def test_non_finite_speed_at_full_brake_still_sends(self):
     # a NaN vEgo must not raise in update() (no 0x1FA means a VSA BRAKE_ERROR a second later): a frame every 20 ms
     frames = _brake_frames(_elesys_long_controller(tuner=True), float("nan"), [-4.0] * 300)
@@ -1713,16 +1834,38 @@ class TestElesysFullBrakeNoWindCredit(unittest.TestCase):
     on = _as_tuple(packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 1}))[1]
     mask = bytes(a ^ b for a, b in zip(off[:7], on[:7], strict=True))
     frames = _brake_frames(_elesys_long_controller(tuner=True), 60, [-4.0] * 300)
-    full = [f[3] for f in frames if f[1] >= 0.99 - 1e-6]
+    full = [f[3] for f in frames if f[1] >= self.F]
     self.assertTrue(full and all(any(x & m for x, m in zip(d[:7], mask, strict=True)) for d in full),
                     msg="C1b runs the pump continuously above 200 counts while moving")
 
-  def test_the_rule(self):
-    from opendbc.car.honda.carcontroller import elesys_wind_credit
-    self.assertEqual(elesys_wind_credit(0.99, 0.067), 0.0)
-    self.assertEqual(elesys_wind_credit(0.98, 0.067), 0.067)
-    self.assertEqual(elesys_wind_credit(0.0, 0.001), 0.001)
-    self.assertTrue(np.isnan(elesys_wind_credit(float("nan"), float("nan"))), "NaN keeps the existing fallback")
+  def test_the_scale(self):
+    from opendbc.car.honda.carcontroller import ELESYS_CREDIT_RAMP, elesys_wind_credit_scale as scale_of
+    self.assertEqual(ELESYS_CREDIT_RAMP, 0.1)
+    # out: 0.1 per frame, exactly 0 on the 10th frame and never below it
+    s, seq = 1.0, []
+    for _ in range(12):
+      s = scale_of(0.99, s, True)
+      seq.append(s)
+    self.assertAlmostEqual(seq[0], 0.9)
+    self.assertGreater(seq[8], 0.0)
+    self.assertEqual(seq[9:], [0.0, 0.0, 0.0])
+    self.assertTrue(all(0.0 <= b <= a and a - b <= 0.1 + 1e-12 for a, b in zip([1.0] + seq, seq, strict=False)))
+    # back: the same rate, and exactly 1.0 again on the 10th frame
+    for bl in (0.98, 0.5, 0.0, float("nan")):
+      s, seq = 0.0, []
+      for _ in range(12):
+        s = scale_of(bl, s, True)
+        seq.append(s)
+      self.assertAlmostEqual(seq[0], 0.1)
+      self.assertLess(seq[8], 1.0)
+      self.assertEqual(seq[9:], [1.0, 1.0, 1.0], msg=f"brake_last {bl}")
+    # below the ceiling it is exactly 1.0, so the credit is untouched
+    self.assertIs(type(scale_of(0.98, 1.0, True)), float)
+    self.assertEqual(scale_of(0.98, 1.0, True), 1.0)
+    self.assertEqual(scale_of(0.989, 1.0, True), 1.0)
+    # disengaged: 1.0 from anywhere
+    for s in (0.0, 0.3, 1.0):
+      self.assertEqual(scale_of(0.99, s, False), 1.0)
 
   def test_other_hondas_keep_the_credit(self):
     cc_obj = _controller(NIDEC_CAR)
@@ -1730,6 +1873,7 @@ class TestElesysFullBrakeNoWindCredit(unittest.TestCase):
     frames = _brake_frames(cc_obj, 60, [-6.0] * 300)
     self.assertGreater(frames[-1][1], 0.99 - 1e-6)
     self.assertEqual(frames[-1][2], int((0.99 - _wind_brake(60)) * 256), "upstream's credit at full brake")
+    self.assertTrue(all(f[5] == 1.0 for f in frames), "the scale is never stepped on another Honda")
 
 
 class TestElesysSteeringPressedDebounce(unittest.TestCase):
