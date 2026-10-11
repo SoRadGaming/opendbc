@@ -330,6 +330,42 @@ def linbus_gateway_actuating(CS) -> bool:
     return True
 
 
+# FORK(HONDA_ELESYS): the board's lane-change ceiling, as a fraction of openpilot's full scale. While a turn
+# signal is on, and for GW_BLINKER_DWELL_MS (500 ms) after it goes off, the board clamps its command to
+# GW_BLINK_CEIL_PCT = 50 % of its authority (EPS-LKAS src/gw_active.c, the S8-1 ceiling) and reports it on
+# 0x704 INH_BLINKER. 0x0E4's full scale maps onto that same authority (2560 -> GW_LIN_AUTHORITY), so the
+# ceiling is +-0.5 of openpilot's torque whatever the authority is. Change this only together with the board.
+#
+# Unreported, the cap was invisible: carOutput said 1.0 while the EPS got 0.5, steer_limited_by_safety stayed
+# false, so openpilot counted the board's cap as its own saturation and after 0.8 s lac.saturated set. Routes
+# 120@486.24 and 121@330.31 pinned the output at 1.0 for 0.88 s and 1.09 s under the cap before it did, and the
+# board turned that into its "steer required" lamp and chime. Reported, controlsd sees the limit the way it
+# sees the rate limiter: the integrator holds and the saturation timer runs down.
+#
+# The ceiling, NOT the board's reported command (0x704 CMD_APPLY_STEER / CMD_TARGET). The ceiling is exact and
+# known here (CMD_APPLY_STEER never exceeded 80 under INH_BLINKER on 10f/115/120/121). The command is a 10 Hz frame
+# a cycle late, quantised to 2 counts in CMD_TARGET (0.0125, over controlsd's 0.01 threshold), and scaled by the
+# board's soft start and driver fade: reported as carOutput it would have tripped steer_limited_by_safety on 11-27 %
+# of actuating, non-blinker 0x704 frames on those routes and frozen the integrator in ordinary driving. The driver
+# fade starts at 20 counts, where steeringPressed already freezes the integrator; the blinker ceiling was the one
+# limit openpilot could not see.
+GW_BLINK_CEIL = 0.5
+
+
+# FORK(HONDA_ELESYS): is the board's blinker ceiling in force? CarStateSP.linbusGateway.blinkerCapped is the
+# latest FRESH 0x704's INH_BLINKER (carstate_ext; false once 0x704 is stale, and false before the first one).
+# Same contract as linbus_gateway_actuating(): used only to choose what is REPORTED, never raises, and
+# anything missing or odd answers False - no clip, which is what was reported before this existed.
+def linbus_gateway_blinker_capped(CS) -> bool:
+  try:
+    gw = getattr(getattr(CS, "out_sp", None), "linbusGateway", None)
+    if gw is None:
+      return False
+    return bool(getattr(gw, "blinkerCapped", False))
+  except Exception:
+    return False
+
+
 class CarController(CarControllerBase, MadsCarController, GasInterceptorCarController, IntelligentCruiseButtonManagementInterface):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
@@ -670,8 +706,14 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # torque bar draws. While the board is not steering nothing follows 0x0E4, so 0.0 is the truth.
     # Only the report changes: last_torque, the rate limiter, apply_torque, torqueOutputCan and 0x0E4
     # are untouched, so the wire is bit-identical and the ramp resumes from where it was.
-    if self.CP.carFingerprint in HONDA_ELESYS and not linbus_gateway_actuating(CS):
-      new_actuators.torque = 0.0
+    # Under the board's blinker ceiling (GW_BLINK_CEIL above) the report is clipped to what the board can
+    # deliver, sign kept - the same report-only rule, so 0x0E4 is still last_torque and the ramp out of the
+    # ceiling is unchanged.
+    if self.CP.carFingerprint in HONDA_ELESYS:
+      if not linbus_gateway_actuating(CS):
+        new_actuators.torque = 0.0
+      elif linbus_gateway_blinker_capped(CS):
+        new_actuators.torque = float(np.clip(self.last_torque, -GW_BLINK_CEIL, GW_BLINK_CEIL))
     new_actuators.torqueOutputCan = apply_torque
 
     self.dynamic_tuner.persist(self.frame)

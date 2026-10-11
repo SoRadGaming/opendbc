@@ -151,6 +151,9 @@ class CarControlSP:
     integrator: float = auto_field()
     saturated: bool = auto_field()
     integratorFrozen: bool = auto_field()
+    # FORK(LKAS-GATEWAY): selfdrived's steerSaturated conditions on top of saturated (controlsd_ext.py,
+    # steer_saturated.py). What 0x500 OP_SATURATED carries. cereal/custom.capnp steerSaturated @3.
+    steerSaturated: bool = auto_field()
 
   @auto_dataclass
   class Param:
@@ -220,3 +223,6 @@ class CarStateSP:
     # GW_STEER_GRANT (0x70B): +1 per frame that actually arrived (grantValid also covers the
     # 500 ms after one). Same lockstep rule: cereal/custom.capnp grantSeq @27.
     grantSeq: int = auto_field()
+    # GW_ACTIVE (0x704) INH_BLINKER from a fresh frame: the board's 50 % lane-change ceiling is in force.
+    # Same lockstep rule: cereal/custom.capnp blinkerCapped @28.
+    blinkerCapped: bool = auto_field()

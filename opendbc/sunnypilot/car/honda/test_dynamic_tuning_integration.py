@@ -338,9 +338,15 @@ if sp_frames:
     f = sp_frame(cc_sp_v2, 100)
     check("v2 INTEGRATOR is i*100 as int8 (+0.65 -> 65)",
           f is not None and int.from_bytes(f[3:4], "big", signed=True) == 65, f"{f and f[3]}")
-    check("v2 OP_SATURATED (b4.0) and INTEGRATOR_FROZEN (b4.1) set", f is not None and (f[4] & 0x03) == 0x03, f"{f and f[4]:#04x}")
+    # OP_SATURATED is selfdrived's steerSaturated (lateralControl.steerSaturated), NOT the raw timer
+    check("v2 raw saturated alone does NOT set OP_SATURATED (b4.0); INTEGRATOR_FROZEN (b4.1) set",
+          f is not None and (f[4] & 0x03) == 0x02, f"{f and f[4]:#04x}")
+    cc_sp_v2.lateralControl.steerSaturated = True
+    f = sp_frame(cc_sp_v2, 150)
+    check("v2 OP_SATURATED (b4.0) follows steerSaturated", f is not None and (f[4] & 0x03) == 0x03, f"{f and f[4]:#04x}")
     cc_sp_v2.lateralControl.integrator = -0.42
     cc_sp_v2.lateralControl.saturated = False
+    cc_sp_v2.lateralControl.steerSaturated = False
     cc_sp_v2.lateralControl.integratorFrozen = False
     f = sp_frame(cc_sp_v2, 200)
     check("v2 INTEGRATOR negative (-0.42 -> -42)",
@@ -367,10 +373,12 @@ CP8_SP = CarInterface.get_non_essential_params_sp(CP8, PLATFORM)
 CI8 = CarInterface(CP8, CP8_SP)
 
 
-def gw_frame(engaged, dry_run):
+def gw_frame(engaged, dry_run, blinker=0):
   d = bytearray(8)
   if dry_run:
     d[5] |= 0x80      # DRY_RUN: byte 5 bit 7
+  if blinker:
+    d[5] |= 0x20      # INH_BLINKER: byte 5 bit 5 (the board's inhibit 0x20)
   if engaged:
     d[6] |= 0x01      # ENGAGED: byte 6 bit 0
   return (0x704, bytes(d), 0)
@@ -399,6 +407,14 @@ g = gw_step(52, [])
 check("stale after 50 frames with no GW_ACTIVE -> not actuating", not g.valid and not g.actuating)
 g = gw_step(53, [gw_frame(1, 0)])
 check("recovers the frame the board speaks again", g.valid and g.actuating)
+check("no INH_BLINKER -> not blinkerCapped", not g.blinkerCapped)
+g = gw_step(54, [gw_frame(1, 0, blinker=1)])
+check("INH_BLINKER (byte 5 bit 5) -> blinkerCapped, still actuating", g.blinkerCapped and g.actuating and not g.dryRun)
+for i in range(55, 55 + 49):
+  g = gw_step(i, [])
+check("blinkerCapped held one frame inside the window", g.valid and g.blinkerCapped)
+g = gw_step(104, [])
+check("stale 0x704 -> not blinkerCapped (no clip, the old report)", not g.valid and not g.blinkerCapped)
 
 # An absent board must NOT cost openpilot its CAN. GW_ACTIVE is registered liveness-exempt:
 # with no frame ever received, its MessageState still reports valid, so it can never be the

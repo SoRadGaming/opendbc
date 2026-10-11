@@ -75,26 +75,30 @@ the 2026-09 merge.
     a `FORK(HONDA_ELESYS)` hunk that reports `0.0` while `CS.out_sp.linbusGateway.actuating` is False. torqued, the
     `steer_limited_by_safety` check in controlsd and the torque bar read it; `last_torque`, the rate limiter,
     `torqueOutputCan` and `0x0E4` are untouched. A missing or odd `out_sp` answers "actuating", i.e. the old report,
-    so `update()` cannot raise on it;
+    so `update()` cannot raise on it. Since 2026-10-12 (lcalert) the same hunk clips the report to `GW_BLINK_CEIL`
+    (0.5, the board's `GW_BLINK_CEIL_PCT` 50) while `linbus_gateway_blinker_capped(CS)` (`0x704 INH_BLINKER` from a
+    fresh frame); missing or odd state answers "not capped", the old report;
   * `SP_HUD_STATUS` sent on bus 0 with `lat_ready = CC_SP.mads.enabled or CC.latActive` and `op_state`;
   * `LKAS_HUD` is not sent. The board's Stage 10 image owns `0x33D` on bus 0 (board `df42a0d`), and openpilot reads `LKAS_PROBLEM` back from it.
 * **`opendbc/car/honda/hondacan.py`** (0): `create_steering_control(..., serial_gateway, ldw_left, ldw_right)`,
-  `SP_HUD_PROTOCOL_VERSION = 3`, `SP_OP_STATE_*`, `SP_HUD_MAX_TORQUE = 0`, `create_sp_hud_status()`.
+  `SP_HUD_PROTOCOL_VERSION = 3`, `SP_OP_STATE_*`, `SP_HUD_MAX_TORQUE = 0`, `create_sp_hud_status()`. Since
+  2026-10-12 `OP_SATURATED` carries `CC_SP.lateralControl.steerSaturated` (selfdrived's conditions), not `saturated`.
 * **`opendbc/car/honda/carstate.py`** (0): registers `GW_ACTIVE`, `GW_STEER_GRANT` and `EPS_LIN_RAW`
   liveness-exempt, and changes the call to `CarStateExt.update(self, ret, ret_sp, can_parsers)`.
 * `opendbc/sunnypilot/car/honda/carstate_ext.py` (0):
   * `_update_linbus_gateway()` decodes `0x704`. It sets `linbusGateway.present = True` every frame on every
-    `HONDA_ELESYS` car, board or no board;
+    `HONDA_ELESYS` car, board or no board; since 2026-10-12 also `blinkerCapped` (`INH_BLINKER` and fresh);
   * `_update_linbus_grant()` decodes `0x70B`, and since 2026-10-06 counts the frames that arrive (`grantSeq`, one
     step per new frame; MADS ends its driver-override pause only when it moves);
   * `_update_driver_torque_validity()` and `_eps_lin_driver_torque_valid()` substitute `0x700 EPS_LIN_RAW` when
     `0x18F` is latched (`SERIAL_TORQUE_TO_CAN = -64.5`);
   * constants `LINBUS_*_STALE_FRAMES`, `STEER_TORQUE_STALE_FRAMES`, `GRANT_STATES_STEERING`, `GRANT_RETRY_KEY_CYCLE`.
 * `opendbc/car/structs.py` (0): `CarControlSP.LateralControl`, `CarStateSP.driverTorqueStale`, and the
-  `CarStateSP.LinbusGateway` control fields (since 2026-10-06 also `grantSeq`, sunnypilot `custom.capnp` `@27`). (Area C, 2026-10-03: `CarStateSP.vsaFault` and `vsaStoredFault`; the names
+  `CarStateSP.LinbusGateway` control fields (since 2026-10-06 also `grantSeq`, sunnypilot `custom.capnp` `@27`; since
+  2026-10-12 `blinkerCapped` `@28` and `CarControlSP.LateralControl.steerSaturated` `@3`). (Area C, 2026-10-03: `CarStateSP.vsaFault` and `vsaStoredFault`; the names
   must match sunnypilot's `custom.capnp` `@3`/`@4`, pinned by its `test_vsa_fault_alert.py`.)
 * `opendbc/dbc/generator/honda/_sunnypilot_linbus_gw.dbc` (0): `0x500 SP_HUD_STATUS`, `0x700 EPS_LIN_RAW`,
-  `0x704 GW_ACTIVE`, `0x70B GW_STEER_GRANT`. It must not use a signal named `COUNTER` or `CHECKSUM` on the board's
+  `0x704 GW_ACTIVE` (`ENGAGED`, `DRY_RUN`, since 2026-10-12 `INH_BLINKER`), `0x70B GW_STEER_GRANT`. It must not use a signal named `COUNTER` or `CHECKSUM` on the board's
   frames (a `honda_` DBC makes the parser validate a Honda checksum on those names); `0x500`, which openpilot sends,
   does use them.
 * `opendbc/dbc/generator/honda/_steering_control_e.dbc` (0): `0x0E4` byte 2 (`LDW_RIGHT`, `LDW_LEFT`,

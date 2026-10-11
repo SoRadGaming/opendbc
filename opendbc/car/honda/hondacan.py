@@ -367,7 +367,13 @@ def create_sp_hud_status(packer, bus, CC, CC_SP, hud_control, alert_steer_requir
     # saturation -- openpilot was NOT saturated in the curve where i sat at +0.65).
     # int8, x100, clipped: +-1.27 covers the PID's whole range on this car.
     'INTEGRATOR': max(-127, min(127, int(round(CC_SP.lateralControl.integrator * 100)))),
-    'OP_SATURATED': CC_SP.lateralControl.saturated,
+    # openpilot's own "Turn Exceeds Steering Limit" decision, not the raw saturation timer: steerSaturated is
+    # lac.saturated AND no steeringPressed in 2 s AND |desired lat accel| > 1.0 AND undershooting, exactly
+    # selfdrived's conditions (steer_saturated.py, computed in controlsd_ext). The board's only use of this bit
+    # is its HUD alarm (gw_active.c, hud.c case ii), and the raw timer made it alarm on lane changes where
+    # openpilot itself never would: routes 115/120/121, 195 saturated frames, every one within 2 s of a nudge
+    # and none over 1.0 m/s^2 - 120@486.24 and 121@330.31 lit RDM_HUD with a held chime.
+    'OP_SATURATED': CC_SP.lateralControl.steerSaturated,
     # the acknowledgement: 1 while the gateway hold on the integrator is active. If the
     # board sees this low while it is not engaged, sunnypilot is not running the protocol.
     'INTEGRATOR_FROZEN': CC_SP.lateralControl.integratorFrozen,
