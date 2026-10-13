@@ -277,6 +277,28 @@ the 2026-09 merge.
   `fixtures/vsa_fault_frames.json.gz`, through the real `CarInterface`), `car/honda/tests/test_elesys_radar.py`
   (2026-10-09; the radar's `REL_SPEED` scale on logged frames of route 113, through the real `RadarInterface`).
 
+### D. Brake-lamp relay board (BLR-v1), 2026-10-14
+
+A second aftermarket board, which lights the brake lamps from openpilot's own `0x1FA BRAKE_LIGHTS` bit (the car
+ignores it) and reports itself on bus 0 at `0x620`-`0x62F`. Diagnostics only: **nothing it sends may feed
+`brakePressed`, `brakeLights`, a controls decision or panda safety** (the board repo's `blr/docs/DESIGN.md` E.7), and
+`test_blr.py` checks it on the running code and in the source. Markers `FORK(BRAKE-LAMP-RELAY)`.
+
+* `opendbc/dbc/generator/honda/_sunnypilot_blr.dbc` (new): `BLR_STATUS` `0x620`, `BLR_ANALOG` `0x621`, `BLR_HEALTH`
+  `0x622`, `BLR_COUNTERS` `0x623`, `BLR_COUNTERS2` `0x624`, `BLR_VERSION` `0x627`, `BLR_BUILD` `0x62F` - cut verbatim
+  from the firmware's `blr/dbc/blr.dbc` (board repo `S:/Software/EPS-LKAS`, branch `blr-v1`, read at `31c138f`); the
+  boot channel `0x628`-`0x62A` is not copied. All Intel (`@1+`); no `COUNTER`/`CHECKSUM` names. Imported by
+  `honda_accord_au_2015_can.dbc` after `_sunnypilot_linbus_gw.dbc`. **Change the firmware's file first, then copy.**
+* **`opendbc/car/honda/carstate.py`** (0): registers the seven liveness-exempt (`float("nan")`), `HONDA_ELESYS` only.
+* `opendbc/sunnypilot/car/honda/carstate_ext.py` (0): `_update_blr(ret_sp, cp)` - never handed `ret`. `0x620` and
+  `0x621` are valid while less than 1 s old (`BLR_*_STALE_FRAMES = 100`, frame-counted); `0x627`/`0x62F` latch on
+  first sight like `_update_linbus_firmware()`. Never raises: a failure leaves the defaults, logged once.
+  `BLR_FAULT_SIGNALS` (0x620 bits 16-23 in order) and `BLR_LATCH_REASONS` are imported by sunnypilot's `blr_board.py`.
+* `opendbc/car/structs.py` (0): `CarStateSP.brakeLampRelay` / `BrakeLampRelay`, 23 fields; the names and order must
+  match sunnypilot's `custom.capnp` `brakeLampRelay @5` (pinned by sunnypilot `test_blr_board.py`).
+* Tests: `opendbc/sunnypilot/car/honda/test_blr.py` with `fixtures/blr_golden_frames.json`, a byte-for-byte copy of
+  the firmware's `blr/tools/golden_frames.json` (the bytes the shipping `blr_pack()` produces).
+
 ## Merging upstream: the short version
 
 Merge opendbc **before** sunnypilot, push `sp-master`, and only then move sunnypilot's submodule pointer.
@@ -320,6 +342,7 @@ python -m unittest opendbc.car.honda.tests.test_elesys_stock_acc                
 python -m unittest opendbc.car.honda.tests.test_elesys_radar                              # 4 tests: the radar's REL_SPEED scale
 python -m unittest opendbc.sunnypilot.car.honda.test_shadow_learn                          # 21 tests: the shadow learners
 python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault
+python -m unittest opendbc.sunnypilot.car.honda.test_blr                                   # 14 tests: the brake-lamp board's telemetry
 python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 1091 run, OK (skipped=73) (2026-10-05, stock ACC mode + batch 2)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
 python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 143 tests (2026-10-05, stock ACC mode + batch 2), including the integration script

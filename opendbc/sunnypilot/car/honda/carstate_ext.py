@@ -68,6 +68,20 @@ STEERING_PRESSED_MIN_COUNT = 5
 # "fraction of the gauge", not fraction of the tank. See _nidec_scm_group_a_elesys.dbc.
 FUEL_LEVEL_FULL = 105.0
 
+# FORK(BRAKE-LAMP-RELAY): the BLR-v1 brake-lamp board (_sunnypilot_blr.dbc). BLR_STATUS (0x620) is 10 Hz plus on every
+# change, and its fields are valid while the last one is less than 1 s old: 100 of carstate's 100 Hz frames. BLR_ANALOG
+# (0x621) is 5 Hz and gets the same second.
+BLR_STATUS_STALE_FRAMES = 100
+BLR_ANALOG_STALE_FRAMES = 100
+
+# 0x620 bits 16-23, in bit order: carStateSP.brakeLampRelay.faults bit i is BLR_FAULT_SIGNALS[i], the same byte the
+# board ORs into 0x623 FAULTS_EVER. F_ are trips, D_ are diagnoses (blr/docs/BLR-CAN.md section 3).
+BLR_FAULT_SIGNALS = ("F_U4_NOT_SINKING", "F_U4_LIMITING", "D_LAMP_DARK", "D_COIL_OPEN", "D_LAMP_WITHOUT_US",
+                     "D_SENSE_MID", "D_EXT_SINK_HELD", "F_FEEDBACK")
+
+# 0x620 LATCH_REASON (the DBC's VAL_ table; 0 is none). A latch holds until the board loses power.
+BLR_LATCH_REASONS = {1: "U4", 2: "FEEDBACK", 3: "CLOCK", 4: "PIN_STUCK_HIGH"}
+
 
 class CarStateExt:
   def __init__(self, CP, CP_SP):
@@ -85,6 +99,12 @@ class CarStateExt:
     self._eps_lin_ts = 0
     self._vsa_fault = VsaFaultMonitor()      # FORK(HONDA_ACCORD_9G_AU)
     self._vsa_fault_error_logged = False
+    # FORK(BRAKE-LAMP-RELAY): _update_blr()'s frame-counted staleness, as the gateway's above
+    self._blr_status_stale = BLR_STATUS_STALE_FRAMES
+    self._blr_status_ts = 0
+    self._blr_analog_stale = BLR_ANALOG_STALE_FRAMES
+    self._blr_analog_ts = 0
+    self._blr_error_logged = False
     # FORK(HONDA_ACCORD_9G_AU): 0x17C PEDAL_GAS, the pedal the PCM sees, for the shadow launch learner's pedal
     # confirmation (shadow_learn.py). Not a CarState field; nan until read, and on other cars.
     self.pcm_pedal_gas = float("nan")
@@ -98,6 +118,7 @@ class CarStateExt:
       self._update_linbus_gateway(ret_sp, cp)
       self._update_linbus_grant(ret_sp, cp)
       self._update_linbus_firmware(ret_sp, cp)
+      self._update_blr(ret_sp, cp)  # FORK(BRAKE-LAMP-RELAY): ret_sp only - never ret
       self._update_driver_torque_validity(ret, ret_sp, cp)
       ret.fuelGauge = min(cp.vl["SCM_BUTTONS"]["FUEL_LEVEL"] / FUEL_LEVEL_FULL, 1.0)
       self.pcm_pedal_gas = float(cp.vl["POWERTRAIN_DATA"]["PEDAL_GAS"])  # FORK(HONDA_ACCORD_9G_AU): shadow_learn.py
@@ -262,6 +283,81 @@ class CarStateExt:
       ret_sp.linbusGateway.fwReadOnly = bool(b["BUILD_READONLY"])
       ret_sp.linbusGateway.boardUid = int(b["BOARD_UID"])
       ret_sp.linbusGateway.fwBuildValid = True
+
+  def _update_blr(self, ret_sp: structs.CarStateSP, cp: CANParser) -> None:
+    """FORK(BRAKE-LAMP-RELAY): the BLR-v1 brake-lamp board, 0x620-0x62F, into carStateSP.brakeLampRelay.
+
+    DIAGNOSTICS ONLY, and the signature is the guarantee: this method is handed ret_sp and never ret, so nothing it
+    decodes can reach brakePressed, brakeLights or any other CarState field, and from there a controls decision. The
+    board's DRIVER_BRAKING, PEDAL_CAN and EXT_SINK are its own view of the lamp circuit; the car's 0x17C stays the
+    only brake-pedal input (DESIGN E.7). card reads the result for the Settings > gateway params, and nothing else.
+
+    Two clocks, the two of _update_linbus_firmware() and _update_linbus_gateway():
+      * BLR_STATUS / BLR_ANALOG are live state - valid while the last frame is less than 1 s old, frame-counted
+        because CarState.update() is not handed a clock. A stale status reads as all-zero with valid False, never
+        as the board's last word.
+      * BLR_VERSION / BLR_BUILD are identity - latched on first sight (ts_nanos != 0) and kept, so fwValid and
+        buildValid mean "heard at least once since card started", and absence is never a negative answer.
+
+    This must never raise: an exception here stops card, and with it openpilot's 0x1FA. Anything unexpected leaves
+    the struct at its defaults, logged once.
+    """
+    try:
+      blr = ret_sp.brakeLampRelay
+
+      ts = cp.ts_nanos["BLR_STATUS"]["STATE"]
+      if ts != self._blr_status_ts:
+        self._blr_status_ts = ts
+        self._blr_status_stale = 0
+      else:
+        self._blr_status_stale = min(self._blr_status_stale + 1, BLR_STATUS_STALE_FRAMES)
+      if ts != 0 and self._blr_status_stale < BLR_STATUS_STALE_FRAMES:
+        st = cp.vl["BLR_STATUS"]
+        blr.valid = True
+        blr.state = int(st["STATE"])
+        blr.outDrive = bool(st["OUT_DRIVE"])
+        blr.wouldOn = bool(st["WOULD_ON"])
+        blr.request = bool(st["REQUEST"])
+        blr.cmdFresh = bool(st["CMD_FRESH"])
+        blr.faults = sum(int(st[name]) << i for i, name in enumerate(BLR_FAULT_SIGNALS))
+        blr.latchReason = int(st["LATCH_REASON"])
+        blr.driverBraking = bool(st["DRIVER_BRAKING"])
+        blr.extSink = bool(st["EXT_SINK"])
+
+      ts = cp.ts_nanos["BLR_ANALOG"]["VBAT_SNS_MV"]
+      if ts != self._blr_analog_ts:
+        self._blr_analog_ts = ts
+        self._blr_analog_stale = 0
+      else:
+        self._blr_analog_stale = min(self._blr_analog_stale + 1, BLR_ANALOG_STALE_FRAMES)
+      if ts != 0 and self._blr_analog_stale < BLR_ANALOG_STALE_FRAMES:
+        an = cp.vl["BLR_ANALOG"]
+        blr.relaySnsMv = int(an["RELAY_SNS_MV"])
+        blr.lampSnsMv = int(an["LAMP_SNS_MV"])
+        blr.vbatSnsMv = int(an["VBAT_SNS_MV"])
+
+      if cp.ts_nanos["BLR_VERSION"]["GIT_HASH"] != 0:
+        v = cp.vl["BLR_VERSION"]
+        # int() is load-bearing, as in _update_linbus_firmware(): CANParser hands back floats and pycapnp refuses
+        # one for an integer field.
+        blr.fwGitHash = int(v["GIT_HASH"])
+        blr.fwDirty = bool(v["DIRTY"])
+        blr.variant = int(v["VARIANT"])
+        blr.fwValid = True
+
+      if cp.ts_nanos["BLR_BUILD"]["BOARD_UID24"] != 0:
+        b = cp.vl["BLR_BUILD"]
+        blr.bootPresent = bool(b["BOOT_PRESENT"])
+        blr.bootGitLo24 = int(b["BOOT_GIT_LO24"])
+        blr.boardUid24 = int(b["BOARD_UID24"])
+        blr.optBorEn = bool(b["OPT_BOR_EN"])
+        blr.optDualBank = bool(b["OPT_DUAL_BANK"])
+        blr.buildValid = True
+    except Exception:
+      ret_sp.brakeLampRelay = structs.CarStateSP.BrakeLampRelay()
+      if not self._blr_error_logged:
+        self._blr_error_logged = True
+        carlog.exception("BLR decode raised; reporting no brake-lamp board")
 
   def _update_linbus_grant(self, ret_sp: structs.CarStateSP, cp: CANParser) -> None:
     """Decode GW_STEER_GRANT (0x70B) from the aftermarket LIN-bus gateway.
