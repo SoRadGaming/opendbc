@@ -297,7 +297,10 @@ ignores it) and reports itself on bus 0 at `0x620`-`0x62F`. Diagnostics only: **
 * `opendbc/car/structs.py` (0): `CarStateSP.brakeLampRelay` / `BrakeLampRelay`, 23 fields; the names and order must
   match sunnypilot's `custom.capnp` `brakeLampRelay @5` (pinned by sunnypilot `test_blr_board.py`).
 * Tests: `opendbc/sunnypilot/car/honda/test_blr.py` with `fixtures/blr_golden_frames.json`, a byte-for-byte copy of
-  the firmware's `blr/tools/golden_frames.json` (the bytes the shipping `blr_pack()` produces).
+  the firmware's `blr/tools/golden_frames.json` (the bytes the shipping `blr_pack()` produces). With the firmware tree
+  reachable (`BLR_FIRMWARE_DIR`, or the S: drive from WSL) `test_the_copies_are_the_firmwares_files` compares both
+  copies with the firmware's own files: `_sunnypilot_blr.dbc` line for line for the seven frames, the vector byte for
+  byte. Elsewhere it skips.
 
 ## Merging upstream: the short version
 
@@ -342,7 +345,7 @@ python -m unittest opendbc.car.honda.tests.test_elesys_stock_acc                
 python -m unittest opendbc.car.honda.tests.test_elesys_radar                              # 4 tests: the radar's REL_SPEED scale
 python -m unittest opendbc.sunnypilot.car.honda.test_shadow_learn                          # 21 tests: the shadow learners
 python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault
-python -m unittest opendbc.sunnypilot.car.honda.test_blr                                   # 14 tests: the brake-lamp board's telemetry
+python -m unittest opendbc.sunnypilot.car.honda.test_blr                                   # 15 tests: the brake-lamp board's telemetry
 python -m unittest opendbc.safety.tests.test_honda                                          # builds libsafety; 1091 run, OK (skipped=73) (2026-10-05, stock ACC mode + batch 2)
 python -m unittest opendbc.car.tests.test_car_interfaces -k HONDA_ACCORD_9G_AU
 python -m unittest discover -s opendbc/sunnypilot/car -t .                                  # 143 tests (2026-10-05, stock ACC mode + batch 2), including the integration script

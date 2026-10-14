@@ -7,6 +7,10 @@ decode here that agrees with the vector agrees with the board. What this file ho
 
   * the car's generated DBC decodes every golden telemetry frame to exactly the firmware's intended values, and each
     BLR message has exactly the vector's signals - no more, no fewer, so _sunnypilot_blr.dbc is the firmware's copy;
+  * whenever the firmware tree is reachable (BLR_FIRMWARE_DIR, or the owner's S: drive from WSL): the copies against
+    the firmware's own files - every BO_/SG_/CM_/VAL_ line of the seven telemetry frames against blr/dbc/blr.dbc, and
+    the fixture against blr/tools/golden_frames.json, byte for byte. Checked only against each other, a layout change
+    made in both of the firmware's files would pass everything above (the BLR-v1 review, lens B);
   * the seven frames are registered liveness-exempt on HONDA_ELESYS only, and no signal is named COUNTER/CHECKSUM;
   * the decoder, through the real CarInterface: status valid for 1 s and then all-zero, identity latched, analog
     gated, a decoder that raises leaves defaults and never raises into CarState.update();
@@ -20,6 +24,7 @@ import contextlib
 import json
 import logging
 import math
+import os
 import re
 import unittest
 from pathlib import Path
@@ -44,6 +49,43 @@ DT_NS = 10_000_000   # card runs CarState.update() at 100 Hz
 TELEMETRY = {0x620: "BLR_STATUS", 0x621: "BLR_ANALOG", 0x622: "BLR_HEALTH", 0x623: "BLR_COUNTERS",
              0x624: "BLR_COUNTERS2", 0x627: "BLR_VERSION", 0x62F: "BLR_BUILD"}
 BOOT_CHANNEL = (0x628, 0x629, 0x62A)
+COPY_DBC = OPENDBC / "dbc" / "generator" / "honda" / "_sunnypilot_blr.dbc"
+
+# The firmware tree, when it is reachable: the EPS-LKAS repo's blr/ (sunnypilot's test_blr_flasher.py looks in the
+# same places).
+FIRMWARE_BLR = [Path(p) for p in (os.environ.get("BLR_FIRMWARE_DIR", ""),
+                                  "/mnt/s/Software/EPS-LKAS/blr",
+                                  "/mnt/s/Software/EPS-LKAS/.claude/worktrees/blr/blr") if p]
+
+
+def firmware_dir() -> Path | None:
+  for p in FIRMWARE_BLR:
+    if (p / "dbc" / "blr.dbc").is_file() and (p / "tools" / "golden_frames.json").is_file():
+      return p
+  return None
+
+
+def dbc_definition(text: str, ids) -> set[str]:
+  """What a DBC says about the messages `ids`, as a set of whitespace-normalised lines: each BO_ line, each of its SG_
+  lines (prefixed with its message's ID), and every CM_ BO_ / CM_ SG_ / VAL_ line naming one of them. Order and
+  layout are not definition; anything else - the file header, the other messages - is left out."""
+  out: set[str] = set()
+  msg = None
+  for raw in text.splitlines():
+    line = " ".join(raw.split())
+    if line.startswith("BO_ "):
+      msg = int(line.split()[1])
+      if msg in ids:
+        out.add(line)
+    elif line.startswith("SG_ "):
+      if msg in ids:
+        out.add(f"{msg} {line}")
+    else:
+      msg = None
+      m = re.match(r"(?:CM_ (?:BO_|SG_)|VAL_) (\d+) ", line)
+      if m and int(m.group(1)) in ids:
+        out.add(line)
+  return out
 
 
 def load_golden() -> dict[str, dict]:
@@ -111,6 +153,26 @@ class TestBlrDbc(unittest.TestCase):
         self.assertAlmostEqual(got[sig], want, msg=f"{tag} {name}.{sig}: decoded {got[sig]}, the board meant {want}")
         checked += 1
     self.assertGreater(checked, 80)
+
+  def test_the_copies_are_the_firmwares_files(self):
+    """Against the firmware's own blr/dbc/blr.dbc and blr/tools/golden_frames.json, when the tree is reachable: the
+    seven telemetry frames defined line for line as the firmware defines them, and the vector byte for byte (line
+    endings aside). Elsewhere the two copies are checked against each other only, above."""
+    fw = firmware_dir()
+    if fw is None:
+      self.skipTest("the EPS-LKAS blr/ tree is not reachable (set BLR_FIRMWARE_DIR); the copies were checked against each other")
+    ids = set(TELEMETRY)
+    ours = dbc_definition(COPY_DBC.read_text(encoding="utf-8"), ids)
+    theirs = dbc_definition((fw / "dbc" / "blr.dbc").read_text(encoding="utf-8"), ids)
+    assert {int(ln.split()[1]) for ln in theirs if ln.startswith("BO_ ")} == ids, "the firmware's DBC lost a frame"
+    assert len(theirs) > 100, len(theirs)
+    assert ours == theirs, (f"_sunnypilot_blr.dbc is not the firmware's blr.dbc: only here {sorted(ours - theirs)}, " +
+                            f"only there {sorted(theirs - ours)}")
+    # and nothing but those seven is copied: the boot channel and the firmware's header stay out
+    assert dbc_definition(COPY_DBC.read_text(encoding="utf-8"), set(range(0x600, 0x700)) - ids) == set()
+    golden = (fw / "tools" / "golden_frames.json").read_bytes().replace(b"\r\n", b"\n")
+    assert GOLDEN.read_bytes().replace(b"\r\n", b"\n") == golden, \
+      "fixtures/blr_golden_frames.json is not the firmware's blr/tools/golden_frames.json: copy it again"
 
   def test_boot_channel_is_not_in_the_dbc(self):
     """Offroad-only update traffic: not copied, so nothing can register it."""
