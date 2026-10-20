@@ -2199,7 +2199,7 @@ def _now_run(CP, CP_SP, frames, set_speed, flash, visible=lambda i: True, factor
     cc.hudControl.setSpeed = set_speed(i) * factor
     cc_sp = structs.CarControlSP()
     cc_sp.speedLimitNowFlash = flash(i) * factor
-    _, sends = CI.CC.update(cc.as_reader(), cc_sp, cs, i * int(1e7))  # ty: ignore[invalid-argument-type]
+    _, sends = CI.CC.update(cc.as_reader(), cc_sp, cs, i * int(1e7))
     out.append([_as_tuple(m) for m in sends])
   return out
 
