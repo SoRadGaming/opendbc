@@ -2106,6 +2106,13 @@ class TestElesysNowFlash(unittest.TestCase):
                                  lambda i: self.N if i < 72 else 0))
     self.assertEqual(take[:7], [self.N] * 4 + [self.BLANK] * 2 + [self.N])
     self.assertEqual(take[7:], [self.N] * 5)
+    # the take landing in the flash's dark phase (sla-flash review 2): N on that very send, never a blank at the change.
+    # Frame 40 is the 5th send (dark), frame 50 the 6th (dark): the flash still held, the set speed already N
+    for take_at in (40, 50):
+      dark = self._speeds(_now_run(self.CP, self.CP_SP, 120, lambda i, t=take_at: 60 if i < t else self.N,
+                                   lambda i, t=take_at: self.N if i < t + 2 else 0))
+      lead = [self.N] * 4 + [self.BLANK] * (take_at // 10 - 4)
+      self.assertEqual(dark, lead + [self.N] * (12 - len(lead)), f"take at frame {take_at}")
     # a re-arm starts lit
     rearm = self._speeds(_now_run(self.CP, self.CP_SP, 120, lambda i: 60, lambda i: self.N if i < 50 or i >= 70 else 0))
     self.assertEqual(rearm[5:7], [60, 60])
