@@ -217,8 +217,9 @@ def brake_pump_hysteresis_elesys(apply_brake, v_ego, brake_anchor, last_pump_ts,
 #    with no minimum gap: C1's 1 s gap was the one element with a measurable cost (undelivered braking -29% without
 #    it). A running burst extends while the command keeps climbing by EXT = max(2, deadband/2), so a ramp is one run.
 #  - continuous runs: moving at v >= 2.5 m/s and cb > 200 (2905e73d), and v5's crawl run at 0.15 <= v < 2.5 m/s and
-#    cb > 100. The crawl run is RESTORED: the soft stop's 125-count cap (elesys_stop.py, CAR doc 7.8) was sized so that
-#    this run keeps pumping through the final approach; C1 dropped it and pumped 39-51% of that zone.
+#    cb > 100. The crawl run is RESTORED: the soft stop's cap (elesys_stop.py, CAR doc 7.8; 105 counts since round 8,
+#    125 before) sits above 100 so that this run keeps pumping through the final approach; C1 dropped it and pumped
+#    39-51% of that zone.
 #  - at standstill (v < 0.15) a burst may only BUILD a hold (level < 100), or deliver a rise of more than
 #    ELESYS_PUMP_BIG_RISE over the delivered level (the soft stop's rise to the 189 hold, batch 3 fix round 1). A steady
 #    hold is never topped up: v5's 30 s top-up re-pumped 60 times more than 5 s into a stop and changed nothing logged.

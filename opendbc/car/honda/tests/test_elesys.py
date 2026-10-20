@@ -490,7 +490,7 @@ class TestBrakePumpC1b(unittest.TestCase):
     c = _C1b()
     on = [c.step(150, v=2.4 - i * 0.0088) for i in range(250)]   # 5 s, 2.4 -> 0.2 m/s: the final approach
     self.assertTrue(all(on))
-    for cb, v in ((101, 0.15), (125, 1.0), (253, 2.0), (101, 2.49)):
+    for cb, v in ((101, 0.15), (105, 1.0), (125, 1.0), (253, 2.0), (101, 2.49)):
       c = _C1b()
       self.assertTrue(all(c.hold(cb, 10.0, v=v)), msg=f"cb {cb} at {v} m/s")
     # its edges: 100 counts is not above 100, 0.14 m/s is standstill, 2.5 m/s is the firm band's (cb > 200 there)
@@ -518,26 +518,29 @@ class TestBrakePumpC1b(unittest.TestCase):
     self.assertEqual(c.level, 185)
 
   def test_the_soft_stops_rise_to_the_hold_is_delivered_once(self):
-    # approach at cb 150 (pumped while moving), the soft stop's cap of 125 while rolling (now inside the crawl run),
-    # then its 125 -> 189 rise at standstill (250 counts/s = 5 per 0x1FA frame): delivered in one run - the crawl run's
-    # tail extends through the climb - and a steady hold never re-pumps
-    c = _C1b()
-    c.hold(150, 2.0, v=3.0)
-    self.assertTrue(all(c.hold(125, 1.0, v=0.5)))
-    on = [c.step(cb, v=0.0) for cb in range(125, 190, 5)] + c.hold(189, 120.0, v=0.0)
-    self.assertEqual(_C1b.starts(on), 1)
-    self.assertTrue(all(on[:13]), "the whole rise is pumped")
-    self.assertGreaterEqual(c.level, 189)
-    self.assertFalse(any(on[-5000:]), "no top-up after it")
-    # the same rise with the crawl run long over (the wheels stopped 2 s before): one hold-rise burst, as in C1
-    c = _C1b()
-    c.hold(150, 2.0, v=3.0)
-    c.hold(125, 1.0, v=0.5)
-    c.hold(125, 2.0, v=0.0)
-    self.assertEqual(c.level, 125)
-    on = [c.step(cb, v=0.0) for cb in range(125, 190, 5)] + c.hold(189, 120.0, v=0.0)
-    self.assertEqual(_C1b.starts(on), 1)
-    self.assertGreaterEqual(c.level, 189)
+    # approach at cb 150 (pumped while moving), the soft stop's cap while rolling (105 since round 8, 125 before; inside
+    # the crawl run either way), then its rise to 189 at standstill (250 counts/s = 5 per 0x1FA frame): delivered in one
+    # run - the crawl run's tail extends through the climb - and a steady hold never re-pumps
+    for cap in (105, 125):
+      with self.subTest(cap=cap):
+        c = _C1b()
+        c.hold(150, 2.0, v=3.0)
+        self.assertTrue(all(c.hold(cap, 1.0, v=0.5)))
+        rise = list(range(cap, 190, 5))
+        on = [c.step(cb, v=0.0) for cb in rise] + c.hold(189, 120.0, v=0.0)
+        self.assertEqual(_C1b.starts(on), 1)
+        self.assertTrue(all(on[:len(rise)]), "the whole rise is pumped")
+        self.assertGreaterEqual(c.level, 189)
+        self.assertFalse(any(on[-5000:]), "no top-up after it")
+        # the same rise with the crawl run long over (the wheels stopped 2 s before): one hold-rise burst, as in C1
+        c = _C1b()
+        c.hold(150, 2.0, v=3.0)
+        c.hold(cap, 1.0, v=0.5)
+        c.hold(cap, 2.0, v=0.0)
+        self.assertEqual(c.level, cap)
+        on = [c.step(cb, v=0.0) for cb in range(cap, 190, 5)] + c.hold(189, 120.0, v=0.0)
+        self.assertEqual(_C1b.starts(on), 1)
+        self.assertGreaterEqual(c.level, 189)
 
   def test_standstill_hold_reached_light_gets_one_hold_build_burst(self):
     # stop reached at cb 40: the 40 -> 189 rise at standstill builds the hold - one burst, extended through the
@@ -739,7 +742,7 @@ class TestElesysPumpRuleSelection(unittest.TestCase):
 
 class TestElesysC1bWithTheSoftStop(unittest.TestCase):
   """FORK(HONDA_ACCORD_9G_AU): the real CarController with the tuner on, so the soft stop is built, and C1b selected.
-  The soft stop caps the rolling command at ~125 counts and raises it to the hold after the wheels read zero; C1b must
+  The soft stop caps the rolling command at ~105 counts and raises it to the hold after the wheels read zero; C1b must
   pump the capped approach (the crawl run, which the cap was sized for), deliver the rise to the hold, and not top the
   hold up afterwards. The pump is read where the car reads it: BRAKE_PUMP_REQUEST in the 0x1FA the controller sends."""
 
@@ -791,7 +794,7 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
       cc.enabled = cc.longActive = True
       cc.orientationNED = [0.0, 0.0, 0.0]
       # the planner eases off into the stop (the creep table adds ~0.75 m/s^2 at 0.9 m/s: ~90 counts at entry, under
-      # the 125 cap), then longcontrol's stopping accel, which the cap holds at 125 until the wheels read zero
+      # the 105 cap), then longcontrol's stopping accel, which the cap holds at 105 until the wheels read zero
       cc.actuators.accel = (-1.0 if v > 3.0 else -0.2) if not stopping else -0.8
       cc.actuators.longControlState = structs.CarControl.Actuators.LongControlState.stopping if stopping else \
         structs.CarControl.Actuators.LongControlState.pid
@@ -808,7 +811,8 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
     self.assertGreater(len(out), 1900, "a 0x1FA every other frame")
     t_stop = next(t for t, v, *_ in out if v <= 0.9)
     rolling = [cb for t, v, _, cb, *_ in out if t >= t_stop and v > 0.0]
-    self.assertTrue(rolling and max(rolling) <= 130, f"the soft stop caps the rolling command: {max(rolling or [0])}")
+    from opendbc.sunnypilot.car.honda.elesys_stop import SOFT_STOP_ROLL_CB
+    self.assertTrue(rolling and max(rolling) <= SOFT_STOP_ROLL_CB + 5, f"the soft stop caps the rolling command: {max(rolling or [0])}")
     held = [cb for t, v, ss, cb, *_ in out if ss and t > 10.0]
     self.assertGreaterEqual(min(held), 180, "the hold the soft stop rises to")
     level_end = out[-1][4]
@@ -820,7 +824,7 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
     self.assertFalse(any(p for t, _, ss, _, _, p in out if ss and t > t_still + 3.0), "the 0x1FA pump bit stays off")
 
   def test_c1b_pumps_the_capped_approach_through_the_crawl_run(self):
-    # what the soft stop's 125 cap was sized for: every rolling 0x1FA at 0.15 <= v < 2.5 with the command above 100
+    # what the soft stop's cap (105, above 100) was sized for: every rolling 0x1FA at 0.15 <= v < 2.5 with the command above 100
     # carries the pump bit - the crawl run C1b restores (C1 had it on for 39% of that zone on route 120's stop)
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
     _, out = self._run(HondaFlagsSP.ELESYS_PUMP_C1B.value)

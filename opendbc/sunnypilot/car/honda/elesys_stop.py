@@ -21,10 +21,10 @@ WHAT: a brake CEILING while the car is still rolling in the stopping state.
   output       min(apply_brake, ceiling) -- it can only LOWER the command, never raise it
   at entry     ceiling = max(cap, apply_brake at entry): never below what was being commanded
                when stopping began
-  cap          125 + max(0, -sin(pitch)) * 9.81 / 2.6 * 256 counts, ~17 per degree of downhill;
+  cap          105 + max(0, -sin(pitch)) * 9.81 / 2.6 * 256 counts, ~17 per degree of downhill;
                pitch is the dynamic tuner's filtered pitch, and no grade term when it has none
   rolling      ceiling = max(ceiling, cap): a steeper downhill raises it, nothing lowers it
-  RISES        at 250 counts/s (125 -> 189 in ~0.26 s), monotone, from the first of
+  RISES        at 250 counts/s (105 -> 189 in ~0.34 s), monotone, from the first of
                  SETTLE   0.55 s after the WHEELS first read zero (vEgoRaw == 0 / standstill)
                  MOVING   the wheels turn again after reading zero
                  WEAK     aEgo > -0.25 m/s^2 for 0.4 s, counted only once the command has sat AT
@@ -36,9 +36,9 @@ WHAT: a brake CEILING while the car is still rolling in the stopping state.
                unknown counts as faster); outside the stopping state; longActive false; gas or
                brake pressed. The last three reset the state.
 
-The bound: the rise starts 1.9 s after entry at the latest and the ceiling is gone 0.52 s after
-that, so nothing of it is left 2.42 s after the stopping state began. On the replayed stops every
-rise was SETTLE, at most 1.82 s after entry.
+The bound: the rise starts 1.9 s after entry at the latest and the ceiling is gone 0.60 s after
+that (105 -> 255 at 250 counts/s), so nothing of it is left 2.50 s after the stopping state began.
+On the replayed stops every rise was SETTLE, at most 1.82 s after entry.
 
 The ENTRY SPEED bound (review, 2026-10): the weak-decel escape cannot fire while the car is
 decelerating harder than 0.25 m/s^2, so a stop entered fast with the brake still building would
@@ -61,7 +61,7 @@ The four changes the skeptic review made to the audit's version, and why:
      were still building pressure -- including three of the harshest (ad 394.3 2.74 m/s^2,
      b0 391.0 1.60, d3 829.4 1.41). It would have handed exactly those back to today's ramp.
   3. THE CAP IS GRADE-AWARE. Below 2 m/s and in the stopping state the pitch feedforward is 0
-     (dynamic_tuning._pitch_feedforward), so a flat 125 on a 2.5 deg downhill leaves ~0.1 m/s^2
+     (dynamic_tuning._pitch_feedforward), so a flat 125 (the cap then) on a 2.5 deg downhill leaves ~0.1 m/s^2
      of net deceleration. -2.5 deg adds 42 counts.
   4. MOVING AGAIN AFTER WHEEL-ZERO RISES AT ONCE, and MAX_ROLL is 1.9 s (the audit's 2.5 s was
      wider than the ~1.4 s a 0.8 m/s stop takes at ~0.6 m/s^2; 4.1 m median to a stopped lead).
@@ -69,10 +69,26 @@ The four changes the skeptic review made to the audit's version, and why:
 Expected (inferred; the audit's simulator was never validated, so measure it): decel at the stop
 ~0.5-0.6 m/s^2 instead of 0.92, about +0.1-0.2 m and +0.3-0.4 s per stop. Measure decel at the
 camera/IMU-confirmed stop and the peak jerk in the 0-0.8 s after wheel-zero; the brake count at
-wheel-zero is 125 by construction, so it proves nothing.
+wheel-zero is the cap by construction, so it proves nothing.
 
-The pump is unaffected in kind: 125 > 100, so brake_pump_hysteresis_elesys()'s continuous
-final-approach branch still runs. The learners are unaffected: the brake learner needs the PID
+THE CAP WAS 125 until round 8 (2026-10-20, proposal 5). Measured on the 10 rlog stops of drives
+13d-142 (17-18 Oct, push9): the ceiling did what it was built for (9 of 10 hondastop lines
+rise=settle, the cap at wheel-zero), but the car still met the stop at a median -0.74 m/s^2
+(IMU -0.86) with a median 4.6 m/s^3 snap on the IMU, against this file's own target of <= 0.6.
+While rolling at the cap the IMU read a median 0.82 m/s^2, so the cap itself set that decel.
+At ~0.012 m/s^2 per count (the batch-3 plant's brake gain at a crawl), 105 takes ~0.24 off it:
+estimated ~0.58 at the cap, the roll 0.80 -> 0.99 s (median), 0.1-0.2 m longer (inferred). The
+closed-loop replay of the same stops through the real controller agrees in direction (true decel
+at the stop 0.08-0.22 lower where the cap binds) and shows the cost: a stop that already rolled
+long at 125 (13d t380.8: 1.74 s, max_roll, only 0.35 m/s^2 at the cap) has too little decel at
+105, and the weak/max_roll escapes then hand it to the old ramp, which is harsher. Those escapes
+are the designed fallback; the hondastop line says which one fired.
+
+The pump is unaffected: the cap stays above C1b's and v5's crawl threshold (cb > 100), so for any
+command c, min(c, cap) > 100 exactly when c > 100 - the crawl continuous run (0.15 <= v < 2.5 m/s)
+pumps the same frames as with 125, and the rise to the hold is still more than ELESYS_PUMP_BIG_RISE
+over what was delivered. That is why the cap must stay above 100: brake_pump_hysteresis_elesys()'s
+and brake_pump_c1b_elesys()'s continuous final-approach branch still runs. The learners are unaffected: the brake learner needs the PID
 state and vEgo > 1 m/s, the per-mode pedal counter needs the PID state (_learn_ok), and both read
 the command BEFORE this ceiling. Panda forwards stock AEB whenever its brake is >= ours, so a
 lower command can only start that forwarding earlier, never later.
@@ -90,7 +106,7 @@ from opendbc.car.carlog import carlog
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 SOFT_STOP_DT = 2 * DT_CTRL       # s; the Nidec brake block runs on every other 100 Hz frame
-SOFT_STOP_ROLL_CB = 125.         # counts: the ceiling while rolling on the flat
+SOFT_STOP_ROLL_CB = 105.         # counts: the ceiling while rolling on the flat (125 until round 8); keep > 100
 SOFT_STOP_GRADE_CB = 9.81 / 2.6 * 256   # counts per unit of -sin(pitch): full brake is 2.6 m/s^2 at 256
 SOFT_STOP_SETTLE = 0.55          # s the ceiling holds after the wheels first read zero
 SOFT_STOP_RISE = 250.            # counts/s once rising: 5 counts per 50 Hz frame
@@ -133,7 +149,7 @@ class SoftStopState:
 
 
 def soft_stop_cap(pitch) -> float:
-  """The ceiling while rolling, in counts: 125 on the flat, plus ~17 per degree of downhill.
+  """The ceiling while rolling, in counts: 105 on the flat, plus ~17 per degree of downhill.
   No grade term without a usable pitch (None, NaN, or not a pitch at all)."""
   p = _finite(pitch, float("nan"))
   if not (math.isfinite(p) and abs(p) < math.pi / 2):

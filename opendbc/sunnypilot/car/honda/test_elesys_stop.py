@@ -22,6 +22,7 @@ from opendbc.sunnypilot.car.honda import elesys_stop as es
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 DT = es.SOFT_STOP_DT
 CAP = int(es.SOFT_STOP_ROLL_CB)
+CAP_DOWNHILL_2_5 = CAP + 42                                # the cap on a 2.5 deg downhill (~17 counts per degree)
 ENTRY = 60
 
 
@@ -67,12 +68,12 @@ class TestSoftStop(unittest.TestCase):
     self.assertEqual(ep.out, [160])                        # never below what entry was commanding
     self.assertEqual(ep.run(10, 200), [160] * 10)          # the ramp cannot add to it
     self.assertEqual(ep.run(5, 100), [100] * 5)            # a lower request passes straight through
-    self.assertEqual(ep.run(5, 200), [160] * 5)            # and the ceiling is still 160, not 125
+    self.assertEqual(ep.run(5, 200), [160] * 5)            # and the ceiling is still 160, not the cap
     self.assertTrue(all(c == 160.0 for c in ep.ceilings))
 
   def test_entry_below_the_cap_passes_through(self):
     ep = Episode(entry=None)
-    self.assertEqual([ep.step(c) for c in (0, 30, 90, 124, 125, 126, 200)], [0, 30, 90, 124, 125, 125, 125])
+    self.assertEqual([ep.step(c) for c in (0, 30, 90, CAP - 1, CAP, CAP + 1, 200)], [0, 30, 90, CAP - 1, CAP, CAP, CAP])
 
   def test_the_settle_timer_starts_at_wheel_zero_and_holds_the_cap(self):
     ep = Episode()
@@ -85,7 +86,7 @@ class TestSoftStop(unittest.TestCase):
     rise = out[held:]
     self.assertEqual(rise[0], CAP + 5)                     # 250 counts/s: 5 per 50 Hz frame
     reached = rise.index(189)
-    self.assertLessEqual(reached * DT, 0.3)                # 125 -> 189 in ~0.26 s
+    self.assertLessEqual(reached * DT, (189 - CAP) / es.SOFT_STOP_RISE + DT)   # 105 -> 189 in ~0.34 s
     self.assertEqual(set(rise[reached:]), {189})           # then today's hold, exactly
     self.assertFalse(ep.st.armed)                          # and the ceiling is out of the way
 
@@ -93,13 +94,13 @@ class TestSoftStop(unittest.TestCase):
     # entered with 30 counts and aEgo -0.1 because pressure is still building: the audit's plain
     # 0.4 s escape fired here (ad 394.3, b0 391.0, d3 829.4). Only time AT the ceiling counts.
     ep = Episode(entry=None)
-    out = ep.run(frames(1.0), lambda i: min(30 + 5 * i, 189), a_ego=-0.1)
-    at_cap = out.index(CAP)                                # the ramp reaches the cap at ~0.38 s
-    self.assertGreater(at_cap * DT, 0.35)
-    self.assertEqual(max(out), CAP)                        # no rise in the first second
+    out = ep.run(frames(0.9), lambda i: min(30 + 5 * i, 189), a_ego=-0.1)
+    at_cap = out.index(CAP)                                # the ramp reaches the cap at 0.30 s (105; 0.38 s at 125)
+    self.assertEqual(at_cap, (CAP - 30) // 5)
+    self.assertEqual(max(out), CAP)                        # no rise while it builds, nor for 0.6 s at the cap
     self.assertIsNone(ep.first_rise())
     # it does escape, but only 0.3 s + 0.4 s after reaching the cap
-    ep.run(frames(0.2), 189, a_ego=-0.1)
+    ep.run(frames(0.3), 189, a_ego=-0.1)
     self.assertEqual(ep.st.reason, "weak")
     self.assertAlmostEqual((ep.first_rise() - at_cap + 1) * DT, 0.3 + 0.4, delta=1e-9)
 
@@ -145,14 +146,14 @@ class TestSoftStop(unittest.TestCase):
     self.assertEqual(es.soft_stop_cap(math.radians(2.5)), es.SOFT_STOP_ROLL_CB)   # uphill: the flat cap
     self.assertEqual(es.soft_stop_cap(0.0), es.SOFT_STOP_ROLL_CB)
     ep = Episode(pitch=math.radians(-2.5))
-    self.assertEqual(ep.run(5, 200, pitch=math.radians(-2.5)), [167] * 5)
+    self.assertEqual(ep.run(5, 200, pitch=math.radians(-2.5)), [CAP_DOWNHILL_2_5] * 5)
 
   def test_a_steeper_downhill_raises_the_ceiling_and_a_gentler_one_does_not_lower_it(self):
     ep = Episode()
     self.assertEqual(ep.run(5, 200, pitch=0.0)[-1], CAP)
-    self.assertEqual(ep.run(5, 200, pitch=math.radians(-2.5))[-1], 167)
-    self.assertEqual(ep.run(5, 200, pitch=0.0)[-1], 167)
-    self.assertEqual(ep.run(5, 200, pitch=math.radians(3.0))[-1], 167)
+    self.assertEqual(ep.run(5, 200, pitch=math.radians(-2.5))[-1], CAP_DOWNHILL_2_5)
+    self.assertEqual(ep.run(5, 200, pitch=0.0)[-1], CAP_DOWNHILL_2_5)
+    self.assertEqual(ep.run(5, 200, pitch=math.radians(3.0))[-1], CAP_DOWNHILL_2_5)
 
   def test_no_usable_pitch_means_no_grade_term(self):
     for pitch in (None, float("nan"), float("inf"), -float("inf"), 4.0, "downhill", object()):
@@ -262,6 +263,22 @@ class TestSoftStop(unittest.TestCase):
         if ep.st.armed and (i + 1) * DT > bound:
           self.fail(f"soft phase still armed after {(i + 1) * DT:.2f} s")
 
+  def test_the_cap_is_105_and_stays_inside_the_pumps_crawl_run(self):
+    # round 8 (proposal 5): 125 -> 105 for a softer last half-metre. It must stay ABOVE the crawl threshold of both pump
+    # rules (C1b and v5 run the pump continuously at 0.15 <= v < 2.5 m/s while the command is above 100 counts): then
+    # min(c, cap) > 100 exactly when c > 100, so the crawl run pumps the same frames it did with 125.
+    from opendbc.car.honda.carcontroller import ELESYS_PUMP_C1B_CRAWL, ELESYS_PUMP_BIG_RISE
+    self.assertEqual(es.SOFT_STOP_ROLL_CB, 105.)
+    self.assertGreater(CAP, ELESYS_PUMP_C1B_CRAWL)
+    for c in range(256):
+      self.assertEqual(min(c, CAP) > ELESYS_PUMP_C1B_CRAWL, c > ELESYS_PUMP_C1B_CRAWL, c)
+    # the rise to today's 189 hold is more than BIG_RISE over the cap, so C1b still delivers it at standstill
+    self.assertGreater(189 - CAP, ELESYS_PUMP_BIG_RISE)
+    # and a 105-capped roll is held at 105 on the flat, 105 + ~17 per degree of downhill
+    ep = Episode()
+    self.assertEqual(set(ep.run(frames(1.0), 189)), {105})
+    self.assertAlmostEqual(es.soft_stop_cap(math.radians(-1.0)), 105 + 17.0, delta=0.3)
+
   def test_unknown_deceleration_counts_as_not_slowing(self):
     ep = Episode()
     ep.run(frames(0.8), 180, a_ego=float("nan"))
@@ -345,7 +362,7 @@ class TestElesysSoftStop(unittest.TestCase):
         self.assertIsNone(h.ss.state)
 
   def test_the_tuner_pitch_feeds_the_cap(self):
-    self.assertEqual(Harness(tuner=Tuner(math.radians(-2.5))).run(3, cs(), cmd=200), [167] * 3)
+    self.assertEqual(Harness(tuner=Tuner(math.radians(-2.5))).run(3, cs(), cmd=200), [CAP_DOWNHILL_2_5] * 3)
     for pitch in (None, float("nan"), ValueError("no pose")):
       with self.subTest(pitch=pitch):
         self.assertEqual(Harness(tuner=Tuner(pitch)).run(3, cs(), cmd=200), [CAP] * 3)
