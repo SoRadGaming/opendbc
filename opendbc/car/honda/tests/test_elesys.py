@@ -143,6 +143,59 @@ class TestComputeGbElesys(unittest.TestCase):
       self.assertAlmostEqual(brake * GOLD_BRAKE_SCALE, expect, places=6, msg=f'v={v}')
 
 
+class TestElesysPidAccelLimits(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU), round 8 proposal 9: the PID's floor is -3.2 on HONDA_ELESYS (interface.py
+  elesys_pid_accel_min()), so its integrator cannot wind to -4.0 while the brake is already railed. Every other car,
+  and stock ACC mode, keeps upstream's limits."""
+
+  @staticmethod
+  def _cp(car, interceptor=True, flags=0):
+    CP = SimpleNamespace(carFingerprint=car)
+    CP_SP = SimpleNamespace(enableGasInterceptor=interceptor, flags=flags)
+    return CP, CP_SP
+
+  def test_this_car_floor_is_minus_3_2(self):
+    from opendbc.car.honda.interface import CarInterface, ELESYS_PID_ACCEL_MIN
+    from opendbc.car.honda.values import CarControllerParams
+    self.assertEqual(ELESYS_PID_ACCEL_MIN, -3.2)
+    for v in (0.0, 2.0, 10.0, 30.0):
+      lo, hi = CarInterface.get_pid_accel_limits(*self._cp(ELESYS_CAR), v, 25.0)
+      self.assertEqual((lo, hi), (-3.2, CarControllerParams.NIDEC_ACCEL_MAX))
+
+  def test_stock_acc_mode_and_every_other_car_are_upstream(self):
+    from opendbc.car.honda.interface import CarInterface
+    from opendbc.car.honda.values import CarControllerParams
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    up = (CarControllerParams.NIDEC_ACCEL_MIN, CarControllerParams.NIDEC_ACCEL_MAX)
+    self.assertEqual(CarInterface.get_pid_accel_limits(*self._cp(ELESYS_CAR, flags=HondaFlagsSP.ELESYS_STOCK_ACC.value), 10.0, 25.0), up)
+    self.assertEqual(CarInterface.get_pid_accel_limits(*self._cp(NIDEC_CAR), 10.0, 25.0), up)
+    for car in CAR:
+      if car in HONDA_ELESYS:
+        continue
+      for interceptor in (True, False):
+        CP, CP_SP = self._cp(car, interceptor)
+        lo, hi = CarInterface.get_pid_accel_limits(CP, CP_SP, 10.0, 25.0)
+        if car in HONDA_BOSCH:
+          self.assertEqual((lo, hi), (CarControllerParams.BOSCH_ACCEL_MIN, CarControllerParams.BOSCH_ACCEL_MAX), car)
+        else:
+          self.assertEqual(lo, CarControllerParams.NIDEC_ACCEL_MIN, car)
+    # this car without the interceptor: the upstream Nidec branch, untouched
+    lo, _ = CarInterface.get_pid_accel_limits(*self._cp(ELESYS_CAR, interceptor=False), 10.0, 25.0)
+    self.assertEqual(lo, CarControllerParams.NIDEC_ACCEL_MIN)
+
+  def test_the_floor_is_still_full_brake(self):
+    # -3.2 asks for full brake at every speed, also with the pitch feedforward of an uphill of up to ~6% added after
+    # the PID (hill_accel > 0 on a climb), so the change removes no braking the brake can deliver
+    from opendbc.car.honda.interface import ELESYS_PID_ACCEL_MIN
+    for v in np.arange(0.0, 40.0, 0.5):
+      for hill in (0.0, 0.3, 0.59, -0.5, -1.5):
+        gas, brake = compute_gb_honda_elesys(ELESYS_PID_ACCEL_MIN + hill, float(v))
+        self.assertEqual((gas, brake), (0.0, 1.0), f"v {v} hill {hill}")
+    # and full brake begins at -2.6 net, so anything below about -2.6 was windup room only
+    self.assertEqual(compute_gb_honda_elesys(-2.6, 10.0), (0.0, 1.0))
+    self.assertLess(compute_gb_honda_elesys(-2.5, 10.0)[1], 1.0)
+
+
 class TestBrakePumpHysteresis(unittest.TestCase):
   """Upstream pump logic must stay pristine; the Elesys variant trades the 20 s bleed window
   for short runs (0.5 s) at a load-scaled period with a jitter deadband.

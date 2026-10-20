@@ -15,6 +15,31 @@ from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP, HondaSafetyFla
 
 TransmissionType = structs.CarParams.TransmissionType
 
+# FORK(HONDA_ACCORD_9G_AU): the longitudinal PID's floor on this car (round 8, proposal 9).
+#
+# compute_gb_honda_elesys() puts full brake at net -2.6 m/s^2 (brake = -net / 2.6), so a PID output below about -2.6
+# asks for nothing more: the brake is already at its ceiling. Upstream's NIDEC_ACCEL_MIN of -4.0 only gives the
+# integrator room to wind while the brake is railed. Measured once in 42 engaged minutes (drives 13d-143): route 143
+# t172.9-174.6, the stopped car at night. The PID sat clipped at -4.0 for 1.7 s with its integrator wound to -1.33
+# while 0x1FA was already at full brake (plan -2.1 to -2.9, achieved -1.65 to -1.92). Had the plan let go there, that
+# integrator would have kept the brake on until it unwound.
+#
+# -3.2 is still full brake with room for the dynamic tuner's pitch feedforward. hill_accel is added after the PID, and
+# a climb adds demand (positive), so -3.2 still reaches -2.6 net on an uphill of up to about 6% (0.6 m/s^2). The
+# integrator stops winding as soon as the output reaches -3.2: replayed on 143 it froze at -0.81 instead of -1.33, the
+# brake command was full on all 267 frames either way, and on 13d, 141 and 142 not one frame changed. Above -3.2 the
+# PID is upstream's to the bit. Not in stock ACC mode (HondaElesysStockAcc), where nothing longitudinal is sent: its
+# carControl stays bit-identical too. Every other car keeps NIDEC_ACCEL_MIN.
+ELESYS_PID_ACCEL_MIN = -3.2  # m/s^2
+
+
+def elesys_pid_accel_min(CP, CP_SP) -> float:
+  """The PID's negative limit for a Nidec car with the gas interceptor: ELESYS_PID_ACCEL_MIN on HONDA_ELESYS outside
+  stock ACC mode, NIDEC_ACCEL_MIN everywhere else."""
+  if CP.carFingerprint in HONDA_ELESYS and not (int(getattr(CP_SP, "flags", 0)) & HondaFlagsSP.ELESYS_STOCK_ACC.value):
+    return ELESYS_PID_ACCEL_MIN
+  return CarControllerParams.NIDEC_ACCEL_MIN
+
 
 class CarInterface(CarInterfaceBase):
   CarState = CarState
@@ -28,7 +53,8 @@ class CarInterface(CarInterfaceBase):
     if CP.carFingerprint in HONDA_BOSCH:
       return CarControllerParams.BOSCH_ACCEL_MIN, CarControllerParams.BOSCH_ACCEL_MAX
     elif CP_SP.enableGasInterceptor:
-      return CarControllerParams.NIDEC_ACCEL_MIN, CarControllerParams.NIDEC_ACCEL_MAX
+      # FORK(HONDA_ACCORD_9G_AU): this car's PID floor is ELESYS_PID_ACCEL_MIN, not -4.0 (elesys_pid_accel_min())
+      return elesys_pid_accel_min(CP, CP_SP), CarControllerParams.NIDEC_ACCEL_MAX
     else:
       # NIDECs don't allow acceleration near cruise_speed,
       # so limit limits of pid to prevent windup
