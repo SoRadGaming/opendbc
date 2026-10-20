@@ -168,12 +168,15 @@ class _FakeCS:
     self.out_sp = structs.CarStateSP()
 
 
-def _sends(CP, CP_SP, frames, cc_for):
+def _sends(CP, CP_SP, frames, cc_for, now_flash: float = 0.):
+  """now_flash: CarControlSP.speedLimitNowFlash (m/s) on every frame (FORK(SPEED-LIMIT): sla-flash)."""
   CI = CarInterface(CP, CP_SP)
   cs = _FakeCS()
   out = []
   for i in range(frames):
-    _, sends = CI.CC.update(cc_for(i), structs.CarControlSP(), cs, i * int(1e7))  # ty: ignore[invalid-argument-type]
+    cc_sp = structs.CarControlSP()
+    cc_sp.speedLimitNowFlash = now_flash
+    _, sends = CI.CC.update(cc_for(i), cc_sp, cs, i * int(1e7))  # ty: ignore[invalid-argument-type]
     out.append([(m[0], bytes(m[1]), m[2]) if isinstance(m, tuple) else (m.address, bytes(m.dat), m.src) for m in sends])
   return out
 
@@ -204,6 +207,23 @@ class TestStockAccCarController(unittest.TestCase):
     frames = _sends(CP, CP_SP, 200, lambda i: _cc(cancel=True))
     seen = {(a, b) for sends in frames for a, _, b in sends}
     self.assertEqual(seen, {(0xE4, 0), (0x1FA, 0), (0x200, 0), (0x1A6, 2), (0x30C, 0), (0x500, 0)})
+
+  def test_the_now_flash_never_reaches_stock_acc_mode(self):
+    # FORK(SPEED-LIMIT): sla-flash. Speed Limit Assist is unavailable here, so the flash is never set - and if it were,
+    # this mode sends no 0x30C to flash in: every frame, byte for byte, as with none
+    for pedal in (True, False):
+      CP, CP_SP = _params(pedal=pedal, params_list=[{PARAM: True}])
+      flash = _sends(CP, CP_SP, 300, lambda i: _cc(cancel=i % 3 == 0), now_flash=30.0)
+      none = _sends(CP, CP_SP, 300, lambda i: _cc(cancel=i % 3 == 0))
+      self.assertEqual(flash, none)
+      self.assertFalse(any(a == 0x30C for sends in flash for a, _, _ in sends))
+    # toggle off (openpilot long): the flash changes 0x30C byte 3 and its checksum only - the SCM_BUTTONS stand-down
+    # and every other frame are untouched
+    CP, CP_SP = _params(pedal=True, params_list=[{PARAM: False}])
+    flash = _sends(CP, CP_SP, 300, lambda i: _cc(cancel=i % 3 == 0), now_flash=30.0)
+    none = _sends(CP, CP_SP, 300, lambda i: _cc(cancel=i % 3 == 0))
+    self.assertEqual([[m for m in s if m[0] != 0x30C] for s in flash], [[m for m in s if m[0] != 0x30C] for s in none])
+    self.assertNotEqual(flash, none, "the flash reached the 0x30C openpilot sends")
 
   def test_toggle_off_sends_are_unchanged_by_the_param_plumbing(self):
     # the same controller with and without the hook having run with the param off: every byte equal

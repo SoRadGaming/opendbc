@@ -403,6 +403,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.brake_last = 0.
     self.wind_credit_scale = 1.0  # FORK(HONDA_ACCORD_9G_AU): the aero credit's ramp at full brake, ELESYS_FULL_BRAKE
     self.apply_brake_last = 0
+    self.now_flash_sends = 0  # FORK(SPEED-LIMIT): sla-flash - ACC_HUD sends into the current CRUISE_SPEED flash
     self.last_pump_ts = 0.
     self.pump_brake_anchor = 0
     self.pump_level = 0  # FORK(HONDA_ACCORD_9G_AU): pump rule C1b's state, unused by v5
@@ -629,9 +630,23 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # Send dashboard UI commands.
     if self.frame % 10 == 0:
       if self.CP.openpilotLongitudinalControl:
+        # FORK(SPEED-LIMIT): sla-flash. While Speed Limit Assist holds a press made at 'now' (the set speed has not
+        # moved yet), the cluster flashes the set speed it will become, as the Elesys radar flashes a speed it is
+        # building up to: 4 frames N, 2 frames blank (255 with ACC_ON still 1, as stock sends it), 0.4 s / 0.2 s. Only
+        # CRUISE_SPEED (byte 3, and the checksum) changes; hud_control.setSpeed, 0x500 and every other byte are as
+        # before, and panda's 0x30C check reads bytes 0-2 only. Solid again on the first send where the set speed is
+        # N (the limit applied) or the flash is 0. Never in stock ACC mode (no 0x30C is sent there).
+        acc_hud_speed = hud_v_cruise
+        flash = getattr(CC_SP, 'speedLimitNowFlash', 0.) or 0.
+        if self.CP.carFingerprint in HONDA_ELESYS and not self.elesys_stock_acc and hud_control.speedVisible and \
+           flash > 0 and round(flash / CS.v_cruise_factor) != round(hud_v_cruise):
+          acc_hud_speed = hondacan.now_flash_speed(flash / CS.v_cruise_factor, self.now_flash_sends)
+          self.now_flash_sends += 1
+        else:
+          self.now_flash_sends = 0
         # On Nidec, this also controls longitudinal positive acceleration
         can_sends.append(hondacan.create_acc_hud(self.packer, self.CAN.pt, self.CP, CC.enabled, pcm_speed, pcm_accel,
-                                                 hud_control, hud_v_cruise, CS.is_metric, CS.acc_hud))
+                                                 hud_control, acc_hud_speed, CS.is_metric, CS.acc_hud))
 
       steering_available = CS.out.cruiseState.available and CS.out.vEgo > max(self.params.STEER_GLOBAL_MIN_SPEED, self.CP.minSteerSpeed)
       # HONDA_ELESYS: 4-byte LKAS_HUD with a different layout; stock camera's HUD is forwarded instead

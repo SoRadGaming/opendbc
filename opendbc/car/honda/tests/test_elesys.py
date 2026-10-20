@@ -2141,5 +2141,172 @@ class TestElesysSteeringPressedDebounce(unittest.TestCase):
     self.assertEqual(out[2:], [True, False, False], "upstream's single-frame flag")
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# FORK(SPEED-LIMIT): sla-flash. While Speed Limit Assist holds a press made at 'now' (CarControlSP.speedLimitNowFlash),
+# openpilot's own ACC_HUD (0x30C) flashes the set speed it will become: N for 4 sends, 255 for 2, as the Elesys radar
+# flashes a speed it is building up to. Only CRUISE_SPEED (byte 3) and the checksum change; nothing else on the wire.
+
+def _now_params(car=ELESYS_CAR, stock_acc=False, pedal=True):
+  """car_helpers.get_car's order, as the car runs it (the comma pedal, openpilot long; stock ACC mode on request)."""
+  from opendbc.car import gen_empty_fingerprint
+  from opendbc.car.honda.interface import CarInterface
+  from opendbc.sunnypilot.car.interfaces import setup_interfaces
+  fp = gen_empty_fingerprint()
+  fp[0][0x188] = 8
+  if pedal:
+    fp[0][0x201] = 6
+  CP = CarInterface.get_params(car, fp, [], False, False, False)
+  CP_SP = CarInterface.get_params_sp(CP, car, fp, [], False, False, False)
+  setup_interfaces(CarInterface, CP, CP_SP, [{"HondaElesysStockAcc": stock_acc}])
+  return CP, CP_SP
+
+
+class _NowCS:
+  """What CarController.update() reads from CS (test_elesys_stock_acc's double), with the cluster's units."""
+
+  def __init__(self, v_cruise_factor, is_metric=True):
+    from opendbc.car import structs
+    self.out = structs.CarState.new_message()
+    self.out.vEgo = 16.0
+    self.out.cruiseState.available = True
+    self.out.cruiseState.speed = 16.0
+    self.v_cruise_factor = v_cruise_factor
+    self.stock_brake = {"CHIME": 0, "AEB_REQ_1": 0, "AEB_REQ_2": 0, "AEB_STATUS": 0}
+    self.acc_hud = {"FCM_OFF": 0, "FCM_OFF_2": 0, "FCM_PROBLEM": 0, "ICONS": 0}
+    self.lkas_hud = {}
+    self.scm_buttons = {"CRUISE_BUTTONS": 0, "CRUISE_SETTING": 0, "MAIN_ON": 1}
+    self.is_metric = is_metric
+    self.econ_on = False
+    self.out_sp = structs.CarStateSP()
+
+
+def _now_run(CP, CP_SP, frames, set_speed, flash, visible=lambda i: True, factor=None, is_metric=True):
+  """Every frame's sends: hudControl.setSpeed = set_speed(i) and speedLimitNowFlash = flash(i), both in cluster units
+  (km/h, or mph with dynamic units), converted to m/s with `factor` as controlsd does."""
+  from opendbc.car import structs
+  from opendbc.car.common.conversions import Conversions as CV
+  from opendbc.car.honda.interface import CarInterface
+  factor = factor if factor is not None else CV.KPH_TO_MS
+  CI = CarInterface(CP, CP_SP)
+  cs = _NowCS(factor, is_metric)
+  out = []
+  for i in range(frames):
+    cc = structs.CarControl.new_message()
+    cc.enabled = cc.latActive = cc.longActive = True
+    cc.actuators.accel = 0.3
+    cc.actuators.torque = 0.1
+    cc.hudControl.speedVisible = visible(i)
+    cc.hudControl.setSpeed = set_speed(i) * factor
+    cc_sp = structs.CarControlSP()
+    cc_sp.speedLimitNowFlash = flash(i) * factor
+    _, sends = CI.CC.update(cc.as_reader(), cc_sp, cs, i * int(1e7))  # ty: ignore[invalid-argument-type]
+    out.append([_as_tuple(m) for m in sends])
+  return out
+
+
+def _acc_huds(frames):
+  return [dat for sends in frames for a, dat, bus in sends if a == 0x30C and bus == 0]
+
+
+def _masked(dat):
+  """ACC_HUD without CRUISE_SPEED (byte 3) and the checksum (byte 7's low nibble): every other signal."""
+  b = bytearray(dat)
+  b[3] = 0
+  b[7] &= 0xF0
+  return bytes(b)
+
+
+class TestElesysNowFlash(unittest.TestCase):
+  N, BLANK = 80, 255
+
+  def setUp(self):
+    self.CP, self.CP_SP = _now_params()
+    self.assertTrue(self.CP.openpilotLongitudinalControl)
+
+  def _speeds(self, frames):
+    return [d[3] for d in _acc_huds(frames)]
+
+  def test_the_pattern_and_nothing_else(self):
+    on = _now_run(self.CP, self.CP_SP, 120, lambda i: 60, lambda i: self.N)
+    off = _now_run(self.CP, self.CP_SP, 120, lambda i: 60, lambda i: 0)
+    self.assertEqual(self._speeds(on), [self.N] * 4 + [self.BLANK] * 2 + [self.N] * 4 + [self.BLANK] * 2)
+    self.assertEqual(self._speeds(off), [60] * 12)
+    for a, b in zip(_acc_huds(on), _acc_huds(off), strict=True):
+      self.assertEqual(_masked(a), _masked(b), "only CRUISE_SPEED and the checksum may change")
+      self.assertEqual((a[6] >> 4) & 1, 1, "ACC_ON stays 1 through the blank, as the stock radar sends it")
+    # every other frame, the SCM_BUTTONS stand-down (0x1A6 on bus 2) included, byte for byte
+    rest_on = [[m for m in sends if m[0] != 0x30C] for sends in on]
+    rest_off = [[m for m in sends if m[0] != 0x30C] for sends in off]
+    self.assertEqual(rest_on, rest_off)
+    self.assertTrue(any(a == 0x1A6 and bus == 2 for sends in on for a, _, bus in sends), "the stand-down is sent")
+
+  def test_it_goes_solid_on_the_take_and_on_a_drop(self):
+    # the flash goes 0 at frame 70 (a lapse, the other key, a disengage): the next send is the set speed
+    drop = self._speeds(_now_run(self.CP, self.CP_SP, 120, lambda i: 60, lambda i: self.N if i < 70 else 0))
+    self.assertEqual(drop[7:], [60] * 5)
+    # the take: the set speed becomes 80 while the flash is still held (NowFlashHold) - solid 80 from that send
+    take = self._speeds(_now_run(self.CP, self.CP_SP, 120, lambda i: 60 if i < 70 else self.N,
+                                 lambda i: self.N if i < 72 else 0))
+    self.assertEqual(take[:7], [self.N] * 4 + [self.BLANK] * 2 + [self.N])
+    self.assertEqual(take[7:], [self.N] * 5)
+    # the take landing in the flash's dark phase (sla-flash review 2): N on that very send, never a blank at the change.
+    # Frame 40 is the 5th send (dark), frame 50 the 6th (dark): the flash still held, the set speed already N
+    for take_at in (40, 50):
+      dark = self._speeds(_now_run(self.CP, self.CP_SP, 120, lambda i, t=take_at: 60 if i < t else self.N,
+                                   lambda i, t=take_at: self.N if i < t + 2 else 0))
+      lead = [self.N] * 4 + [self.BLANK] * (take_at // 10 - 4)
+      self.assertEqual(dark, lead + [self.N] * (12 - len(lead)), f"take at frame {take_at}")
+    # a re-arm starts lit
+    rearm = self._speeds(_now_run(self.CP, self.CP_SP, 120, lambda i: 60, lambda i: self.N if i < 50 or i >= 70 else 0))
+    self.assertEqual(rearm[5:7], [60, 60])
+    self.assertEqual(rearm[7:], [self.N] * 4 + [self.BLANK])
+
+  def test_not_visible_is_255_and_restarts_the_flash(self):
+    s = self._speeds(_now_run(self.CP, self.CP_SP, 120, lambda i: 60, lambda i: self.N,
+                              visible=lambda i: not 30 <= i < 50))
+    self.assertEqual(s[:3], [self.N] * 3)
+    self.assertEqual(s[3:5], [self.BLANK] * 2, "speedVisible false: 255 by the old path")
+    self.assertEqual(s[5:], [self.N] * 4 + [self.BLANK] * 2 + [self.N])
+
+  def test_imperial_with_dynamic_units(self):
+    from opendbc.car.common.conversions import Conversions as CV
+    s = self._speeds(_now_run(self.CP, self.CP_SP, 60, lambda i: 40, lambda i: 50, factor=CV.MPH_TO_MS, is_metric=False))
+    self.assertEqual(s, [50] * 4 + [self.BLANK] * 2)
+
+  def test_other_hondas_are_byte_identical(self):
+    for car in (CAR.HONDA_CIVIC, CAR.HONDA_CRV, CAR.HONDA_ACCORD):
+      CP, CP_SP = _now_params(car, pedal=False)
+      on = _now_run(CP, CP_SP, 60, lambda i: 60, lambda i: self.N)
+      off = _now_run(CP, CP_SP, 60, lambda i: 60, lambda i: 0)
+      self.assertEqual(on, off, msg=str(car))
+
+  def test_without_the_pedal_too(self):
+    CP, CP_SP = _now_params(pedal=False)
+    if CP.openpilotLongitudinalControl:
+      self.assertEqual(self._speeds(_now_run(CP, CP_SP, 60, lambda i: 60, lambda i: self.N)), [self.N] * 4 + [self.BLANK] * 2)
+
+  def test_panda_allows_every_flashed_frame(self):
+    """Every ACC_HUD the flash produces passes the honda safety tx hook under this car's own safety params, and a
+    0x30C differing only in byte 3 gets the same verdict either way (the check reads bytes 0-2 only)."""
+    from opendbc.safety.tests.libsafety import libsafety_py
+    safety = libsafety_py.libsafety
+    cfg = self.CP.safetyConfigs[-1]
+    frames = _acc_huds(_now_run(self.CP, self.CP_SP, 120, lambda i: 60, lambda i: self.N)) + \
+      _acc_huds(_now_run(self.CP, self.CP_SP, 120, lambda i: 60 if i < 70 else self.N, lambda i: self.N if i < 72 else 0))
+    for allowed in (True, False):
+      safety.set_current_safety_param_sp(self.CP_SP.safetyParam)
+      safety.set_safety_hooks(cfg.safetyModel.raw, cfg.safetyParam)
+      safety.init_tests()
+      safety.set_controls_allowed(allowed)
+      for dat in frames:
+        verdict = safety.safety_tx_hook(libsafety_py.make_CANPacket(0x30C, 0, dat))
+        if allowed:
+          self.assertTrue(verdict, dat.hex())
+        for byte3 in (60, self.N, self.BLANK, 0):
+          other = bytearray(dat)
+          other[3] = byte3
+          self.assertEqual(verdict, safety.safety_tx_hook(libsafety_py.make_CANPacket(0x30C, 0, bytes(other))))
+
+
 if __name__ == "__main__":
   unittest.main()
