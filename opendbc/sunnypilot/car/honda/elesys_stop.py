@@ -79,10 +79,13 @@ While rolling at the cap the IMU read a median 0.82 m/s^2, so the cap itself set
 At ~0.012 m/s^2 per count (the batch-3 plant's brake gain at a crawl), 105 takes ~0.24 off it:
 estimated ~0.58 at the cap, the roll 0.80 -> 0.99 s (median), 0.1-0.2 m longer (inferred). The
 closed-loop replay of the same stops through the real controller agrees in direction (true decel
-at the stop 0.08-0.22 lower where the cap binds) and shows the cost: a stop that already rolled
-long at 125 (13d t380.8: 1.74 s, max_roll, only 0.35 m/s^2 at the cap) has too little decel at
-105, and the weak/max_roll escapes then hand it to the old ramp, which is harsher. Those escapes
-are the designed fallback; the hondastop line says which one fired.
+at the stop 0.08-0.22 lower where the cap binds; median 0.70 -> 0.58) but the snap barely moves:
+the jerk after wheel-zero is a median 4.78 -> 4.64 m/s^3, about 3% smaller, not the ~25% the
+analysis hoped for. And it shows the cost: a stop that already rolled long at 125 (13d t380.8:
+1.74 s, only 0.35 m/s^2 at the cap) has too little decel at 105, its escape changes from settle to
+weak, and the old ramp it is handed to makes it marginally harsher (4.49 -> 4.54 m/s^3) - one of
+the ten. 141 t234.7 escapes by max_roll at either cap and comes out softer (4.56 -> 4.35). Those
+escapes are the designed fallback; the hondastop line says which one fired.
 
 The pump is unaffected: the cap stays above C1b's and v5's crawl threshold (cb > 100), so for any
 command c, min(c, cap) > 100 exactly when c > 100 - the crawl continuous run (0.15 <= v < 2.5 m/s)
