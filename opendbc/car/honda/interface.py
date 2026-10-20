@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+import math
 import numpy as np
-from opendbc.car import get_safety_config, structs, uds
+from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, get_safety_config, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.honda.hondacan import CanBus
@@ -24,21 +25,41 @@ TransmissionType = structs.CarParams.TransmissionType
 # while 0x1FA was already at full brake (plan -2.1 to -2.9, achieved -1.65 to -1.92). Had the plan let go there, that
 # integrator would have kept the brake on until it unwound.
 #
-# -3.2 is still full brake with room for the dynamic tuner's pitch feedforward. hill_accel is added after the PID, and
-# a climb adds demand (positive), so -3.2 still reaches -2.6 net on an uphill of up to about 6% (0.6 m/s^2). The
-# integrator stops winding as soon as the output reaches -3.2: replayed on 143 it froze at -0.81 instead of -1.33, the
-# brake command was full on all 267 frames either way, and on 13d, 141 and 142 not one frame changed. Above -3.2 the
-# PID is upstream's to the bit. Not in stock ACC mode (HondaElesysStockAcc), where nothing longitudinal is sent: its
+# The floor is -3.2 on the level and downhill, and follows a climb. The dynamic tuner's pitch feedforward (hill_accel,
+# carcontroller.py) is added AFTER the PID, and on a climb it is positive: it takes braking back. A flat -3.2 is full
+# brake only up to about 6% (hill_accel 0.6); on a 10% climb it left about 205 of 254 counts (round 8 review, the
+# real CarController). So on a climb the floor is lowered by the climb's own term, g*sin(pitch), from the same pose
+# the tuner filters (controlsd passes CC.orientationNED's pitch): floor + hill_accel stays at or below -3.2, full
+# brake, up to about 8%; from there the floor is upstream's -4.0, so on no grade does it brake less than before round
+# 8. Without a pose (none yet, or not finite) it is -4.0 as well. Above the floor the PID is upstream's to the bit.
+# The integrator stops winding as soon as the output reaches the floor: replayed on 143 (a slight downhill, so -3.2)
+# it froze at -0.81 instead of -1.33, the brake command was full on all 265 frames either way, and on 13d, 141 and 142
+# not one frame changed. Not in stock ACC mode (HondaElesysStockAcc), where nothing longitudinal is sent: its
 # carControl stays bit-identical too. Every other car keeps NIDEC_ACCEL_MIN.
-ELESYS_PID_ACCEL_MIN = -3.2  # m/s^2
+ELESYS_PID_ACCEL_MIN = -3.2  # m/s^2, on the level and downhill
 
 
-def elesys_pid_accel_min(CP, CP_SP) -> float:
-  """The PID's negative limit for a Nidec car with the gas interceptor: ELESYS_PID_ACCEL_MIN on HONDA_ELESYS outside
-  stock ACC mode, NIDEC_ACCEL_MIN everywhere else."""
-  if CP.carFingerprint in HONDA_ELESYS and not (int(getattr(CP_SP, "flags", 0)) & HondaFlagsSP.ELESYS_STOCK_ACC.value):
-    return ELESYS_PID_ACCEL_MIN
-  return CarControllerParams.NIDEC_ACCEL_MIN
+def elesys_pid_floor_applies(CP, CP_SP) -> bool:
+  """Does get_pid_accel_limits() take this car's floor: HONDA_ELESYS with the gas interceptor, stock ACC mode off."""
+  return (CP.carFingerprint in HONDA_ELESYS and bool(getattr(CP_SP, "enableGasInterceptor", False)) and
+          not (int(getattr(CP_SP, "flags", 0)) & HondaFlagsSP.ELESYS_STOCK_ACC.value))
+
+
+def elesys_pid_accel_min(CP, CP_SP, pitch=0.0) -> float:
+  """The PID's negative limit for a Nidec car with the gas interceptor. On HONDA_ELESYS outside stock ACC mode:
+  ELESYS_PID_ACCEL_MIN, lowered on a climb by g*sin(pitch) (pitch in radians, nose-up positive, as orientationNED[1]),
+  never below NIDEC_ACCEL_MIN, and NIDEC_ACCEL_MIN without a usable pitch (None or not finite). NIDEC_ACCEL_MIN
+  everywhere else."""
+  if not (CP.carFingerprint in HONDA_ELESYS and not (int(getattr(CP_SP, "flags", 0)) & HondaFlagsSP.ELESYS_STOCK_ACC.value)):
+    return CarControllerParams.NIDEC_ACCEL_MIN
+  try:
+    p = float(pitch)
+  except (TypeError, ValueError):
+    return CarControllerParams.NIDEC_ACCEL_MIN
+  if not math.isfinite(p) or abs(p) >= math.pi / 2:
+    return CarControllerParams.NIDEC_ACCEL_MIN
+  uphill = max(ACCELERATION_DUE_TO_GRAVITY * math.sin(p), 0.0)
+  return max(CarControllerParams.NIDEC_ACCEL_MIN, ELESYS_PID_ACCEL_MIN - uphill)
 
 
 class CarInterface(CarInterfaceBase):

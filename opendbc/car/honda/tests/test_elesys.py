@@ -184,8 +184,8 @@ class TestElesysPidAccelLimits(unittest.TestCase):
     self.assertEqual(lo, CarControllerParams.NIDEC_ACCEL_MIN)
 
   def test_the_floor_is_still_full_brake(self):
-    # -3.2 asks for full brake at every speed, also with the pitch feedforward of an uphill of up to ~6% added after
-    # the PID (hill_accel > 0 on a climb), so the change removes no braking the brake can deliver
+    # -3.2 asks for full brake at every speed on the level and downhill, and with the pitch feedforward of a slight
+    # climb added after the PID (hill_accel > 0 on a climb); steeper climbs are the grade-aware floor's (below)
     from opendbc.car.honda.interface import ELESYS_PID_ACCEL_MIN
     for v in np.arange(0.0, 40.0, 0.5):
       for hill in (0.0, 0.3, 0.59, -0.5, -1.5):
@@ -194,6 +194,89 @@ class TestElesysPidAccelLimits(unittest.TestCase):
     # and full brake begins at -2.6 net, so anything below about -2.6 was windup room only
     self.assertEqual(compute_gb_honda_elesys(-2.6, 10.0), (0.0, 1.0))
     self.assertLess(compute_gb_honda_elesys(-2.5, 10.0)[1], 1.0)
+
+  def test_the_floor_follows_a_climb(self):
+    # round 8 review: hill_accel (g*sin(pitch), up to +1.5) is added AFTER the PID, so a flat -3.2 gave less than full
+    # brake on climbs over ~6%. elesys_pid_accel_min(pitch) lowers the floor by the climb's term, never below -4.0
+    import math
+    from opendbc.car import ACCELERATION_DUE_TO_GRAVITY as G
+    from opendbc.car.honda.interface import ELESYS_PID_ACCEL_MIN, elesys_pid_accel_min
+    from opendbc.car.honda.values import CarControllerParams
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    old = CarControllerParams.NIDEC_ACCEL_MIN
+    CP, CP_SP = self._cp(ELESYS_CAR)
+    for grade in np.arange(0.0, 30.01, 0.5):
+      pitch = math.atan(grade / 100.0)
+      floor = elesys_pid_accel_min(CP, CP_SP, pitch)
+      hill = G * math.sin(pitch)
+      self.assertGreaterEqual(floor, old, f"never below upstream's, {grade}%")
+      self.assertLessEqual(floor, ELESYS_PID_ACCEL_MIN)
+      self.assertLessEqual(floor + hill, max(ELESYS_PID_ACCEL_MIN, old + hill) + 1e-9, f"{grade}%")
+      for v in (0.0, 5.0, 17.0, 27.0, 35.0):
+        # with the hill added back the brake is full wherever the old floor's was, and at least as firm everywhere
+        new_b, old_b = compute_gb_honda_elesys(floor + hill, v)[1], compute_gb_honda_elesys(old + hill, v)[1]
+        self.assertGreaterEqual(new_b, old_b, f"{grade}% at {v} m/s")
+        if grade <= 8.0:
+          self.assertEqual(new_b, 1.0, f"{grade}% at {v} m/s")
+    for pitch in (0.0, -0.05, -0.2, math.atan(-0.15)):
+      self.assertEqual(elesys_pid_accel_min(CP, CP_SP, pitch), ELESYS_PID_ACCEL_MIN, "the level and downhill: -3.2")
+    for pitch in (None, float("nan"), float("inf"), "x", math.pi / 2):
+      self.assertEqual(elesys_pid_accel_min(CP, CP_SP, pitch), old, f"no usable pitch: upstream's floor ({pitch})")
+    # stock ACC mode and every other car: upstream's, whatever the pitch
+    sa = self._cp(ELESYS_CAR, flags=HondaFlagsSP.ELESYS_STOCK_ACC.value)
+    for cp in (sa, self._cp(NIDEC_CAR)):
+      for pitch in (0.0, 0.1, None):
+        self.assertEqual(elesys_pid_accel_min(*cp, pitch), old)
+
+  def test_the_floor_applies_where_get_pid_accel_limits_takes_it(self):
+    from opendbc.car.honda.interface import CarInterface, ELESYS_PID_ACCEL_MIN, elesys_pid_floor_applies
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    for car in CAR:
+      for interceptor in (True, False):
+        for flags in (0, HondaFlagsSP.ELESYS_STOCK_ACC.value):
+          CP, CP_SP = self._cp(car, interceptor, flags)
+          lo, _ = CarInterface.get_pid_accel_limits(CP, CP_SP, 10.0, 25.0)
+          self.assertEqual(elesys_pid_floor_applies(CP, CP_SP), lo == ELESYS_PID_ACCEL_MIN, (car, interceptor, flags))
+
+  def test_on_a_climb_the_real_controller_brakes_as_hard_as_with_the_old_floor(self):
+    # the round 8 review's case: the PID held at its floor (an emergency the car cannot meet) on a climb, the real
+    # CarController with the tuner on (pitch feedforward, aero credit and its full-brake ramp), learned gain 1.006.
+    # The flat -3.2 left 234/224/205 of 254 counts at 7/8/10% (17 m/s); the grade-aware floor brakes as -4.0 did.
+    import math
+    from opendbc.car import structs
+    from opendbc.car.honda.interface import elesys_pid_accel_min
+    from opendbc.car.honda.values import CarControllerParams
+    from opendbc.sunnypilot.car.honda import elesys_stop as es
+    LCS = structs.CarControl.Actuators.LongControlState
+    CP, CP_SP = self._cp(ELESYS_CAR)
+
+    def settle(floor, v, pitch):
+      cc_obj = _elesys_long_controller(tuner=True)
+      cc_obj.dynamic_tuner.brake_gain = lambda *a, **k: 1.006
+      cs = _FakeCS()
+      cs.out.gearShifter = structs.CarState.GearShifter.drive
+      cs.out.vEgo = cs.out.vEgoRaw = v
+      cs.out.aEgo = -1.9
+      for i in range(300):
+        cc = structs.CarControl.new_message()
+        cc.enabled = cc.longActive = True
+        cc.orientationNED = [0.0, pitch, 0.0]
+        cc.actuators.accel = floor
+        cc.actuators.longControlState = LCS.pid
+        cc.hudControl.speedVisible = True
+        cc.hudControl.setSpeed = 30.0
+        cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, int(i * 1e7))
+      return int(cc_obj.apply_brake_last)
+
+    from unittest import mock
+    with mock.patch.object(es.carlog, "info"):
+      for v in (17.0, 27.0):
+        for grade in (0.0, 6.0, 7.0, 8.0, 10.0, 12.0):
+          pitch = math.atan(grade / 100.0)
+          old = settle(CarControllerParams.NIDEC_ACCEL_MIN, v, pitch)
+          new = settle(elesys_pid_accel_min(CP, CP_SP, pitch), v, pitch)
+          self.assertEqual(new, old, f"{grade}% at {v} m/s")
+          self.assertGreaterEqual(new, 250, f"{grade}% at {v} m/s: full brake")
 
 
 class TestBrakePumpHysteresis(unittest.TestCase):
