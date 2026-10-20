@@ -143,6 +143,142 @@ class TestComputeGbElesys(unittest.TestCase):
       self.assertAlmostEqual(brake * GOLD_BRAKE_SCALE, expect, places=6, msg=f'v={v}')
 
 
+class TestElesysPidAccelLimits(unittest.TestCase):
+  """FORK(HONDA_ACCORD_9G_AU), round 8 proposal 9: the PID's floor is -3.2 on HONDA_ELESYS (interface.py
+  elesys_pid_accel_min()), so its integrator cannot wind to -4.0 while the brake is already railed. Every other car,
+  and stock ACC mode, keeps upstream's limits."""
+
+  @staticmethod
+  def _cp(car, interceptor=True, flags=0):
+    CP = SimpleNamespace(carFingerprint=car)
+    CP_SP = SimpleNamespace(enableGasInterceptor=interceptor, flags=flags)
+    return CP, CP_SP
+
+  def test_this_car_floor_is_minus_3_2(self):
+    from opendbc.car.honda.interface import CarInterface, ELESYS_PID_ACCEL_MIN
+    from opendbc.car.honda.values import CarControllerParams
+    self.assertEqual(ELESYS_PID_ACCEL_MIN, -3.2)
+    for v in (0.0, 2.0, 10.0, 30.0):
+      lo, hi = CarInterface.get_pid_accel_limits(*self._cp(ELESYS_CAR), v, 25.0)
+      self.assertEqual((lo, hi), (-3.2, CarControllerParams.NIDEC_ACCEL_MAX))
+
+  def test_stock_acc_mode_and_every_other_car_are_upstream(self):
+    from opendbc.car.honda.interface import CarInterface
+    from opendbc.car.honda.values import CarControllerParams
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    up = (CarControllerParams.NIDEC_ACCEL_MIN, CarControllerParams.NIDEC_ACCEL_MAX)
+    self.assertEqual(CarInterface.get_pid_accel_limits(*self._cp(ELESYS_CAR, flags=HondaFlagsSP.ELESYS_STOCK_ACC.value), 10.0, 25.0), up)
+    self.assertEqual(CarInterface.get_pid_accel_limits(*self._cp(NIDEC_CAR), 10.0, 25.0), up)
+    for car in CAR:
+      if car in HONDA_ELESYS:
+        continue
+      for interceptor in (True, False):
+        CP, CP_SP = self._cp(car, interceptor)
+        lo, hi = CarInterface.get_pid_accel_limits(CP, CP_SP, 10.0, 25.0)
+        if car in HONDA_BOSCH:
+          self.assertEqual((lo, hi), (CarControllerParams.BOSCH_ACCEL_MIN, CarControllerParams.BOSCH_ACCEL_MAX), car)
+        else:
+          self.assertEqual(lo, CarControllerParams.NIDEC_ACCEL_MIN, car)
+    # this car without the interceptor: the upstream Nidec branch, untouched
+    lo, _ = CarInterface.get_pid_accel_limits(*self._cp(ELESYS_CAR, interceptor=False), 10.0, 25.0)
+    self.assertEqual(lo, CarControllerParams.NIDEC_ACCEL_MIN)
+
+  def test_the_floor_is_still_full_brake(self):
+    # -3.2 asks for full brake at every speed on the level and downhill, and with the pitch feedforward of a slight
+    # climb added after the PID (hill_accel > 0 on a climb); steeper climbs are the grade-aware floor's (below)
+    from opendbc.car.honda.interface import ELESYS_PID_ACCEL_MIN
+    for v in np.arange(0.0, 40.0, 0.5):
+      for hill in (0.0, 0.3, 0.59, -0.5, -1.5):
+        gas, brake = compute_gb_honda_elesys(ELESYS_PID_ACCEL_MIN + hill, float(v))
+        self.assertEqual((gas, brake), (0.0, 1.0), f"v {v} hill {hill}")
+    # and full brake begins at -2.6 net, so anything below about -2.6 was windup room only
+    self.assertEqual(compute_gb_honda_elesys(-2.6, 10.0), (0.0, 1.0))
+    self.assertLess(compute_gb_honda_elesys(-2.5, 10.0)[1], 1.0)
+
+  def test_the_floor_follows_a_climb(self):
+    # round 8 review: hill_accel (g*sin(pitch), up to +1.5) is added AFTER the PID, so a flat -3.2 gave less than full
+    # brake on climbs over ~6%. elesys_pid_accel_min(pitch) lowers the floor by the climb's term, never below -4.0
+    import math
+    from opendbc.car import ACCELERATION_DUE_TO_GRAVITY as G
+    from opendbc.car.honda.interface import ELESYS_PID_ACCEL_MIN, elesys_pid_accel_min
+    from opendbc.car.honda.values import CarControllerParams
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    old = CarControllerParams.NIDEC_ACCEL_MIN
+    CP, CP_SP = self._cp(ELESYS_CAR)
+    for grade in np.arange(0.0, 30.01, 0.5):
+      pitch = math.atan(grade / 100.0)
+      floor = elesys_pid_accel_min(CP, CP_SP, pitch)
+      hill = G * math.sin(pitch)
+      self.assertGreaterEqual(floor, old, f"never below upstream's, {grade}%")
+      self.assertLessEqual(floor, ELESYS_PID_ACCEL_MIN)
+      self.assertLessEqual(floor + hill, max(ELESYS_PID_ACCEL_MIN, old + hill) + 1e-9, f"{grade}%")
+      for v in (0.0, 5.0, 17.0, 27.0, 35.0):
+        # with the hill added back the brake is full wherever the old floor's was, and at least as firm everywhere
+        new_b, old_b = compute_gb_honda_elesys(floor + hill, v)[1], compute_gb_honda_elesys(old + hill, v)[1]
+        self.assertGreaterEqual(new_b, old_b, f"{grade}% at {v} m/s")
+        if grade <= 8.0:
+          self.assertEqual(new_b, 1.0, f"{grade}% at {v} m/s")
+    for pitch in (0.0, -0.05, -0.2, math.atan(-0.15)):
+      self.assertEqual(elesys_pid_accel_min(CP, CP_SP, pitch), ELESYS_PID_ACCEL_MIN, "the level and downhill: -3.2")
+    for pitch in (None, float("nan"), float("inf"), "x", math.pi / 2):
+      self.assertEqual(elesys_pid_accel_min(CP, CP_SP, pitch), old, f"no usable pitch: upstream's floor ({pitch})")
+    # stock ACC mode and every other car: upstream's, whatever the pitch
+    sa = self._cp(ELESYS_CAR, flags=HondaFlagsSP.ELESYS_STOCK_ACC.value)
+    for cp in (sa, self._cp(NIDEC_CAR)):
+      for pitch in (0.0, 0.1, None):
+        self.assertEqual(elesys_pid_accel_min(*cp, pitch), old)
+
+  def test_the_floor_applies_where_get_pid_accel_limits_takes_it(self):
+    from opendbc.car.honda.interface import CarInterface, ELESYS_PID_ACCEL_MIN, elesys_pid_floor_applies
+    from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+    for car in CAR:
+      for interceptor in (True, False):
+        for flags in (0, HondaFlagsSP.ELESYS_STOCK_ACC.value):
+          CP, CP_SP = self._cp(car, interceptor, flags)
+          lo, _ = CarInterface.get_pid_accel_limits(CP, CP_SP, 10.0, 25.0)
+          self.assertEqual(elesys_pid_floor_applies(CP, CP_SP), lo == ELESYS_PID_ACCEL_MIN, (car, interceptor, flags))
+
+  def test_on_a_climb_the_real_controller_brakes_as_hard_as_with_the_old_floor(self):
+    # the round 8 review's case: the PID held at its floor (an emergency the car cannot meet) on a climb, the real
+    # CarController with the tuner on (pitch feedforward, aero credit and its full-brake ramp), learned gain 1.006.
+    # The flat -3.2 left 234/224/205 of 254 counts at 7/8/10% (17 m/s); the grade-aware floor brakes as -4.0 did.
+    import math
+    from opendbc.car import structs
+    from opendbc.car.honda.interface import elesys_pid_accel_min
+    from opendbc.car.honda.values import CarControllerParams
+    from opendbc.sunnypilot.car.honda import elesys_stop as es
+    LCS = structs.CarControl.Actuators.LongControlState
+    CP, CP_SP = self._cp(ELESYS_CAR)
+
+    def settle(floor, v, pitch):
+      cc_obj = _elesys_long_controller(tuner=True)
+      cc_obj.dynamic_tuner.brake_gain = lambda *a, **k: 1.006
+      cs = _FakeCS()
+      cs.out.gearShifter = structs.CarState.GearShifter.drive
+      cs.out.vEgo = cs.out.vEgoRaw = v
+      cs.out.aEgo = -1.9
+      for i in range(300):
+        cc = structs.CarControl.new_message()
+        cc.enabled = cc.longActive = True
+        cc.orientationNED = [0.0, pitch, 0.0]
+        cc.actuators.accel = floor
+        cc.actuators.longControlState = LCS.pid
+        cc.hudControl.speedVisible = True
+        cc.hudControl.setSpeed = 30.0
+        cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, int(i * 1e7))
+      return int(cc_obj.apply_brake_last)
+
+    from unittest import mock
+    with mock.patch.object(es.carlog, "info"):
+      for v in (17.0, 27.0):
+        for grade in (0.0, 6.0, 7.0, 8.0, 10.0, 12.0):
+          pitch = math.atan(grade / 100.0)
+          old = settle(CarControllerParams.NIDEC_ACCEL_MIN, v, pitch)
+          new = settle(elesys_pid_accel_min(CP, CP_SP, pitch), v, pitch)
+          self.assertEqual(new, old, f"{grade}% at {v} m/s")
+          self.assertGreaterEqual(new, 250, f"{grade}% at {v} m/s: full brake")
+
+
 class TestBrakePumpHysteresis(unittest.TestCase):
   """Upstream pump logic must stay pristine; the Elesys variant trades the 20 s bleed window
   for short runs (0.5 s) at a load-scaled period with a jitter deadband.
@@ -490,7 +626,7 @@ class TestBrakePumpC1b(unittest.TestCase):
     c = _C1b()
     on = [c.step(150, v=2.4 - i * 0.0088) for i in range(250)]   # 5 s, 2.4 -> 0.2 m/s: the final approach
     self.assertTrue(all(on))
-    for cb, v in ((101, 0.15), (125, 1.0), (253, 2.0), (101, 2.49)):
+    for cb, v in ((101, 0.15), (105, 1.0), (125, 1.0), (253, 2.0), (101, 2.49)):
       c = _C1b()
       self.assertTrue(all(c.hold(cb, 10.0, v=v)), msg=f"cb {cb} at {v} m/s")
     # its edges: 100 counts is not above 100, 0.14 m/s is standstill, 2.5 m/s is the firm band's (cb > 200 there)
@@ -518,26 +654,29 @@ class TestBrakePumpC1b(unittest.TestCase):
     self.assertEqual(c.level, 185)
 
   def test_the_soft_stops_rise_to_the_hold_is_delivered_once(self):
-    # approach at cb 150 (pumped while moving), the soft stop's cap of 125 while rolling (now inside the crawl run),
-    # then its 125 -> 189 rise at standstill (250 counts/s = 5 per 0x1FA frame): delivered in one run - the crawl run's
-    # tail extends through the climb - and a steady hold never re-pumps
-    c = _C1b()
-    c.hold(150, 2.0, v=3.0)
-    self.assertTrue(all(c.hold(125, 1.0, v=0.5)))
-    on = [c.step(cb, v=0.0) for cb in range(125, 190, 5)] + c.hold(189, 120.0, v=0.0)
-    self.assertEqual(_C1b.starts(on), 1)
-    self.assertTrue(all(on[:13]), "the whole rise is pumped")
-    self.assertGreaterEqual(c.level, 189)
-    self.assertFalse(any(on[-5000:]), "no top-up after it")
-    # the same rise with the crawl run long over (the wheels stopped 2 s before): one hold-rise burst, as in C1
-    c = _C1b()
-    c.hold(150, 2.0, v=3.0)
-    c.hold(125, 1.0, v=0.5)
-    c.hold(125, 2.0, v=0.0)
-    self.assertEqual(c.level, 125)
-    on = [c.step(cb, v=0.0) for cb in range(125, 190, 5)] + c.hold(189, 120.0, v=0.0)
-    self.assertEqual(_C1b.starts(on), 1)
-    self.assertGreaterEqual(c.level, 189)
+    # approach at cb 150 (pumped while moving), the soft stop's cap while rolling (105 since round 8, 125 before; inside
+    # the crawl run either way), then its rise to 189 at standstill (250 counts/s = 5 per 0x1FA frame): delivered in one
+    # run - the crawl run's tail extends through the climb - and a steady hold never re-pumps
+    for cap in (105, 125):
+      with self.subTest(cap=cap):
+        c = _C1b()
+        c.hold(150, 2.0, v=3.0)
+        self.assertTrue(all(c.hold(cap, 1.0, v=0.5)))
+        rise = list(range(cap, 190, 5))
+        on = [c.step(cb, v=0.0) for cb in rise] + c.hold(189, 120.0, v=0.0)
+        self.assertEqual(_C1b.starts(on), 1)
+        self.assertTrue(all(on[:len(rise)]), "the whole rise is pumped")
+        self.assertGreaterEqual(c.level, 189)
+        self.assertFalse(any(on[-5000:]), "no top-up after it")
+        # the same rise with the crawl run long over (the wheels stopped 2 s before): one hold-rise burst, as in C1
+        c = _C1b()
+        c.hold(150, 2.0, v=3.0)
+        c.hold(cap, 1.0, v=0.5)
+        c.hold(cap, 2.0, v=0.0)
+        self.assertEqual(c.level, cap)
+        on = [c.step(cb, v=0.0) for cb in range(cap, 190, 5)] + c.hold(189, 120.0, v=0.0)
+        self.assertEqual(_C1b.starts(on), 1)
+        self.assertGreaterEqual(c.level, 189)
 
   def test_standstill_hold_reached_light_gets_one_hold_build_burst(self):
     # stop reached at cb 40: the 40 -> 189 rise at standstill builds the hold - one burst, extended through the
@@ -739,7 +878,7 @@ class TestElesysPumpRuleSelection(unittest.TestCase):
 
 class TestElesysC1bWithTheSoftStop(unittest.TestCase):
   """FORK(HONDA_ACCORD_9G_AU): the real CarController with the tuner on, so the soft stop is built, and C1b selected.
-  The soft stop caps the rolling command at ~125 counts and raises it to the hold after the wheels read zero; C1b must
+  The soft stop caps the rolling command at ~105 counts and raises it to the hold after the wheels read zero; C1b must
   pump the capped approach (the crawl run, which the cap was sized for), deliver the rise to the hold, and not top the
   hold up afterwards. The pump is read where the car reads it: BRAKE_PUMP_REQUEST in the 0x1FA the controller sends."""
 
@@ -791,7 +930,7 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
       cc.enabled = cc.longActive = True
       cc.orientationNED = [0.0, 0.0, 0.0]
       # the planner eases off into the stop (the creep table adds ~0.75 m/s^2 at 0.9 m/s: ~90 counts at entry, under
-      # the 125 cap), then longcontrol's stopping accel, which the cap holds at 125 until the wheels read zero
+      # the 105 cap), then longcontrol's stopping accel, which the cap holds at 105 until the wheels read zero
       cc.actuators.accel = (-1.0 if v > 3.0 else -0.2) if not stopping else -0.8
       cc.actuators.longControlState = structs.CarControl.Actuators.LongControlState.stopping if stopping else \
         structs.CarControl.Actuators.LongControlState.pid
@@ -808,7 +947,8 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
     self.assertGreater(len(out), 1900, "a 0x1FA every other frame")
     t_stop = next(t for t, v, *_ in out if v <= 0.9)
     rolling = [cb for t, v, _, cb, *_ in out if t >= t_stop and v > 0.0]
-    self.assertTrue(rolling and max(rolling) <= 130, f"the soft stop caps the rolling command: {max(rolling or [0])}")
+    from opendbc.sunnypilot.car.honda.elesys_stop import SOFT_STOP_ROLL_CB
+    self.assertTrue(rolling and max(rolling) <= SOFT_STOP_ROLL_CB + 5, f"the soft stop caps the rolling command: {max(rolling or [0])}")
     held = [cb for t, v, ss, cb, *_ in out if ss and t > 10.0]
     self.assertGreaterEqual(min(held), 180, "the hold the soft stop rises to")
     level_end = out[-1][4]
@@ -820,7 +960,7 @@ class TestElesysC1bWithTheSoftStop(unittest.TestCase):
     self.assertFalse(any(p for t, _, ss, _, _, p in out if ss and t > t_still + 3.0), "the 0x1FA pump bit stays off")
 
   def test_c1b_pumps_the_capped_approach_through_the_crawl_run(self):
-    # what the soft stop's 125 cap was sized for: every rolling 0x1FA at 0.15 <= v < 2.5 with the command above 100
+    # what the soft stop's cap (105, above 100) was sized for: every rolling 0x1FA at 0.15 <= v < 2.5 with the command above 100
     # carries the pump bit - the crawl run C1b restores (C1 had it on for 39% of that zone on route 120's stop)
     from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
     _, out = self._run(HondaFlagsSP.ELESYS_PUMP_C1B.value)
@@ -1170,6 +1310,9 @@ class TestElesysTorquePrior(unittest.TestCase):
     # This car's factor rises with speed, 0.67 in town to 1.66 on the highway commute, and no +-30% window
     # holds that (2.5 against 1.86). The 1.25 prior (2026-10-03; 1.1 before) chooses the highway: commuting
     # dominates the engaged steering, and a feedforward that is too strong at speed is the worse error.
+    # This pins the prior's +-30% window. Since round 8 (2026-10-20) sunnypilot's torqued raises this car's floor to 1.10
+    # (openpilot/sunnypilot/selfdrive/locationd/torque_floor.py, pinned by test_torqued_elesys.py): on 13d-143 the
+    # factor sat at 0.875-0.93, held there by points taken with a hand resting on the wheel, not by town speed alone.
     from opendbc.car.interfaces import get_torque_params
     p = get_torque_params()['HONDA_ACCORD_9G_AU']
     lo, hi = 0.7 * p['LAT_ACCEL_FACTOR'], 1.3 * p['LAT_ACCEL_FACTOR']
@@ -1187,7 +1330,7 @@ class TestElesysTorquePrior(unittest.TestCase):
     # 1.1 prior's 1.43 ceiling sat 12-14% below them, held 100% of the raw and ended at 1.396.
     for factor in (1.634, 1.65, 1.664):
       self.assertLess(abs(factor - hi) / factor, 0.03, msg=f"{factor} vs ceiling {hi}")
-    # Clipped at the floor, by design: the town routes (d8/d9/e1/e2, ~60 km/h) give a raw factor down to
+    # Clipped at the prior's floor, by design (and at 1.10 since round 8): the town routes (d8/d9/e1/e2, ~60 km/h) give a raw factor down to
     # 0.667, medians 0.791-0.868, and filtered 0.813-0.867 under the 1.1 prior. With this prior, town first
     # (d5..e2 -> fc -> fd -> 103 -> 10f), the raw sits below 0.875 on 97-100% of d9/e1/e2/fc and the
     # filtered factor ends e2 0.882 and fc 0.876, then recovers to 1.353 by the end of 10f.

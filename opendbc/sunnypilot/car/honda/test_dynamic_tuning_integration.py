@@ -1277,14 +1277,21 @@ entry = next(k for k, r in enumerate(rows_soft) if r["stopping"])
 print(f"        entry cb {rows_ref[entry]['cb']}; at wheel-zero: reference {rows_ref[wz]['cb']}, " +
       f"soft {rows_soft[wz]['cb']}; hold {rows_ref[-1]['cb']}")
 check("the reference ramp is well past the cap when the wheels read zero", rows_ref[wz]["cb"] >= 150, f"{rows_ref[wz]['cb']}")
+# the release limiter sits AFTER the ceiling, so a PID command above the cap walks down to it at <= 32 counts per send
+# first (here 109 -> 101 at entry, with the cap at 105); from the first send at or under the cap it is the cap
+capped_from = next(k for k in range(entry, wz + 1) if rows_soft[k]["cb"] <= int(es.SOFT_STOP_ROLL_CB))
+check("entering the stopping state above the cap, the walk down to it is the release limiter's",
+      all(rows_soft[k - 1]["cb"] - rows_soft[k]["cb"] <= 32 for k in range(entry, capped_from + 1)) and capped_from - entry <= 3,
+      f"{[r['cb'] for r in rows_soft[entry - 1:capped_from + 1]]}")
 check("rolling in the stopping state, the soft stop holds the cap",
-      max(r["cb"] for r in rows_soft[entry:wz + 1]) == int(es.SOFT_STOP_ROLL_CB), f"{[r['cb'] for r in rows_soft[entry:wz + 1]]}")
+      max(r["cb"] for r in rows_soft[capped_from:wz + 1]) == int(es.SOFT_STOP_ROLL_CB), f"{[r['cb'] for r in rows_soft[entry:wz + 1]]}")
 first_up = next(k for k in range(wz, len(rows_soft)) if rows_soft[k]["cb"] > int(es.SOFT_STOP_ROLL_CB))
 check("and keeps it for >= 0.5 s after the wheels read zero",
       (rows_soft[first_up]["i"] - rows_soft[wz]["i"]) * 0.01 >= 0.5, f"{(rows_soft[first_up]['i'] - rows_soft[wz]['i']) * 0.01:.2f} s")
 hold = rows_ref[-1]["cb"]
 reach = next(k for k in range(first_up, len(rows_soft)) if rows_soft[k]["cb"] == hold)
-check("then rises to today's hold within 0.3 s", (rows_soft[reach]["i"] - rows_soft[first_up]["i"]) * 0.01 <= 0.3)
+rise_s = (hold - es.SOFT_STOP_ROLL_CB) / es.SOFT_STOP_RISE + 0.02      # 105 -> 189 at 250 counts/s: ~0.34 s
+check(f"then rises to today's hold within {rise_s:.2f} s", (rows_soft[reach]["i"] - rows_soft[first_up]["i"]) * 0.01 <= rise_s)
 late = [(s["i"], s["dat"].hex(), r["dat"].hex()) for s, r in zip(rows_soft, rows_ref, strict=True)
         if s["i"] >= rows_soft[wz]["i"] + 150 and s["dat"] != r["dat"]]
 check("from 1.5 s after wheel-zero the hold is today's, byte for byte (pump bit, checksum, all)", not late, f"{late[:2]}")
@@ -1301,10 +1308,11 @@ check("the learners never see it: brake gain, its integrator and the per-mode co
 
 # a 2.5 deg downhill: the cap carries ~42 more counts (the tuner's filtered pitch has long converged).
 # Read it during the settle, where the reference is on its way to the hold and only the cap holds it.
-for deg, cap in ((-2.5, 167), (2.5, 125)):
+for deg, cap in ((-2.5, int(es.SOFT_STOP_ROLL_CB) + 42), (2.5, int(es.SOFT_STOP_ROLL_CB))):
   rows_g, rows_gr = stop_drive(build()[0], pitch=math.radians(deg)), stop_drive(build_ref(), pitch=math.radians(deg))
   wz_g = next(k for k, r in enumerate(rows_g) if r["stopping"] and r["wz"])
   entry_g = next(k for k, r in enumerate(rows_g) if r["stopping"])
+  entry_g = next(k for k in range(entry_g, wz_g + 1) if rows_g[k]["cb"] <= cap)   # past the release limiter's walk down
   settle = range(entry_g, wz_g + 25)          # to 0.5 s after wheel-zero
   check(f"{deg:+.1f} deg: the ceiling through the roll and the settle is {cap}",
         max(rows_g[k]["cb"] for k in settle) == cap and max(rows_gr[k]["cb"] for k in settle) > cap + 10,
