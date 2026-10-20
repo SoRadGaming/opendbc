@@ -175,6 +175,19 @@ def create_bosch_supplemental_1(packer, CAN):
   return packer.make_can_msg("BOSCH_SUPPLEMENTAL_1", CAN.lkas, values)
 
 
+# FORK(SPEED-LIMIT): sla-flash. The Elesys radar's own CRUISE_SPEED flash for a speed it is building up to: the speed for
+# 4 ACC_HUD frames, 255 (blank, with ACC_ON still 1) for 2, at 10 Hz - 0.4 s lit, 0.2 s dark. 13 fully-stock drives:
+# never two numbers alternating, always N / 255 (sunnypilot scratchpad slaflash/inv.md 3.5).
+NOW_FLASH_ON = 4
+NOW_FLASH_PERIOD = 6
+
+
+def now_flash_speed(speed: float, sends: int) -> float:
+  """FORK(SPEED-LIMIT): sla-flash. CRUISE_SPEED on the `sends`-th ACC_HUD (0 = the first) of a flash of `speed`
+  (cluster units): lit first, the stock radar's rhythm. Pure."""
+  return speed if sends % NOW_FLASH_PERIOD < NOW_FLASH_ON else 255
+
+
 def create_acc_hud(packer, bus, CP, enabled, pcm_speed, pcm_accel, hud_control, hud_v_cruise, is_metric, acc_hud):
   acc_hud_values = {
     'CRUISE_SPEED': hud_v_cruise,

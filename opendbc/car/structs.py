@@ -145,6 +145,10 @@ class CarControlSP:
   leadTwo: 'LeadData' = field(default_factory=lambda: LeadData())
   intelligentCruiseButtonManagement: 'IntelligentCruiseButtonManagement' = field(default_factory=lambda: IntelligentCruiseButtonManagement())
   lateralControl: 'CarControlSP.LateralControl' = field(default_factory=lambda: CarControlSP.LateralControl())
+  # FORK(SPEED-LIMIT): sla-flash - the set speed the cluster flashes while Speed Limit Assist holds a press made at
+  # 'now' (m/s, 0 = none): honda carcontroller.py, openpilot's own ACC_HUD only. cereal/custom.capnp
+  # speedLimitNowFlash @6. Flat, so convert_carControlSP's top-level splat carries it; the name must match.
+  speedLimitNowFlash: float = auto_field()
 
   @auto_dataclass
   class LateralControl:
@@ -185,6 +189,16 @@ class CarStateSP:
   vsaFault: bool = auto_field()
   vsaStoredFault: bool = auto_field()
   linbusGateway: 'CarStateSP.LinbusGateway' = field(default_factory=lambda: CarStateSP.LinbusGateway())
+  # FORK(SPEED-LIMIT): sla-flash - the presses card took as a 'now' arm. card (sunnypilot) writes them on the capnp
+  # builder after convert_to_capnp; the car layer never sets them, so here they are always zeros. cereal/custom.capnp
+  # speedLimitNow @5: the same names, or the splat into custom.CarStateSP.new_message(**dict) fails.
+  speedLimitNow: 'CarStateSP.SpeedLimitNow' = field(default_factory=lambda: CarStateSP.SpeedLimitNow())
+
+  @auto_dataclass
+  class SpeedLimitNow:
+    consumedSeq: int = auto_field()
+    consumedLimit: int = auto_field()
+    consumedPlus: bool = auto_field()
 
   @auto_dataclass
   class LinbusGateway:
