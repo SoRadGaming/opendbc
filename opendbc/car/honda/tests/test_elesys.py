@@ -1227,6 +1227,9 @@ class TestElesysTorquePrior(unittest.TestCase):
     # This car's factor rises with speed, 0.67 in town to 1.66 on the highway commute, and no +-30% window
     # holds that (2.5 against 1.86). The 1.25 prior (2026-10-03; 1.1 before) chooses the highway: commuting
     # dominates the engaged steering, and a feedforward that is too strong at speed is the worse error.
+    # This pins the prior's +-30% window. Since round 8 (2026-10-20) sunnypilot's torqued raises this car's floor to 1.10
+    # (openpilot/sunnypilot/selfdrive/locationd/torque_floor.py, pinned by test_torqued_elesys.py): on 13d-143 the
+    # factor sat at 0.875-0.93, held there by points taken with a hand resting on the wheel, not by town speed alone.
     from opendbc.car.interfaces import get_torque_params
     p = get_torque_params()['HONDA_ACCORD_9G_AU']
     lo, hi = 0.7 * p['LAT_ACCEL_FACTOR'], 1.3 * p['LAT_ACCEL_FACTOR']
@@ -1244,7 +1247,7 @@ class TestElesysTorquePrior(unittest.TestCase):
     # 1.1 prior's 1.43 ceiling sat 12-14% below them, held 100% of the raw and ended at 1.396.
     for factor in (1.634, 1.65, 1.664):
       self.assertLess(abs(factor - hi) / factor, 0.03, msg=f"{factor} vs ceiling {hi}")
-    # Clipped at the floor, by design: the town routes (d8/d9/e1/e2, ~60 km/h) give a raw factor down to
+    # Clipped at the prior's floor, by design (and at 1.10 since round 8): the town routes (d8/d9/e1/e2, ~60 km/h) give a raw factor down to
     # 0.667, medians 0.791-0.868, and filtered 0.813-0.867 under the 1.1 prior. With this prior, town first
     # (d5..e2 -> fc -> fd -> 103 -> 10f), the raw sits below 0.875 on 97-100% of d9/e1/e2/fc and the
     # filtered factor ends e2 0.882 and fc 0.876, then recovers to 1.353 by the end of 10f.
