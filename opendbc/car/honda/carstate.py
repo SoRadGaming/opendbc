@@ -361,6 +361,16 @@ class CarState(CarStateBase, CarStateExt):
     pt_msgs = [("GW_ACTIVE", float("nan")), ("GW_STEER_GRANT", float("nan")),
                ("EPS_LIN_RAW", float("nan")), ("GW_VERSION", float("nan")),
                ("GW_BUILD", float("nan")), ("VEHICLE_DYNAMICS", float("nan"))] if CP.carFingerprint in HONDA_ELESYS else []
+    # FORK(BRAKE-LAMP-RELAY): the BLR-v1 brake-lamp board's telemetry, 0x620-0x62F (_sunnypilot_blr.dbc). All seven
+    # frames, liveness-exempt for the reason above: the board can be absent, sitting in its bootloader, or have its
+    # transmitter off for the power cycle, and a frame first reached lazily through cp.vl would be liveness-checked
+    # and cost openpilot its CAN whenever the board is quiet. Decoded into carStateSP.brakeLampRelay by
+    # CarStateExt._update_blr() for card's identity params. DIAGNOSTICS ONLY: no BLR signal feeds brakePressed or any
+    # other CarState field, a controls decision or panda safety.
+    if CP.carFingerprint in HONDA_ELESYS:
+      pt_msgs += [("BLR_STATUS", float("nan")), ("BLR_ANALOG", float("nan")), ("BLR_HEALTH", float("nan")),
+                  ("BLR_COUNTERS", float("nan")), ("BLR_COUNTERS2", float("nan")), ("BLR_VERSION", float("nan")),
+                  ("BLR_BUILD", float("nan"))]
     parsers = {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_msgs, CanBus(CP).pt),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),

@@ -193,6 +193,9 @@ class CarStateSP:
   # builder after convert_to_capnp; the car layer never sets them, so here they are always zeros. cereal/custom.capnp
   # speedLimitNow @5: the same names, or the splat into custom.CarStateSP.new_message(**dict) fails.
   speedLimitNow: 'CarStateSP.SpeedLimitNow' = field(default_factory=lambda: CarStateSP.SpeedLimitNow())
+  # FORK(BRAKE-LAMP-RELAY): the BLR-v1 brake-lamp board, diagnostics only (opendbc/sunnypilot/car/honda/carstate_ext.py
+  # _update_blr). Same lockstep rule as above: cereal/custom.capnp CarStateSP.brakeLampRelay @6.
+  brakeLampRelay: 'CarStateSP.BrakeLampRelay' = field(default_factory=lambda: CarStateSP.BrakeLampRelay())
 
   @auto_dataclass
   class SpeedLimitNow:
@@ -240,3 +243,33 @@ class CarStateSP:
     # GW_ACTIVE (0x704) INH_BLINKER from a fresh frame: the board's lane-change ceiling is in force. Logged
     # only. Same lockstep rule: cereal/custom.capnp blinkerCapped @28.
     blinkerCapped: bool = auto_field()
+
+  # FORK(BRAKE-LAMP-RELAY): BLR_STATUS (0x620), BLR_ANALOG (0x621), BLR_VERSION (0x627), BLR_BUILD (0x62F). Names and
+  # order must stay in lockstep with cereal/custom.capnp CarStateSP.BrakeLampRelay: card publishes this dataclass
+  # through convert_to_capnp(), which splats it into custom.CarStateSP.new_message(**dict). NOTHING may read these to
+  # decide anything about braking, the lamps or control: they are the board's diagnostics, for card's params and logs.
+  @auto_dataclass
+  class BrakeLampRelay:
+    valid: bool = auto_field()
+    state: int = auto_field()
+    outDrive: bool = auto_field()
+    wouldOn: bool = auto_field()
+    request: bool = auto_field()
+    cmdFresh: bool = auto_field()
+    variant: int = auto_field()
+    faults: int = auto_field()
+    latchReason: int = auto_field()
+    driverBraking: bool = auto_field()
+    extSink: bool = auto_field()
+    relaySnsMv: int = auto_field()
+    lampSnsMv: int = auto_field()
+    vbatSnsMv: int = auto_field()
+    fwValid: bool = auto_field()
+    fwGitHash: int = auto_field()
+    fwDirty: bool = auto_field()
+    bootPresent: bool = auto_field()
+    bootGitLo24: int = auto_field()
+    boardUid24: int = auto_field()
+    optBorEn: bool = auto_field()
+    buildValid: bool = auto_field()
+    optDualBank: bool = auto_field()
