@@ -56,10 +56,11 @@ class TestStockAccHookOff(unittest.TestCase):
         self.assertEqual(_sp_tuple(CP_SP), _sp_tuple(base_sp), msg=f"pedal={pedal} {params_list}")
 
   def test_off_values_are_todays(self):
-    # the car's running configuration (route 113): hondaNidec 36, SP 2, openpilot long, interceptor, pcmCruise False
+    # the car's running configuration (route 113): hondaNidec 36, SP 2, openpilot long, interceptor, pcmCruise False;
+    # 164 since brake320 (2026-10-24: 4|32|128, panda's max_brake 320)
     CP, CP_SP = _params(params_list=[{PARAM: False}])
     self.assertEqual(CP.safetyConfigs[-1].safetyModel, structs.CarParams.SafetyModel.hondaNidec)
-    self.assertEqual(CP.safetyConfigs[-1].safetyParam, 36)
+    self.assertEqual(CP.safetyConfigs[-1].safetyParam, 164)
     self.assertEqual(CP_SP.safetyParam, HondaSafetyFlagsSP.GAS_INTERCEPTOR)
     self.assertTrue(CP.openpilotLongitudinalControl)
     self.assertFalse(CP.pcmCruise)

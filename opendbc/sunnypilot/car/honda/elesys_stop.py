@@ -30,14 +30,21 @@ WHAT: a brake CEILING while the car is still rolling in the stopping state.
                  WEAK     aEgo > -0.25 m/s^2 for 0.4 s, counted only once the command has sat AT
                           the ceiling for 0.3 s
                  MAX_ROLL 1.9 s since entry, absolute: rolling or settling, whatever the wheels do
-  done         at 255 counts the ceiling is out of the way, so the standstill hold is today's
-               (189), byte for byte
+  done         at the highest command the brake block can send (255; 320 with brake320, 255 again
+               after its VSA fallback) the ceiling is out of the way, so the standstill hold is
+               today's (189), byte for byte
   no ceiling   stopping entered with the wheels already at zero, or faster than 1.2 m/s (vEgo;
                unknown counts as faster); outside the stopping state; longActive false; gas or
                brake pressed. The last three reset the state.
 
 The bound: the rise starts 1.9 s after entry at the latest and the ceiling is gone 0.60 s after
 that (105 -> 255 at 250 counts/s), so nothing of it is left 2.50 s after the stopping state began.
+With brake320 (brake_ceiling.py) the ceiling rises on to 320, 0.86 s, 2.76 s after entry; between 255
+and 320 it can only bind on a command above 255, which the brake block cannot send in the stopping
+state: only the pid state earns beyond 255 (review 2026-10-24, which found stops entered from a
+hard brake holding LongControl's -2.6 to -3.0 at 267-317 counts for the whole standstill before
+that gate). A stop's hold is 189 from stopAccel, or at most 255 after a hard brake, as before.
+The release limiter, after this ceiling, still walks a higher approach command down 32 a send.
 On the replayed stops every rise was SETTLE, at most 1.82 s after entry.
 
 The ENTRY SPEED bound (review, 2026-10): the weak-decel escape cannot fire while the car is
@@ -110,7 +117,7 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 SOFT_STOP_DT = 2 * DT_CTRL       # s; the Nidec brake block runs on every other 100 Hz frame
 SOFT_STOP_ROLL_CB = 105.         # counts: the ceiling while rolling on the flat (125 until round 8); keep > 100
-SOFT_STOP_GRADE_CB = 9.81 / 2.6 * 256   # counts per unit of -sin(pitch): full brake is 2.6 m/s^2 at 256
+SOFT_STOP_GRADE_CB = 9.81 / 2.6 * 256   # counts per unit of -sin(pitch): the brake law's 2.6 m/s^2 per 256 counts
 SOFT_STOP_SETTLE = 0.55          # s the ceiling holds after the wheels first read zero
 SOFT_STOP_RISE = 250.            # counts/s once rising: 5 counts per 50 Hz frame
 SOFT_STOP_AT_CEILING = 0.3       # s the command must sit at the ceiling before weak decel counts
@@ -118,7 +125,9 @@ SOFT_STOP_WEAK_DECEL = 0.25      # m/s^2: aEgo above -this is "not slowing"
 SOFT_STOP_WEAK_TIME = 0.4        # s of not slowing, at the ceiling, before the rise
 SOFT_STOP_MAX_ROLL = 1.9         # s since entry, absolute: the rise starts by then whatever the wheels do
 SOFT_STOP_MAX_ENTRY_V = 1.2      # m/s (vEgo): stopping entered faster gets no ceiling; measured entries max 1.08
-SOFT_STOP_DONE_CB = 255.         # the highest command the brake block can send: the ceiling is gone
+# the highest command the brake block can send: the ceiling is gone. The default; brake320's CarController passes its
+# own (320, or 255 after the VSA fallback) as done_cb
+SOFT_STOP_DONE_CB = 255.
 WHEELS_ZERO_SPEED = 1e-3         # m/s; vEgoRaw at or below this reads as the wheels stopped
 LOG_TAG = "hondastop"
 
@@ -161,12 +170,13 @@ def soft_stop_cap(pitch) -> float:
 
 
 def soft_stop_ceiling(stopping: bool, wheels_zero: bool, v_ego: float, a_ego: float, pitch, apply_brake: int,
-                      st: SoftStopState | None, dt: float = SOFT_STOP_DT) -> tuple[int, SoftStopState | None]:
+                      st: SoftStopState | None, dt: float = SOFT_STOP_DT,
+                      done_cb: float = SOFT_STOP_DONE_CB) -> tuple[int, SoftStopState | None]:
   """One 50 Hz brake frame. Returns (the command to send, the state to pass back next frame).
 
   `stopping` is the caller's whole gate: longActive, the stopping state, and no gas or brake
   pedal. The output is never above `apply_brake`; the state is None whenever there is no stop.
-  `v_ego` matters on the entry frame only.
+  `v_ego` matters on the entry frame only. `done_cb` is the highest command the brake block can send.
   """
   if not stopping:
     return apply_brake, None
@@ -211,7 +221,7 @@ def soft_stop_ceiling(stopping: bool, wheels_zero: bool, v_ego: float, a_ego: fl
 
   if st.rising:
     st.ceiling += SOFT_STOP_RISE * dt     # monotone: it never falls back during this stop
-  if st.ceiling >= SOFT_STOP_DONE_CB:
+  if st.ceiling >= done_cb:
     st.armed = False                      # out of the way; the hold is today's
     return apply_brake, st
   return min(apply_brake, int(st.ceiling)), st
@@ -242,7 +252,7 @@ class ElesysSoftStop:
   def __init__(self):
     self.state: SoftStopState | None = None
 
-  def update(self, CC, CS, apply_brake: int, tuner=None) -> int:
+  def update(self, CC, CS, apply_brake: int, tuner=None, done_cb: float = SOFT_STOP_DONE_CB) -> int:
     try:
       stopping = bool(CC.longActive and CC.actuators.longControlState == LongCtrlState.stopping
                       and not CS.out.gasPressed and not CS.out.brakePressed)
@@ -256,7 +266,8 @@ class ElesysSoftStop:
       prev_rising = prev is not None and prev.rising
       # a missing vEgo reads as unknown, which the entry-speed bound treats as too fast: no ceiling
       v_ego = getattr(CS.out, "vEgo", math.nan)
-      out, self.state = soft_stop_ceiling(stopping, wheels_read_zero(CS), v_ego, CS.out.aEgo, pitch, apply_brake, self.state)
+      out, self.state = soft_stop_ceiling(stopping, wheels_read_zero(CS), v_ego, CS.out.aEgo, pitch, apply_brake, self.state,
+                                          done_cb=done_cb)
       self._log(prev, prev_rising, self.state)
       out = int(out)
       # belt and braces: whatever happened above, the ceiling can only ever lower the command

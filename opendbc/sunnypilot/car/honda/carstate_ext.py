@@ -12,6 +12,7 @@ from opendbc.car.honda.values import HONDA_ELESYS, STEER_THRESHOLD
 from opendbc.can.parser import CANParser
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
 from opendbc.sunnypilot.car.honda.vsa_fault import VsaFaultMonitor  # FORK(HONDA_ACCORD_9G_AU)
+from opendbc.sunnypilot.car.honda.brake_ceiling import BRAKE_MAX_320, Brake320Fallback, panda_max_brake  # FORK(HONDA_ACCORD_9G_AU)
 
 # GW_ACTIVE is low priority on the board and has been observed dropping, so the window is
 # 500 ms rather than the 300 ms used for SP_HUD_STATUS in the other direction. carstate runs
@@ -99,6 +100,11 @@ class CarStateExt:
     self._eps_lin_ts = 0
     self._vsa_fault = VsaFaultMonitor()      # FORK(HONDA_ACCORD_9G_AU)
     self._vsa_fault_error_logged = False
+    # FORK(HONDA_ACCORD_9G_AU): brake320's VSA fallback (brake_ceiling.py), only where panda allows 320 - this car with
+    # openpilot longitudinal. The CarController reads it as CS.brake320_fallback; None everywhere else.
+    self.brake320_fallback = Brake320Fallback() if (CP.carFingerprint in HONDA_ELESYS and
+                                                    panda_max_brake(CP) == BRAKE_MAX_320) else None
+    self._vsa_fault_monitor_failed = False
     # FORK(BRAKE-LAMP-RELAY): _update_blr()'s frame-counted staleness, as the gateway's above
     self._blr_status_stale = BLR_STATUS_STALE_FRAMES
     self._blr_status_ts = 0
@@ -154,11 +160,18 @@ class CarStateExt:
                                             bool(ret.accFaulted))
     except Exception:
       live, stored = False, False
+      self._vsa_fault_monitor_failed = True
       if not self._vsa_fault_error_logged:
         self._vsa_fault_error_logged = True
         carlog.exception("VSA fault monitor raised; reporting no VSA fault")
     ret_sp.vsaFault = bool(live)
     ret_sp.vsaStoredFault = bool(stored)
+    # FORK(HONDA_ACCORD_9G_AU): brake320 - any VSA / ABS / brake fault or warning, once, takes the brake ceiling back to
+    # 255 for the rest of the drive (brake_ceiling.Brake320Fallback; it never raises). A monitor that raised counts too:
+    # without it a VSA fault would go unseen.
+    if self.brake320_fallback is not None:
+      self.brake320_fallback.update(ret.accFaulted, ret.espDisabled, live, stored, self._vsa_fault.settled,
+                                    monitor_error=self._vsa_fault_monitor_failed)
 
   def _update_driver_torque_validity(self, ret: structs.CarState, ret_sp: structs.CarStateSP, cp: CANParser) -> None:
     """Refuse to read driver intent out of a latched STEER_TORQUE_SENSOR.

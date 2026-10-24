@@ -30,6 +30,7 @@ from opendbc.can.packer import CANPacker
 from opendbc.can.dbc import DBC as DBCFile
 from opendbc.sunnypilot.car.honda import dynamic_tuning as dt
 from opendbc.sunnypilot.car.honda import elesys_gas as eg
+from opendbc.sunnypilot.car.honda.brake_ceiling import panda_max_brake  # FORK(HONDA_ACCORD_9G_AU): brake320
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
@@ -94,6 +95,8 @@ def build(tuning=True, gas_law_v2=True):
 
 
 PARAMS = CarControllerParams(CarInterface.get_non_essential_params(PLATFORM))
+# brake320: the legal range is panda's, 320 counts on this car with openpilot longitudinal (255 on every other config)
+BRAKE_LEGAL_MAX = panda_max_brake(CarInterface.get_non_essential_params(PLATFORM))
 CC_SP = structs.CarControlSP()
 
 
@@ -180,7 +183,7 @@ on, CP, CP_SP, params = build()
 t_on = drive(on, PHASES)
 check("tuner came up", on.dynamic_tuner.enabled)
 check("brake command stays in range",
-      all(0 <= f["brake"] <= PARAMS.NIDEC_BRAKE_MAX - 1 for f in t_on),
+      all(0 <= f["brake"] <= BRAKE_LEGAL_MAX for f in t_on) and BRAKE_LEGAL_MAX == 320,
       f"{min(f['brake'] for f in t_on)}..{max(f['brake'] for f in t_on)}")
 check("interceptor command stays in range", all(0.0 <= f["gas"] <= 1.0 for f in t_on))
 check("PCM gas stays at zero with the tuner on too", all(f["pcm"] == 0 for f in t_on))
@@ -1433,7 +1436,7 @@ for label, kw in cases.items():
       raised = e
     n_expect = int((3.0 / 0.6 + 4.0) / 0.01) // 2
     check(f"{label} (tuner {'on' if tuning else 'off'}): no exception, 0x1FA every even frame, brake in range",
-          raised is None and len(rows) == n_expect and all(0 <= r["cb"] <= PARAMS.NIDEC_BRAKE_MAX - 1 for r in rows),
+          raised is None and len(rows) == n_expect and all(0 <= r["cb"] <= BRAKE_LEGAL_MAX for r in rows),
           f"raised={raised!r} frames={len(rows)}/{n_expect}")
 
 
