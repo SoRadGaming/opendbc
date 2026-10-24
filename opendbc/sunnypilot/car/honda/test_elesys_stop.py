@@ -279,6 +279,36 @@ class TestSoftStop(unittest.TestCase):
     self.assertEqual(set(ep.run(frames(1.0), 189)), {105})
     self.assertAlmostEqual(es.soft_stop_cap(math.radians(-1.0)), 105 + 17.0, delta=0.3)
 
+  def test_done_follows_the_brake_blocks_ceiling(self):
+    # brake320: the CarController passes its own ceiling (320, or 255 after the VSA fallback) as done_cb. The ceiling
+    # disarms only once it reaches it; on any command up to 255 the output is the default's (255) frame for frame,
+    # and a command above 255 in a stop is capped smoothly up to 320 instead of jumping when the ceiling passes 255
+    def run(done_cb, cmds, wheels):
+      st, out, armed = None, [], []
+      for c, w in zip(cmds, wheels, strict=True):
+        o, st = es.soft_stop_ceiling(True, w, 0.6, -0.5, 0.0, c, st, done_cb=done_cb)
+        out.append(o)
+        armed.append(st is not None and st.armed)
+      return out, armed
+    rng = random.Random(320)
+    for _ in range(300):
+      n = frames(4.0)
+      cmds = [rng.choice([0, rng.randint(0, 255), 189, 255]) for _ in range(n)]
+      wheels = [rng.random() < 0.3 for _ in range(n)]
+      self.assertEqual(run(255, cmds, wheels)[0], run(320, cmds, wheels)[0])
+      self.assertEqual(run(255, cmds, wheels), run(es.SOFT_STOP_DONE_CB, cmds, wheels))
+    cmds = [60] + [300] * frames(4.0)
+    wheels = [False] * frames(1.0) + [True] * (frames(3.0) + 1)
+    out255, armed255 = run(255, cmds, wheels)
+    out320, armed320 = run(320, cmds, wheels)
+    self.assertEqual(max(out320), 300)
+    # from the cap (105, the frame after entry) on: with 320 the capped 300 comes back at the rise rate; with 255 the
+    # ceiling disarms at 255 and the command jumps to 300
+    self.assertTrue(all(b - a <= es.SOFT_STOP_RISE * DT + 1 for a, b in zip(out320[1:], out320[2:], strict=False)))
+    self.assertGreater(max(b - a for a, b in zip(out255[1:], out255[2:], strict=False)), 40)
+    self.assertLess(armed255.index(False, 1), armed320.index(False, 1))
+    self.assertEqual(es.SOFT_STOP_DONE_CB, 255.)
+
   def test_unknown_deceleration_counts_as_not_slowing(self):
     ep = Episode()
     ep.run(frames(0.8), 180, a_ego=float("nan"))

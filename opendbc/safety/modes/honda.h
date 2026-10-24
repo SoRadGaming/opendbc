@@ -51,6 +51,9 @@ static bool honda_bosch_radarless = false;
 static bool honda_bosch_canfd = false;
 static bool honda_elesys_scm_standdown = false;  // HONDA_ACCORD_9G_AU (Elesys radar) stock-ACC stand-down
 static bool honda_elesys_stock_acc = false;  // FORK(HONDA_ACCORD_9G_AU): stock ACC mode, the radar drives gas and brake, OP steers
+// FORK(HONDA_ACCORD_9G_AU): brake320. The Nidec BRAKE_COMMAND ceiling: 255 on every Honda, 320 on this car with
+// HONDA_PARAM_ELESYS_BRAKE_320 and the stand-down (honda_nidec_init()); 320 is the Elesys radar's own request ceiling
+static int honda_nidec_max_brake = 255;
 static bool honda_nidec_hybrid = false;
 typedef enum {HONDA_NIDEC, HONDA_BOSCH} HondaHw;
 static HondaHw honda_hw = HONDA_NIDEC;
@@ -215,6 +218,8 @@ static void honda_rx_hook(const CANPacket_t *msg) {
 
       // Forward AEB when stock braking is higher than openpilot braking
       // only stop forwarding when AEB event is over
+      // FORK(HONDA_ACCORD_9G_AU): brake320 raises openpilot's ceiling on this car to 320, the radar's own request ceiling,
+      // so a CMBS brake at its ceiling is still >= anything openpilot can send, and is forwarded
       if (!honda_stock_aeb) {
         honda_fwd_brake = false;
       } else if (honda_stock_brake >= honda_brake) {
@@ -238,7 +243,7 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
 
   const LongitudinalLimits HONDA_NIDEC_LONG_LIMITS = {
     .max_gas = 198,  // 0xc6
-    .max_brake = 255,
+    .max_brake = honda_nidec_max_brake,  // FORK(HONDA_ACCORD_9G_AU): 255, or 320 on this car (brake320)
 
     .inactive_speed = 0,
   };
@@ -414,6 +419,7 @@ static safety_config honda_nidec_init(uint16_t param) {
   const uint16_t HONDA_PARAM_NIDEC_ALT = 4;
   const uint16_t HONDA_PARAM_ELESYS_SCM_STANDDOWN = 32;
   const uint16_t HONDA_PARAM_ELESYS_STOCK_ACC = 64;  // FORK(HONDA_ACCORD_9G_AU)
+  const uint16_t HONDA_PARAM_ELESYS_BRAKE_320 = 128;  // FORK(HONDA_ACCORD_9G_AU): brake320
 
   const uint16_t HONDA_PARAM_SP_NIDEC_HYBRID = 1;
   const uint16_t HONDA_PARAM_GAS_INTERCEPTOR = 2;
@@ -435,8 +441,15 @@ static safety_config honda_nidec_init(uint16_t param) {
   const bool elesys_scm_standdown_param = GET_FLAG(param, HONDA_PARAM_ELESYS_SCM_STANDDOWN);
   honda_elesys_stock_acc = GET_FLAG(param, HONDA_PARAM_ELESYS_STOCK_ACC);
   honda_elesys_scm_standdown = elesys_scm_standdown_param && !honda_elesys_stock_acc;
+  // FORK(HONDA_ACCORD_9G_AU): brake320 (owner decision 2026-10-24). openpilot may brake to 320 counts, the Elesys radar's
+  // own request ceiling, only on this car: the brake320 bit AND the stand-down, i.e. openpilot longitudinal on
+  // HONDA_ACCORD_9G_AU (opendbc honda/interface.py sets both; stock ACC mode clears both, and so does the 32|64
+  // conflict above). Any other param, every other Nidec and every Bosch init keep upstream's 255. The CarController's
+  // ceiling is the same function of the same param (opendbc/sunnypilot/car/honda/brake_ceiling.py panda_max_brake()),
+  // so openpilot never sends a 0x1FA this would refuse; a refused 0x1FA leaves a gap the VSA answers with BRAKE_ERROR.
+  honda_nidec_max_brake = (GET_FLAG(param, HONDA_PARAM_ELESYS_BRAKE_320) && honda_elesys_scm_standdown) ? 320 : 255;
 
-  honda_nidec_hybrid = GET_FLAG(current_safety_param_sp, HONDA_PARAM_SP_NIDEC_HYBRID);
+  honda_nidec_hybrid =GET_FLAG(current_safety_param_sp, HONDA_PARAM_SP_NIDEC_HYBRID);
   enable_gas_interceptor = GET_FLAG(current_safety_param_sp, HONDA_PARAM_GAS_INTERCEPTOR);
 
   // FORK(HONDA_ACCORD_9G_AU): the gas interceptor is not used when OP is not controlling longitudinal (as Toyota's
@@ -556,6 +569,7 @@ static safety_config honda_bosch_init(uint16_t param) {
   honda_brake_switch_prev = false;
   honda_elesys_scm_standdown = false;
   honda_elesys_stock_acc = false;  // FORK(HONDA_ACCORD_9G_AU)
+  honda_nidec_max_brake = 255;  // FORK(HONDA_ACCORD_9G_AU): brake320 is Nidec-only; Bosch long's 0x1FA keeps 255
   honda_bosch_radarless = GET_FLAG(param, HONDA_PARAM_RADARLESS);
   honda_bosch_canfd = GET_FLAG(param, HONDA_PARAM_BOSCH_CANFD);
   // Checking for alternate brake override from safety parameter

@@ -245,7 +245,7 @@ the 2026-09 merge.
     `heartbeat_engaged_mads_mismatches`, as `safety.h` does for `heartbeat_engaged_mismatches`.
     `safety/tests/mads_common.py` (upstream file): the regrant and heartbeat-traffic tests, run by every MADS safety
     class; `test_honda.py`: route 114's `0x1A6` frames (`HondaElesysRoute114Regrant`, run under both the stand-down,
-    param 36, and stock ACC mode, param 68);
+    param 36, 164 since brake320 (bit 128: panda's max_brake 320, 2026-10-24), and stock ACC mode, param 68);
   * `carstate.py`: `STEER_STATUS` 1 at a standstill in P is not a steering fault on `HONDA_ELESYS`
     (`TestElesysKeyOffSteerStatus` in `test_elesys.py`);
   * `elesys_gas.py`: the v2 launch cap below 6 m/s (`TestLaunchCap` in `test_elesys_gas.py`);

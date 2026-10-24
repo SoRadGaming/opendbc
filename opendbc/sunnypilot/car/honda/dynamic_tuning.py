@@ -1011,6 +1011,13 @@ class HondaDynamicTuner:
     self._shadow_brake_frac = _finite(apply_brake_frac)
     if not self.enabled:
       return 1.0
+    # FORK(HONDA_ACCORD_9G_AU) brake320: the fraction may pass 1.0 on this car now (up to 1.25, brake_ceiling.py). The
+    # learner weights its error by it, so it sees it capped at 1.0: never a heavier weight than it ever had, and above
+    # 1.0 the request is beyond the old ceiling, not something to learn a trim from. Up to the old ceiling its input is
+    # exactly what it was; beyond it, 1.0 where the old one's was at most 0.99, which can leave the learned gain a hair
+    # apart afterwards (the brake320 replay: +1 count on 219 of 673,019 later sends). The shadow learners (logging
+    # only) get the true fraction above.
+    apply_brake_frac = min(apply_brake_frac, 1.0)
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
 

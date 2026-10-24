@@ -115,6 +115,9 @@ class VsaFaultMonitor:
     self._session = 0                      # frames since the VSA's frames (re)started
     self._lamp_on = 0                      # consecutive counted frames with a lamp bit
     self._lamp_off = 0                     # consecutive frames without one
+    # FORK(HONDA_ACCORD_9G_AU) brake320: the start-up window is over and the VSA's frames are fresh. Read by brake320's
+    # VSA fallback (brake_ceiling.py), which counts accFaulted and espDisabled only then; nothing here reads it.
+    self.settled = False
 
   def _reset_stored(self) -> None:
     self.vsa_stored_fault = False
@@ -143,11 +146,13 @@ class VsaFaultMonitor:
 
     if self._vsa_silent >= VSA_SILENT_FRAMES:
       self.vsa_fault = False
+      self.settled = False
       self._reset_stored()
       return False, False
 
     self._session = min(self._session + 1, STARTUP_WINDOW_FRAMES)
     settled = self._session >= STARTUP_WINDOW_FRAMES
+    self.settled = settled
 
     # 0x1EA b6.2 with BRAKE_ERROR counts only once the start-up window is over: at key-on BRAKE_ERROR is up on
     # the VSA's first frame and b6.2 (on a stored start) from its second, and a batch boundary between them

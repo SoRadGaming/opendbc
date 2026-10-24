@@ -13,6 +13,7 @@ from opendbc.sunnypilot.car.honda.icbm import IntelligentCruiseButtonManagementI
 from opendbc.sunnypilot.car.honda.dynamic_tuning import HondaDynamicTuner
 from opendbc.sunnypilot.car.honda.elesys_stop import ElesysSoftStop  # FORK(HONDA_ACCORD_9G_AU): soft final stop
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
+from opendbc.sunnypilot.car.honda.brake_ceiling import BRAKE_MAX_320, ElesysBrakeCeiling, panda_max_brake  # FORK: brake320
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -33,21 +34,24 @@ def compute_gb_honda_nidec(accel, speed):
   return np.clip(gb, 0.0, 1.0), np.clip(-gb, 0.0, 1.0)
 
 
-# FORK(HONDA_ACCORD_9G_AU): this car's gas/brake map (creep table and 2.6 m/s^2 full brake), dispatched below
-def compute_gb_honda_elesys(accel, speed):
+# FORK(HONDA_ACCORD_9G_AU): this car's gas/brake map (creep table and 2.6 m/s^2 per brake fraction of 1.0), dispatched
+# below. brake320: brake_max is the fraction's clip - 1.0, as on every Honda, or 1.25 (320 / 256 counts) where panda
+# allows 320 (brake_ceiling.py). The scale stays 2.6 m/s^2 per 256 counts, the measured slope; a request beyond -2.6 net
+# now asks for more instead of being clipped there.
+def compute_gb_honda_elesys(accel, speed, brake_max=1.0):
   creep = float(np.interp(speed, [0., 0.75, 1.75, 3.0, 5.0], [1.15, 0.8, 0.45, 0.3, 0.0]))
   creep *= float(np.clip(1. - max(float(accel), 0.) / 0.8, 0., 1.))
   net = float(accel) - creep
   gas = max(net, 0.) / 4.8
   brake = max(-net, 0.) / 2.6
-  return float(np.clip(gas, 0.0, 1.0)), float(np.clip(brake, 0.0, 1.0))
+  return float(np.clip(gas, 0.0, 1.0)), float(np.clip(brake, 0.0, brake_max))
 
 
-def compute_gas_brake(accel, speed, CP):
+def compute_gas_brake(accel, speed, CP, brake_max=1.0):
   if CP.flags & HondaFlags.BOSCH:
     return compute_gb_honda_bosch(accel, speed)
   elif CP.carFingerprint in HONDA_ELESYS:
-    return compute_gb_honda_elesys(accel, speed)
+    return compute_gb_honda_elesys(accel, speed, brake_max)
   else:
     return compute_gb_honda_nidec(accel, speed)
 
@@ -302,8 +306,16 @@ def brake_pump_c1b_elesys(apply_brake, v_ego, level, trig, last_pump_ts, ts):
 # stays exactly 1.0). After one, the credit comes back over at most 10 frames and the release limiter starts from the
 # higher command (up to the credit, <= 38 counts, for <= ~8 sends). The rise is above 200 counts, where both pump rules
 # (v5 and C1b) already run the pump continuously while moving. The soft stop's ceiling still applies after this. Stock
-# AEB is untouched: panda forwards the CMBS 0x1FA while its brake is >= openpilot's, and a real CMBS brake is 320-1022
-# counts (S:/OP/CMBS_AEB_bitmap.md).
+# AEB is untouched: panda forwards the CMBS 0x1FA while its brake is >= openpilot's. Corrected 2026-10-24 (brake320): a
+# real CMBS request tops out at 320 counts with the pump bit on (256-320 on the CMBS brakes of 1-7 July); the 500-1022
+# on bus 2 that S:/OP/CMBS_AEB_bitmap.md read as "max emergency" are the radar's pump-off release step-downs (1022 ->
+# 682 -> 340 -> 0), never requests. openpilot's own ceiling here is at most that same 320, so a CMBS brake at its
+# ceiling is always >= ours and is forwarded.
+#
+# brake320 (2026-10-24) leaves this threshold at 0.99 on purpose. It is where the credit goes OUT - the old full brake -
+# not the new one (brake_ceiling.BRAKE_LAST_MAX_320, 1.24). Moved to 1.24, every request between the old and the new
+# ceiling would get the credit back and less brake than push12 for the same request: at 100 km/h a -2.6 request would
+# send 223 counts instead of 253. At 0.99, brake320 sends exactly push12's command up to here and more only above it.
 ELESYS_FULL_BRAKE = 0.99 - 1e-6   # actuator_hysteresis()'s ceiling (1.0 - brake_hyst_gap), less float slack
 ELESYS_CREDIT_RAMP = 0.1          # the credit scale's step per 100 Hz frame: 100 ms from full credit to none, and back
 
@@ -397,6 +409,9 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # Flag 16 (the retired rule C1) selects nothing any more: an old CarParamsSP that carries it runs v5.
     self.elesys_pump_c1b = bool(CP_SP.flags & HondaFlagsSP.ELESYS_PUMP_C1B)
     # Flag 32 (the retired brake law v2, 2026-10-05 to 2026-10-09) selects nothing either: today's brake law always runs.
+    # FORK(HONDA_ACCORD_9G_AU): brake320 (brake_ceiling.py), built only where panda allows 320 counts: this car with
+    # openpilot longitudinal. None everywhere else, and every other car runs the old brake lines unchanged.
+    self.brake320 = ElesysBrakeCeiling(CP) if panda_max_brake(CP) == BRAKE_MAX_320 else None
 
     self.braking = False
     self.brake_steady = 0.
@@ -429,14 +444,24 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # positive, climbing adds demand.
     hill_accel = self.dynamic_tuner.update_state(CC, CS)
 
+    # FORK(HONDA_ACCORD_9G_AU): brake320 - this frame's ceiling (255 again once the CarState's VSA fallback has latched)
+    # and the brake fraction's clip that this frame's request earns (brake_ceiling.py); 1.0 on every other car
+    brake_frac_max = 1.0
+    if self.brake320 is not None:
+      self.brake320.update(CS)
+
     if CC.longActive:
       accel = actuators.accel
       adjust_accel = accel + hill_accel  # FORK(HONDA_ACCORD_9G_AU): pitch feedforward, also feeds pcm_accel below
-      gas, brake = compute_gas_brake(adjust_accel, CS.out.vEgo, self.CP)
+      if self.brake320 is not None:
+        brake_frac_max = self.brake320.set_request(adjust_accel)
+      gas, brake = compute_gas_brake(adjust_accel, CS.out.vEgo, self.CP, brake_frac_max)
     else:
       accel = 0.0
       adjust_accel = 0.0
       gas, brake = 0.0, 0.0
+      if self.brake320 is not None:
+        self.brake320.set_request(0.0)
 
     # *** rate limit steer ***
     limited_torque = rate_limit(actuators.torque, self.last_torque, -self.params.STEER_DELTA_DOWN * DT_CTRL,
@@ -567,7 +592,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           wind_credit = wind_brake * self.dynamic_tuner.wind_scale()
           if self.CP.carFingerprint in HONDA_ELESYS:  # FORK(HONDA_ACCORD_9G_AU): ramped out at full brake, ELESYS_FULL_BRAKE
             wind_credit *= self.wind_credit_scale
-          apply_brake = np.clip(self.brake_last - wind_credit, 0.0, 1.0)
+          apply_brake = np.clip(self.brake_last - wind_credit, 0.0, brake_frac_max)  # FORK: brake320, 1.0 elsewhere
           # FORK(HONDA_ACCORD_9G_AU): never raise here. A non-finite vEgo makes wind_brake NaN, and the int() below
           # raised; an exception in update() means no 0x1FA at all, and the VSA latches BRAKE_ERROR ~1.0 s later.
           # Fall back to the brake without the aero credit, the more-braking side. Finite values are untouched.
@@ -576,20 +601,34 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           # FORK: learned brake gain. This is what replaces hand-editing the brake divisor in
           # compute_gb_honda_elesys(); returns 1.0 with the dynamic tuner off.
           brake_gain = self.dynamic_tuner.brake_gain(CC, CS, float(apply_brake))
-          apply_brake = int(np.clip(apply_brake * brake_gain * self.params.NIDEC_BRAKE_MAX,
-                                    0, self.params.NIDEC_BRAKE_MAX - 1))
+          if self.brake320 is None:
+            apply_brake = int(np.clip(apply_brake * brake_gain * self.params.NIDEC_BRAKE_MAX,
+                                      0, self.params.NIDEC_BRAKE_MAX - 1))
+          else:
+            # FORK(HONDA_ACCORD_9G_AU): brake320. The same scale; the clip is the EARNED ceiling: 255 until this frame's
+            # request passes the old ceiling's -2.45 m/s^2, then up to 320 at a full request, so the learned gain (up to
+            # 1.6x) takes an ordinary request no further than the 255 it always could (brake_ceiling.py)
+            apply_brake = int(np.clip(apply_brake * brake_gain * self.params.NIDEC_BRAKE_MAX,
+                                      0, self.brake320.earned_counts()))
           # FORK(HONDA_ACCORD_9G_AU): soft final stop. A ceiling on the brake while the car is still rolling in the
           # stopping state, so longcontrol's ramp does not reach the full standstill hold (189) before the wheels
           # have stopped; it rises to the hold 0.55 s after they read zero (elesys_stop.py). It can only LOWER the
-          # command, and sits before the release limiter so that still smooths any release.
+          # command, and sits before the release limiter so that still smooths any release. brake320: it is out of
+          # the way once it reaches the highest command this block can send now (320, or 255).
           if self.soft_stop is not None:
-            apply_brake = self.soft_stop.update(CC, CS, apply_brake, self.dynamic_tuner)
+            done_cb = self.brake320.counts if self.brake320 is not None else self.params.NIDEC_BRAKE_MAX - 1
+            apply_brake = self.soft_stop.update(CC, CS, apply_brake, self.dynamic_tuner, done_cb=done_cb)
           # FORK: limit brake release to 32 counts/frame to match factory -- this is what stops
           # the lurch as it lets go at a stop. Applied before the pump hysteresis so the ELESYS
           # anchor tracks exactly what goes on the wire. Bypassed on disengage or driver
           # override so nothing delays getting off the brakes.
           if self.dynamic_tuner.enabled and CC.longActive and not CS.out.gasPressed and not CS.out.brakePressed:
             apply_brake = max(self.apply_brake_last - 32, apply_brake)
+          # FORK(HONDA_ACCORD_9G_AU): brake320 - never above this frame's ceiling on the wire, the limiter included (it
+          # binds only on the frame the VSA fallback latches mid-brake: down to 255 at once). Noted for the telemetry.
+          if self.brake320 is not None:
+            apply_brake = min(apply_brake, self.brake320.counts)
+            self.brake320.sent(apply_brake)
           if self.CP.carFingerprint in HONDA_ELESYS and self.elesys_pump_c1b:  # FORK(HONDA_ACCORD_9G_AU): pump rule C1b
             pump_on, self.pump_level, self.pump_trig, self.last_pump_ts = brake_pump_c1b_elesys(
               apply_brake, CS.out.vEgo, self.pump_level, self.pump_trig, self.last_pump_ts, ts)
@@ -750,6 +789,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
 
     self.dynamic_tuner.persist(self.frame)
     self.dynamic_tuner.log_state(self.frame)
+    if self.brake320 is not None:  # FORK(HONDA_ACCORD_9G_AU): brake320's 1 s telemetry window
+      self.brake320.tick()
 
     self.frame += 1
     return new_actuators, can_sends

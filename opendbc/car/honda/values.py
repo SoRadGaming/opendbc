@@ -58,6 +58,9 @@ class HondaSafetyFlags(IntFlag):
   BOSCH_CANFD = 16
   ELESYS_SCM_STANDDOWN = 32
   ELESYS_STOCK_ACC = 64  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode, HONDA_PARAM_ELESYS_STOCK_ACC in safety/modes/honda.h
+  # FORK(HONDA_ACCORD_9G_AU): brake320, panda's max_brake 320 instead of 255 (with ELESYS_SCM_STANDDOWN only),
+  # HONDA_PARAM_ELESYS_BRAKE_320 in safety/modes/honda.h; the CarController's mirror is brake_ceiling.panda_max_brake()
+  ELESYS_BRAKE_320 = 128
 
 
 class HondaFlags(IntFlag):

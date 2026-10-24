@@ -583,6 +583,142 @@ class TestHondaElesysStanddownGasInterceptorSafety(TestHondaNidecAltGasIntercept
     super(TestHondaNidecSafetyBase, self).test_fwd_hook()
 
 
+# FORK(HONDA_ACCORD_9G_AU): brake320 (owner decision 2026-10-24), opendbc/sunnypilot/car/honda/brake_ceiling.py.
+def honda_brake_packet(brake, bus):
+  """A bare 0x1FA with COMPUTER_BRAKE = brake in (B0 << 2) | (B1 >> 6), as honda_tx_hook decodes it."""
+  return libsafety_py.make_CANPacket(0x1FA, bus, bytes([(brake >> 2) & 0xFF, (brake & 0x3) << 6, 0, 0, 0, 0, 0, 0]))
+
+
+class HondaElesysBrake320:
+  """
+    With ELESYS_BRAKE_320 (128) beside the stand-down (32), panda allows openpilot's BRAKE_COMMAND up to 320 counts -
+    the Elesys radar's own request ceiling - instead of 255. A mixin over the stand-down classes, so every inherited
+    Nidec test runs with MAX_BRAKE = 320: test_brake_safety_check sends 0-329 (320 allowed, 321 refused, nothing while
+    the AEB latch is set, only 0 without controls) and test_honda_fwd_brake_latching walks the stock brake over 0-320.
+  """
+  MAX_BRAKE = 320
+  PARAM = 0
+
+  def test_contract_values(self):
+    # fixed contract with the car port (interface.py, brake_ceiling.panda_max_brake()): bit 128
+    self.assertEqual(128, HondaSafetyFlags.ELESYS_BRAKE_320)
+    self.assertEqual(self.PARAM, self.safety.get_current_safety_param())
+
+  def test_320_sent_and_321_refused(self):
+    self.safety.set_controls_allowed(True)
+    for brake, sent in ((0, True), (255, True), (256, True), (319, True), (320, True), (321, False), (400, False), (1023, False)):
+      self.assertEqual(sent, self._tx(self._send_brake_msg(brake)), f"{brake=}")
+      self.assertEqual(sent, self._tx(honda_brake_packet(brake, 0)), f"{brake=} bare")
+    self.safety.set_controls_allowed(False)
+    self.assertTrue(self._tx(self._send_brake_msg(0)))
+    for brake in (1, 255, 320):
+      self.assertFalse(self._tx(self._send_brake_msg(brake)), f"{brake=} without controls")
+
+  def test_cmbs_at_the_radars_ceiling_is_forwarded_over_openpilots_320(self):
+    # stock AEB (CMBS): forwarded while its brake is >= openpilot's. openpilot's new ceiling is the radar's own request
+    # ceiling, so a CMBS brake at its ceiling still wins; below openpilot's 320 it is the weaker brake and waits
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(self._send_brake_msg(320)))
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x1FA))
+    for stock in (100, 200, 300, 319):
+      self.assertTrue(self._rx(self._rx_brake_msg(stock, aeb_req=1)))
+      self.assertFalse(self.safety.get_honda_fwd_brake(), f"{stock=} under openpilot's 320")
+      self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x1FA))
+    self.assertTrue(self._rx(self._rx_brake_msg(320, aeb_req=1)))
+    self.assertTrue(self.safety.get_honda_fwd_brake())
+    self.assertEqual(0, self.safety.safety_fwd_hook(2, 0x1FA), "the radar's 0x1FA reaches the car")
+    for brake in (0, 255, 320):
+      self.assertFalse(self._tx(self._send_brake_msg(brake)), f"openpilot's {brake=} while CMBS has the brake")
+    # the radar's pump-off release step-downs (1022 -> 682 -> 340 -> 0) keep it forwarded until FCW clears
+    for stock in (1022, 682, 340, 0):
+      self.assertTrue(self._rx(self._rx_brake_msg(stock, aeb_req=1)))
+      self.assertTrue(self.safety.get_honda_fwd_brake(), f"{stock=}")
+    self.assertTrue(self._rx(self._rx_brake_msg(0, aeb_req=0)))
+    self.assertFalse(self.safety.get_honda_fwd_brake())
+    self.assertTrue(self._tx(self._send_brake_msg(320)))
+
+  def test_cmbs_is_forwarded_once_openpilot_brakes_less(self):
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(self._send_brake_msg(320)))
+    self.assertTrue(self._rx(self._rx_brake_msg(300, aeb_req=1)))
+    self.assertFalse(self.safety.get_honda_fwd_brake())
+    self.assertTrue(self._tx(self._send_brake_msg(290)))
+    self.assertTrue(self._rx(self._rx_brake_msg(300, aeb_req=1)))
+    self.assertTrue(self.safety.get_honda_fwd_brake())
+
+  def test_only_with_the_stand_down(self):
+    # the bit alone (no stand-down), with stock ACC mode, or with both: 255 - or nothing at all in stock ACC mode
+    F = HondaSafetyFlags
+    for param in (F.NIDEC_ALT | F.ELESYS_BRAKE_320, F.ELESYS_BRAKE_320, F.NIDEC_ALT | F.ELESYS_STOCK_ACC | F.ELESYS_BRAKE_320,
+                  F.NIDEC_ALT | F.ELESYS_SCM_STANDDOWN | F.ELESYS_STOCK_ACC | F.ELESYS_BRAKE_320):
+      self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, param)
+      self.safety.set_controls_allowed(True)
+      self.assertFalse(self._tx(honda_brake_packet(256, 0)), f"{param=}")
+      self.assertFalse(self._tx(honda_brake_packet(320, 0)), f"{param=}")
+      self.assertEqual(not (param & F.ELESYS_STOCK_ACC), self._tx(honda_brake_packet(255, 0)), f"{param=}")
+    # and the stand-down without the bit is 255, as it always was
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, F.NIDEC_ALT | F.ELESYS_SCM_STANDDOWN)
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(honda_brake_packet(255, 0)))
+    self.assertFalse(self._tx(honda_brake_packet(256, 0)))
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.PARAM)
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(honda_brake_packet(320, 0)))
+
+  def test_bosch_init_restores_255(self):
+    # the ceiling is module state: a later Bosch init must restore 255 (Bosch long sends 0x1FA on bus 1 through the same
+    # check), and a Nidec init without the bit too
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaBosch, HondaSafetyFlags.BOSCH_LONG)
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(honda_brake_packet(255, 1)))
+    self.assertFalse(self._tx(honda_brake_packet(256, 1)))
+    self.assertFalse(self._tx(honda_brake_packet(320, 1)))
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.PARAM)
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(honda_brake_packet(320, 0)))
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, HondaSafetyFlags.NIDEC_ALT)
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(honda_brake_packet(256, 0)))
+
+
+class TestHondaElesysBrake320Safety(HondaElesysBrake320, TestHondaElesysStanddownGasInterceptorSafety):
+  """
+    HONDA_ACCORD_9G_AU as it drives: NIDEC_ALT | ELESYS_SCM_STANDDOWN | ELESYS_BRAKE_320 (164), with the comma pedal.
+  """
+  PARAM = HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_SCM_STANDDOWN | HondaSafetyFlags.ELESYS_BRAKE_320
+
+  def setUp(self):
+    self.packer = CANPackerSafety("acura_ilx_2016_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(HondaSafetyFlagsSP.GAS_INTERCEPTOR)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.PARAM)
+    self.safety.init_tests()
+
+
+class TestHondaElesysBrake320NoInterceptorSafety(HondaElesysBrake320, TestHondaElesysScmStanddownSafety):
+  """
+    The same without the pedal (164, no SP param).
+  """
+  PARAM = HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_SCM_STANDDOWN | HondaSafetyFlags.ELESYS_BRAKE_320
+
+  def setUp(self):
+    self.packer = CANPackerSafety("acura_ilx_2016_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.PARAM)
+    self.safety.init_tests()
+
+
+class TestHondaNidecBrake320BitAloneSafety(TestHondaNidecPcmAltSafety):
+  """
+    The brake320 bit without the stand-down is not this car: every inherited Nidec test with MAX_BRAKE 255.
+  """
+  def setUp(self):
+    self.packer = CANPackerSafety("acura_ilx_2016_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_BRAKE_320)
+    self.safety.init_tests()
+
+
 # FORK(HONDA_ACCORD_9G_AU): stock ACC mode (ELESYS_STOCK_ACC). Packed with this car's own DBC.
 
 # Every frame OP sends for longitudinal or the HUD in the other modes, at its real length. None may leave in stock

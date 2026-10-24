@@ -18,8 +18,8 @@ TransmissionType = structs.CarParams.TransmissionType
 
 # FORK(HONDA_ACCORD_9G_AU): the longitudinal PID's floor on this car (round 8, proposal 9).
 #
-# compute_gb_honda_elesys() puts full brake at net -2.6 m/s^2 (brake = -net / 2.6), so a PID output below about -2.6
-# asks for nothing more: the brake is already at its ceiling. Upstream's NIDEC_ACCEL_MIN of -4.0 only gives the
+# compute_gb_honda_elesys() put full brake at net -2.6 m/s^2 (brake = -net / 2.6; -3.25 since brake320, below), so a PID
+# output below that asks for nothing more: the brake is already at its ceiling. Upstream's NIDEC_ACCEL_MIN of -4.0 only gives the
 # integrator room to wind while the brake is railed. Measured once in 42 engaged minutes (drives 13d-143): route 143
 # t172.9-174.6, the stopped car at night. The PID sat clipped at -4.0 for 1.7 s with its integrator wound to -1.33
 # while 0x1FA was already at full brake (plan -2.1 to -2.9, achieved -1.65 to -1.92). Had the plan let go there, that
@@ -36,7 +36,16 @@ TransmissionType = structs.CarParams.TransmissionType
 # it froze at -0.81 instead of -1.33, the brake command was full on all 265 frames either way, and on 13d, 141 and 142
 # not one frame changed. Not in stock ACC mode (HondaElesysStockAcc), where nothing longitudinal is sent: its
 # carControl stays bit-identical too. Every other car keeps NIDEC_ACCEL_MIN.
-ELESYS_PID_ACCEL_MIN = -3.2  # m/s^2, on the level and downhill
+#
+# brake320 (2026-10-24): -3.2 -> -3.25. Full brake is now net -3.25 (brake fraction 1.25 = 320 / 256 counts at the
+# unchanged 2.6 m/s^2 per 256; brake_ceiling.py), so -3.2 stopped 0.05 short of it (fraction 1.231, 312 counts instead
+# of 317 at gain 1.0). -3.25 is exactly full brake again on the level, and the climb term still follows (full brake up to
+# about 7.6%, where -4.0 binds). NOT the -3.85 the old 0.6 margin would suggest: that margin dates from before the floor
+# followed a climb, and below full brake it is only room for the integrator to wind while 0x1FA is already full - the
+# 143 windup this floor was built to stop (-1.33 at -4.0 against -0.81 at -3.2). The closed-loop sim (brake320 study)
+# brakes no harder with -3.85, and releases later. After brake320's VSA fallback (255 again, fraction 1.0) the room
+# below full brake is 0.65 instead of 0.6.
+ELESYS_PID_ACCEL_MIN = -3.25  # m/s^2, on the level and downhill
 
 
 def elesys_pid_floor_applies(CP, CP_SP) -> bool:
@@ -354,6 +363,10 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.BOSCH_CANFD.value
     if candidate in HONDA_ELESYS and ret.openpilotLongitudinalControl:
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.ELESYS_SCM_STANDDOWN.value
+      # FORK(HONDA_ACCORD_9G_AU): brake320 (owner decision 2026-10-24), the brake ceiling 320 counts instead of 255 in
+      # panda and in the CarController alike (opendbc/sunnypilot/car/honda/brake_ceiling.py). Stock ACC mode clears it
+      # with the stand-down (sunnypilot/car/interfaces.py _initialize_honda())
+      ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.ELESYS_BRAKE_320.value
 
     # min speed to enable ACC. if car can do stop and go, then set enabling speed
     # to a negative value, so it won't matter. Otherwise, add 0.5 mph margin to not

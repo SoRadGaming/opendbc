@@ -753,6 +753,28 @@ check("per-mode lists in D, ECON, S order", all(f"{k}=[" in line for k in ("mode
 check("the retired fields are gone", "pedal=" not in line and "wind=" not in line, line)
 
 
+# --- 17. brake320: the learner sees the fraction capped at 1.0 ------------------
+
+print("\n[17] brake320: the brake learner's fraction is capped at 1.0, the shadow learners get it whole")
+runs = {}
+for frac in (1.0, 1.1, 1.25):
+  t = make_tuner()
+  cc, cs = base(15.0, -3.0, -2.2)    # beyond the old ceiling, under-braking: the learner is active
+  settle(t, cc, cs)
+  gains = []
+  for _ in range(600):
+    t.update_state(cc, cs)
+    gains.append(t.brake_gain(cc, cs, frac))
+  runs[frac] = (gains, t.brake_pid.i, t.brake_gain_converged, t._shadow_brake_frac)
+check("the learner moved (the run is a real learning run)", runs[1.0][0][-1] > 1.0, f"{runs[1.0][0][-1]}")
+check("a fraction above 1.0 learns exactly as 1.0 does (frame for frame)",
+      runs[1.1][:3] == runs[1.0][:3] and runs[1.25][:3] == runs[1.0][:3])
+check("the shadow learners get the true fraction", [runs[f][3] for f in (1.0, 1.1, 1.25)] == [1.0, 1.1, 1.25],
+      str([runs[f][3] for f in (1.0, 1.1, 1.25)]))
+t = make_tuner(enabled=False)
+check("disabled, still exactly 1.0 above 1.0", t.brake_gain(cc, cs, 1.25) == 1.0 and t._shadow_brake_frac == 1.25)
+
+
 print("\n" + "=" * 60)
 if FAILURES:
   print(f"{len(FAILURES)} FAILED: {FAILURES}")
