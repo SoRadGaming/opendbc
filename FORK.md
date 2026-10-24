@@ -175,7 +175,13 @@ the 2026-09 merge.
   they also sit on for minutes on 45 earlier routes where the VSA braked normally. Replayed over all 166 logged routes
   it flags 110-113 only.
 * `opendbc/car/honda/fingerprints.py` (0): FW versions for fwdRadar and srs.
-* `opendbc/car/honda/radar_interface.py` (0): Elesys radar parser and fault states.
+* `opendbc/car/honda/radar_interface.py` (0): Elesys radar parser and fault states. Since 2026-10-24 the Elesys track
+  slots take their own branch, `_update_elesys_track()`: a slot is empty only at raw `LONG_DIST` 0x7FFF (the test was
+  `< 255`, which dropped real returns at 255.0-255.98 m), the update fires on 0x424, the last track frame of the radar's
+  cycle (it fired on 0x423, which left slot 0x424 one cycle stale when it came in the next CAN batch), a rising
+  `NEW_TRACK` is always a new trackId, one held on a second frame keeps the slot's trackId only when that frame
+  continues the same object (`elesys_same_object()`: 92% of held flags are another object), and `deprecated.measured`
+  is `not COASTING`. The Nidec branch is upstream's. `test_elesys_radar.py` pins each of these on logged frames.
 * `opendbc/car/car_helpers.py` (0): the `skip_fw_query` argument on `fingerprint()` and `get_car()`.
 * `opendbc/car/tests/routes.py` (0): test route `15646e8515eda1a7/00000019--dd0700eac9`.
 * `opendbc/car/torque_data/override.toml` (0): the car's own torqued prior, `"HONDA_ACCORD_9G_AU" = [1.25, 1.25, 0.18]`
@@ -262,7 +268,9 @@ the 2026-09 merge.
   `_nidec_scm_group_a_elesys.dbc`, `_gearbox_legacy.dbc`, `honda_accord_2015au_radar.dbc` (all 0).
   `honda_accord_2015au_radar.dbc` (hand-written): since 2026-10-09 `REL_SPEED` on the 13 track messages is 1/64 m/s.
   It was 1/128, which halved every radar `vRel`: on the logged bus 1, d(`LONG_DIST`)/dt was 2.01-2.03 x the old
-  decode (sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` 4.8).
+  decode (sunnypilot `CAR-HONDA-ACCORD-9G-AU.md` 4.8). Since 2026-10-24 byte 2 bit 6 (`FLAG_B22`) is `COASTING` (the
+  radar extrapolated the track that cycle), and `LONG_DIST` (raw 0x7FFF = empty slot), `NEW_TRACK` and `COASTING` carry
+  comments on all 13 track messages.
   `_honda_elesys_base.dbc` is a *modified* copy of `_honda_common.dbc`. The intended differences are: 7-byte
   `CAMERA_MESSAGES` (`0x35E`) and `STALK_STATUS` (`0x374`, no `WIPER_SWITCH`, `COUNTER`/`CHECKSUM` at 53/51), no
   `STEER_MOTOR_TORQUE.UNKNOWN_TORQUE_STATE_BIT`, `CM_ BO_` for 304/316, a header comment, and (2026-10-03) the
@@ -275,7 +283,9 @@ the 2026-09 merge.
   `test_dynamic_tuning_integration.py` (C: sections 1-6, 9, 16-19 and 17b), `test_elesys_gas.py`, `test_elesys_stop.py`,
   `test_vsa_fault.py` (2026-10-03; real frames of routes 110-113, 10f and comma route 69 from
   `fixtures/vsa_fault_frames.json.gz`, through the real `CarInterface`), `car/honda/tests/test_elesys_radar.py`
-  (2026-10-09; the radar's `REL_SPEED` scale on logged frames of route 113, through the real `RadarInterface`).
+  (2026-10-09; the radar's `REL_SPEED` scale on logged frames of route 113, through the real `RadarInterface`; since
+  2026-10-24 also the track slots on logged frames of routes 113, 141 and dd: the empty slot, a return at 255.3 m, the
+  update on a late 0x424, a held `NEW_TRACK` on the same object and on three different ones, and `COASTING`).
 
 ### D. Brake-lamp relay board (BLR-v1), 2026-10-14
 
@@ -342,7 +352,7 @@ python -m unittest opendbc.car.honda.tests.test_honda opendbc.car.honda.tests.te
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_gas                            # 38 tests: the gas law and the launch cap
 python -m unittest opendbc.sunnypilot.car.honda.test_elesys_stop                           # 28 tests: the soft final stop
 python -m unittest opendbc.car.honda.tests.test_elesys_stock_acc                          # 17 tests: stock ACC mode
-python -m unittest opendbc.car.honda.tests.test_elesys_radar                              # 4 tests: the radar's REL_SPEED scale
+python -m unittest opendbc.car.honda.tests.test_elesys_radar                              # 11 tests: the radar's REL_SPEED scale and track slots
 python -m unittest opendbc.sunnypilot.car.honda.test_shadow_learn                          # 21 tests: the shadow learners
 python -m unittest opendbc.sunnypilot.car.honda.test_vsa_fault                             # 33 tests: the VSA's own fault
 python -m unittest opendbc.sunnypilot.car.honda.test_blr                                   # 15 tests: the brake-lamp board's telemetry
