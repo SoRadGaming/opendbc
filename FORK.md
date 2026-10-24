@@ -178,9 +178,10 @@ the 2026-09 merge.
 * `opendbc/car/honda/radar_interface.py` (0): Elesys radar parser and fault states. Since 2026-10-24 the Elesys track
   slots take their own branch, `_update_elesys_track()`: a slot is empty only at raw `LONG_DIST` 0x7FFF (the test was
   `< 255`, which dropped real returns at 255.0-255.98 m), the update fires on 0x424, the last track frame of the radar's
-  cycle (it fired on 0x423, which left slot 0x424 one cycle stale when it came in the next CAN batch), a `NEW_TRACK` held
-  on a second frame keeps the slot's trackId only when that frame continues the same object (`elesys_same_object()`:
-  92% of held flags are another object), and `deprecated.measured` is `not COASTING`. The Nidec branch is upstream's.
+  cycle (it fired on 0x423, which left slot 0x424 one cycle stale when it came in the next CAN batch), a rising
+  `NEW_TRACK` is always a new trackId, one held on a second frame keeps the slot's trackId only when that frame
+  continues the same object (`elesys_same_object()`: 92% of held flags are another object), and `deprecated.measured`
+  is `not COASTING`. The Nidec branch is upstream's. `test_elesys_radar.py` pins each of these on logged frames.
 * `opendbc/car/car_helpers.py` (0): the `skip_fw_query` argument on `fingerprint()` and `get_car()`.
 * `opendbc/car/tests/routes.py` (0): test route `15646e8515eda1a7/00000019--dd0700eac9`.
 * `opendbc/car/torque_data/override.toml` (0): the car's own torqued prior, `"HONDA_ACCORD_9G_AU" = [1.25, 1.25, 0.18]`

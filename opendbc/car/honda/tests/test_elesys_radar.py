@@ -6,8 +6,9 @@ every radar vRel openpilot saw: on bus 1 d(LONG_DIST)/dt was 2.01-2.03 x REL_SPE
 
 The track slots (2026-10-24, radar_interface.py): an empty slot is raw LONG_DIST 0x7FFF only (returns at 255.0-255.98 m
 are real), the update waits for 0x424 (the last track frame of the radar's cycle, which can land in the CAN batch after
-0x423), a held NEW_TRACK keeps the slot's trackId only on a frame that continues the same object, and
-RadarPoint's measured flag (deprecated.measured) is not COASTING (byte 2 bit 6, FLAG_B22 until then).
+0x423), a rising NEW_TRACK is always a new trackId, a held one keeps the slot's trackId only on a frame that continues
+the same object, and RadarPoint's measured flag (deprecated.measured) is not COASTING (byte 2 bit 6, FLAG_B22 until
+then).
 
 These frames are logged ones (routes 15646e8515eda1a7/00000113, 00000141 and 000000dd, bus 1; frames with the same time
 arrived in one CAN batch), so a change to the DBC or to radar_interface.py that breaks the decode fails here, whatever
@@ -21,7 +22,7 @@ from types import SimpleNamespace
 
 from opendbc.can import CANParser
 from opendbc.can.dbc import DBC
-from opendbc.car.honda.radar_interface import RadarInterface
+from opendbc.car.honda.radar_interface import RadarInterface, elesys_same_object
 from opendbc.car.honda.values import CAR
 
 RADAR_DBC = 'honda_accord_2015au_radar'
@@ -115,6 +116,19 @@ HELD_SAME = [
   (203245623, 0x412, "2e529d743d200007"), (203245623, 0x424, "7fff00000000000a"),
   (302871740, 0x412, "2ea11d7a3d130012"), (302871740, 0x424, "7fff000000000019"),
   (402450669, 0x412, "2eae1d983d000028"), (402450669, 0x424, "7fff000000000028"),
+]
+
+# route dd t 2647.664-2648.164 s: slot 0x411 holds an object 1.9 m to the left, closing from 18.00 m at about 5.9 m/s.
+# At t=2647.964 NEW_TRACK RISES on a frame that continues it (0.10 m off the last range moved on at its vRel, 0.01 m
+# lateral, 0.30 m/s) and clears on the next frame. The radar calls it a new object, so it is a new trackId, as on every
+# rising edge (2.4% of the rising edges on an occupied slot continue the slot's object: 1,936 of 81,539, 126 routes).
+RISING_SAME = [
+  (0, 0x411, "09001f0c3e86001d"), (0, 0x424, "7fff000000000019"),
+  (99986354, 0x411, "08cd1f0c3e8d002d"), (99986354, 0x424, "7fff000000000028"),
+  (200225625, 0x411, "08721f0e3e800037"), (200225625, 0x424, "7fff000000000037"),
+  (300039271, 0x411, "08329f0f3e930001"), (300039271, 0x424, "7fff00000000000a"),
+  (399934740, 0x411, "07fd1f063e860019"), (399934740, 0x424, "7fff000000000019"),
+  (500077813, 0x411, "07b11f093e860025"), (500077813, 0x424, "7fff000000000028"),
 ]
 
 # route 113 t 31.006-31.510 s: slot 0x411 is empty, then NEW_TRACK on three frames in a row on three DIFFERENT objects
@@ -275,6 +289,18 @@ class TestElesysRadarTracks(unittest.TestCase):
     self.assertIsNone(states[0])
     self.assertEqual([s[1] for s in states[1:]], [94.0391, 92.6406, 93.2578, 93.3594])
     self.assertEqual(len({s[0] for s in states[1:]}), 1)
+
+  def test_a_rising_new_track_is_a_new_id_even_on_the_same_object(self):
+    states = updates_of(RISING_SAME, 0x411)
+    self.assertEqual([s[1] for s in states], [18.0, 17.6016, 16.8906, 16.3906, 15.9766, 15.3828])
+    # the rising frame does continue the slot's object, so only the rising edge itself can give it a new id
+    (_, d0, y0, v0, _), (_, d1, y1, v1, _) = states[2:4]
+    self.assertTrue(elesys_same_object(SimpleNamespace(dRel=d0, yRel=y0, vRel=v0), {'LONG_DIST': d1, 'LAT_DIST': -y1, 'REL_SPEED': v1}))
+    ids = [s[0] for s in states]
+    self.assertEqual(len(set(ids[:3])), 1)
+    self.assertNotEqual(ids[3], ids[2])
+    # and the new id stays once NEW_TRACK clears
+    self.assertEqual(len(set(ids[3:])), 1)
 
   def test_a_held_new_track_on_another_object_is_a_new_id(self):
     states = updates_of(HELD_OTHER, 0x411)

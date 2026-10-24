@@ -7,16 +7,20 @@ from opendbc.car.honda.values import DBC, HONDA_ELESYS
 # FORK(HONDA_ACCORD_9G_AU): the Elesys radar's track slots (honda_accord_2015au_radar.dbc; sunnypilot
 # docs/fork/CAR-HONDA-ACCORD-9G-AU.md 5.2). Measured on the logged bus 1, 2026-10-24:
 #  * a radar cycle is 0x410-0x417, 0x420-0x424, then 0x4FF, 0x300, 0x301 and 0x400, every 0.1 s. 0x424 is the last
-#    track frame of every cycle (84,853 cycles, 6 routes) and arrives in the CAN batch after 0x423 in 2.3% of them, so
-#    the update waits for 0x424 (it fired on 0x423, which left slot 0x424 one cycle stale). 0x400 still comes after it
-#    and is read one cycle late, as before;
+#    track frame of every cycle the log holds whole (1.25 M cycles, 126 routes; never before 0x423) and arrives in the
+#    CAN batch after 0x423 in 2.5% of them, so the update waits for 0x424 (it fired on 0x423, which left slot 0x424 one
+#    cycle stale). 0x400 still comes after it and is read one cycle late, as before. A cycle whose 0x424 never comes
+#    (seen only where the radar stopped at the end of a drive) is not published on its own: the next cycle's frames
+#    overwrite it and publish on their 0x424;
 #  * LONG_DIST raw 0x7FFF (255.9921875 m) is an empty slot, the only empty pattern in 9.9 M frames. Real returns reach
 #    255.8 m, so the old test LONG_DIST < 255 dropped returns at 255.0-255.98 m;
 #  * NEW_TRACK: the radar has put a new object in the slot. Set on two frames in a row (1,467 times on those 6 routes)
 #    the second frame is ANOTHER new object 92% of the time (its range or lateral position 1 m or more off the first's
 #    path, 72% by 10 m or more; the frame after it continues the second object), so a new trackId on a rising edge
 #    only would join two objects under one id. A held NEW_TRACK on a frame that continues the slot's object (within
-#    ELESYS_SAME_*, which 94.5-97.5% of frames without NEW_TRACK meet, and 1.4-5.5% of rising ones) keeps its id;
+#    ELESYS_SAME_*, which 94.5-97.5% of frames without NEW_TRACK meet, and 1.4-5.5% of rising ones) keeps its id. A
+#    RISING NEW_TRACK is a new id even when its frame meets ELESYS_SAME_* (2.4% of rising edges on an occupied slot),
+#    as upstream's every-NEW_TRACK rule gave it: the check is for held flags only;
 #  * COASTING (byte 2 bit 6, FLAG_B22 until 2026-10-24): the radar extrapolated the track this cycle instead of
 #    measuring it. RadarPoint's measured flag (deprecated.measured since upstream's #3546, the same field @6) is its
 #    inverse, so radarTracks in a route carries it. Nothing reads it: radard, the clutter guard and the UI do not.
