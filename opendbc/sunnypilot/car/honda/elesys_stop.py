@@ -40,7 +40,11 @@ WHAT: a brake CEILING while the car is still rolling in the stopping state.
 The bound: the rise starts 1.9 s after entry at the latest and the ceiling is gone 0.60 s after
 that (105 -> 255 at 250 counts/s), so nothing of it is left 2.50 s after the stopping state began.
 With brake320 (brake_ceiling.py) the ceiling rises on to 320, 0.86 s, 2.76 s after entry; between 255
-and 320 it can only bind on a command above 255, which a stop does not send (the hold is 189).
+and 320 it can only bind on a command above 255, which the brake block cannot send in the stopping
+state: only the pid state earns beyond 255 (review 2026-10-24, which found stops entered from a
+hard brake holding LongControl's -2.6 to -3.0 at 267-317 counts for the whole standstill before
+that gate). A stop's hold is 189 from stopAccel, or at most 255 after a hard brake, as before.
+The release limiter, after this ceiling, still walks a higher approach command down 32 a send.
 On the replayed stops every rise was SETTLE, at most 1.82 s after entry.
 
 The ENTRY SPEED bound (review, 2026-10): the weak-decel escape cannot fire while the car is

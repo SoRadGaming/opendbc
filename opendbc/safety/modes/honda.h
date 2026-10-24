@@ -219,7 +219,9 @@ static void honda_rx_hook(const CANPacket_t *msg) {
       // Forward AEB when stock braking is higher than openpilot braking
       // only stop forwarding when AEB event is over
       // FORK(HONDA_ACCORD_9G_AU): brake320 raises openpilot's ceiling on this car to 320, the radar's own request ceiling,
-      // so a CMBS brake at its ceiling is still >= anything openpilot can send, and is forwarded
+      // so a CMBS brake at its ceiling is still >= anything openpilot can send, and is forwarded. A CMBS brake below
+      // openpilot's (256-319 against up to 320) waits, with the radar's FCW/CHIME bits, while openpilot brakes harder;
+      // openpilot's own 0x1FA carries the radar's FCW and CHIME then (brake_ceiling.py fcw_on_the_wire())
       if (!honda_stock_aeb) {
         honda_fwd_brake = false;
       } else if (honda_stock_brake >= honda_brake) {
@@ -449,7 +451,7 @@ static safety_config honda_nidec_init(uint16_t param) {
   // so openpilot never sends a 0x1FA this would refuse; a refused 0x1FA leaves a gap the VSA answers with BRAKE_ERROR.
   honda_nidec_max_brake = (GET_FLAG(param, HONDA_PARAM_ELESYS_BRAKE_320) && honda_elesys_scm_standdown) ? 320 : 255;
 
-  honda_nidec_hybrid =GET_FLAG(current_safety_param_sp, HONDA_PARAM_SP_NIDEC_HYBRID);
+  honda_nidec_hybrid = GET_FLAG(current_safety_param_sp, HONDA_PARAM_SP_NIDEC_HYBRID);
   enable_gas_interceptor = GET_FLAG(current_safety_param_sp, HONDA_PARAM_GAS_INTERCEPTOR);
 
   // FORK(HONDA_ACCORD_9G_AU): the gas interceptor is not used when OP is not controlling longitudinal (as Toyota's

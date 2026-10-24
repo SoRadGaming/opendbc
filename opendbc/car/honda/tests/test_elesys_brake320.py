@@ -14,10 +14,14 @@ CarController and (for the panda's side) the real safety code:
   * a request inside the old range (the plan plus the pitch feedforward no harder than -2.45 m/s^2) sends push12's
     frame, byte for byte, with the tuner on or off, at any speed and grade; beyond it, only ever more brake;
   * the learned gain (up to 1.6x) can take an ordinary request no further than 255;
+  * (review 2026-10-24) only the pid state earns: a stop entered from a hard brake holds at most 255 at a standstill;
+    the brake learner sees at most push12's 0.99, so after a beyond episode its gain and the counts are push12's;
+    the radar's FCW/CHIME ride on openpilot's frame while openpilot's brake is the stronger;
   * the release limiter (32 counts a send) and both pump rules behave up to 320;
   * the VSA fallback: each signal latches 255 for the rest of the drive, accFaulted/espDisabled only after the VSA's
     start-up window; on the real frames of the 10-01 incident it latches, on a clean start and comma route 69 it does
-    not; once latched every frame is the 255 controller's;
+    not; latched mid-brake it walks down to 255 through the release limiter; latched from the start every frame is the
+    255 controller's;
   * the telemetry (customReserved14's numbers and the hondabrake line);
   * every other Honda: no brake320, and compute_gas_brake() unchanged.
 """
@@ -80,9 +84,10 @@ def _cc(accel, pitch=0.0, long_active=True, state=LCS.pid):
   return cc.as_reader()
 
 
-def _run(cc_obj, v_kph, accels, pitch=0.0, cs=None, gain=None, latch_at=None, states=None):
+def _run(cc_obj, v_kph, accels, pitch=0.0, cs=None, gain=None, latch_at=None, states=None, a_ego=None):
   """Drive cc_obj at a steady speed, one request per 100 Hz frame. gain pins the learned brake gain; latch_at latches
-  the CarState's VSA fallback on that frame. Returns (frame, brake_last, COMPUTER_BRAKE, the 0x1FA payload) per send."""
+  the CarState's VSA fallback on that frame; a_ego(request) is the car's answer (default: exactly the request). Returns
+  (frame, brake_last, COMPUTER_BRAKE, the 0x1FA payload) per send."""
   cs = cs or _CS()
   cs.out.vEgo = cs.out.vEgoRaw = v_kph / 3.6
   if gain is not None:
@@ -91,7 +96,7 @@ def _run(cc_obj, v_kph, accels, pitch=0.0, cs=None, gain=None, latch_at=None, st
   for i, a in enumerate(accels):
     if latch_at is not None and i == latch_at:
       cs.brake320_fallback.reason = "vsaFault"
-    cs.out.aEgo = float(a) if math.isfinite(a) else 0.0
+    cs.out.aEgo = (float(a) if a_ego is None else float(a_ego(a))) if math.isfinite(a) else 0.0
     st = states[i] if states is not None else LCS.pid
     _, sends = cc_obj.update(_cc(a, pitch, state=st), structs_CC_SP(), cs, i * int(1e7))
     for addr, dat, _ in map(_as_tuple, sends):
@@ -228,16 +233,26 @@ class TestCarSideNeverExceedsPanda(unittest.TestCase):
     self.assertGreater(configs, 40)
     self.assertGreater(seen_320, 100, "this car must actually brake above 255 in the drive")
 
-  def test_a_fallback_mid_brake_stays_under_the_ceiling(self):
-    CP, CP_SP = _params(ELESYS_CAR)
+  def test_a_fallback_mid_brake_steps_down_through_the_limiter(self):
+    # review 2026-10-24: a VSA fallback latched at 320 used to cut the command to 255 in one send (-65 counts, about
+    # -0.5 m/s^2 in 20 ms mid-brake). With the tuner, whose release limiter takes every other release down 32 counts a
+    # send, the fallback walks down the same way (320 -> 288 -> 256 -> 255) and stays at 255; without the tuner, where
+    # every release is immediate, it is 255 on the latch frame. Never above panda's 320, and never back above 255.
     for tuner in (False, True):
       cc_obj = _elesys_long_controller(tuner)
       frames = _run(cc_obj, 80, [-4.0] * 400, gain=1.6, latch_at=250)
       before = [f[2] for f in frames if f[0] < 250]
       after = [f[2] for f in frames if f[0] >= 250]
       self.assertEqual(max(before), 320)
-      self.assertEqual(max(after), 255, "the latch frame itself is already at the old ceiling")
+      self.assertEqual(before[-1], 320)
       self.assertEqual(cc_obj.brake320.counts, 255)
+      steps = [a - b for a, b in zip([before[-1]] + after, after, strict=False)]
+      if tuner:
+        self.assertEqual(after[:3], [288, 256, 255], "the limiter's walk")
+        self.assertLessEqual(max(steps), 32)
+      else:
+        self.assertEqual(after[0], 255, "no limiter: at once, as every release without the tuner")
+      self.assertTrue(all(c == 255 for c in after[3:]), f"tuner {tuner}: back above the old ceiling")
 
 
 class TestBrake320Law(unittest.TestCase):
@@ -325,23 +340,19 @@ class TestBrake320Law(unittest.TestCase):
         first = next(k for k, f in enumerate(new) if accels[f[0]] < -2.45)
         self.assertEqual([f[3] for f in new[:first]], [f[3] for f in old[:first]], msg)
         beyond = [k for k, f in enumerate(new) if accels[f[0]] < -2.45]
-        # tuner on, the second episode may start from a learned gain a hair apart (the learner was fed 1.0 where push12
-        # fed 0.99 in the first): at most 2 counts
-        slack = 2 if tuner else 0
-        self.assertTrue(all(new[k][2] >= old[k][2] - slack for k in beyond), msg)
+        # every send beyond brakes at least as hard. (Before the review of 2026-10-24 the tuner's second episode could
+        # start from a learned gain a hair apart, the learner fed 1.0 where push12 fed 0.99: 2 counts of slack.)
+        self.assertTrue(all(new[k][2] >= old[k][2] for k in beyond), msg)
         self.assertEqual(max(new[k][2] for k in beyond), 317 if not tuner else max(new[k][2] for k in beyond))
         self.assertGreaterEqual(max(new[k][2] for k in beyond), 310, msg)
         self.assertLessEqual(max(old[k][2] for k in beyond), 255, msg)
-        # the tail. Tuner off: within 10 sends of the request coming back inside the old range the frames are push12's
-        # again. Tuner on, the release limiter walks down from the higher command first, and the brake learner (fed the
-        # fraction capped at 1.0, as before) may have moved by a hair while beyond: within a few counts, not identical
+        # the tail: within 10 sends of the request coming back inside the old range the counts are push12's again
+        # (tuner on, the release limiter walks down from the higher command first), and stay so
         for end in (k for k in range(1, len(new)) if accels[new[k][0]] >= -2.45 > accels[new[k - 1][0]]):
-          if not tuner:
-            back = next(j for j in range(end, len(new)) if new[j][3] == old[j][3])
-            self.assertLessEqual(back - end, 10, f"{msg}: send {end}")
-          else:
-            self.assertTrue(all(abs(new[j][2] - old[j][2]) <= 3 for j in range(end + 12, min(end + 80, len(new)))),
-                            f"{msg}: send {end}")
+          back = next(j for j in range(end, len(new)) if new[j][2] == old[j][2])
+          self.assertLessEqual(back - end, 10, f"{msg}: send {end}")
+          nxt = next((j for j in range(end, len(new)) if accels[new[j][0]] < -2.45), len(new))
+          self.assertEqual([f[2] for f in new[back:nxt]], [f[2] for f in old[back:nxt]], f"{msg}: send {end}")
 
   def test_a_runaway_gain_stays_at_255_on_an_ordinary_request(self):
     # the learned gain (up to 1.6x) used to be bounded by the 255 clip; it still is, until the request itself passes
@@ -386,6 +397,150 @@ class TestBrake320Law(unittest.TestCase):
         new = _run(_elesys_long_controller(tuner=True), kph, [a] * 300, pitch=-0.03)
         old = _run(_elesys_long_controller(tuner=True, brake320=False), kph, [a] * 300, pitch=-0.03)
         self.assertEqual([f[3] for f in new], [f[3] for f in old], (kph, a))
+
+  @staticmethod
+  def _stop(cc_obj, held):
+    """A hard stop as LongControl drives it: the PID state braking at `held` from 8 m/s down to the stopping speed
+    (0.8 m/s, stopping_tune.py), then the stopping state, which keeps LongControl's last output when that is already
+    below stopAccel (longcontrol.py), to a standstill and 20 s of it. Returns (state, vEgo, COMPUTER_BRAKE) per send."""
+    cs = _CS()
+    out = []
+    v, st = 8.0, LCS.pid
+    for i in range(2500):
+      if v <= 0.8:
+        st = LCS.stopping
+      cs.out.vEgo = cs.out.vEgoRaw = v
+      cs.out.aEgo = -2.4 if v > 0.0 else 0.0
+      cs.out.standstill = v == 0.0
+      _, sends = cc_obj.update(_cc(held, state=st), structs_CC_SP(), cs, i * int(1e7))
+      for addr, dat, _ in map(_as_tuple, sends):
+        if addr == 0x1FA:
+          out.append((st, v, _cb(dat)))
+      v = max(v - 0.024, 0.0)
+    return out
+
+  def test_a_hard_stop_holds_no_more_than_255(self):
+    # review 2026-10-24: the stopping state holds LongControl's last output, and the pitch term is 0 there, so a stop
+    # entered from a hard brake went on "earning" beyond 255 at a standstill: 267-317 counts held for the whole stop (the
+    # logged stops: 8 of 373, 13-34 s each) with nothing to gain, on the VSA that logged the 32-11 fault. Only the pid
+    # state earns now. The approach still brakes past 255; in the stopping state the clips are the old 1.0 and 255 and
+    # the hysteresis state the old ceiling's (<= 0.99; without that it kept 1.01 of the higher command and held 255), so
+    # the standstill hold is push12's, frame for frame.
+    for tuner in (False, True):
+      for held in (-2.6, -3.0, -3.25):
+        new = self._stop(_elesys_long_controller(tuner=tuner), held)
+        old = self._stop(_elesys_long_controller(tuner=tuner, brake320=False), held)
+        msg = f"tuner {tuner} held {held}"
+        self.assertGreater(max(cb for st, _, cb in new if st == LCS.pid), 255, f"{msg}: the approach earns")
+        still_new = [cb for _, v, cb in new if v == 0.0]
+        still_old = [cb for _, v, cb in old if v == 0.0]
+        self.assertGreater(len(still_new), 1000, msg)
+        self.assertLessEqual(max(still_new), 255, msg)
+        self.assertEqual(still_new[-1000:], still_old[-1000:], f"{msg}: the hold is push12's")
+        # in the stopping state nothing is above 255 once the release limiter has walked down from the approach
+        stopping = [cb for st, _, cb in new if st == LCS.stopping]
+        self.assertLessEqual(max(stopping[3:]), 255, msg)
+
+  def test_after_a_beyond_episode_the_learned_gain_is_push12s(self):
+    # review 2026-10-24: the brake learner weights its error by the brake fraction. Fed 1.0 beyond the old ceiling where
+    # push12's never passed 0.99 (actuator_hysteresis()'s ceiling), its gain came out a hair apart, and later ordinary
+    # braking differed by a count either way for minutes (replay: 283 sends a count LESS, up to 14 min later). Capped at
+    # 0.99 it learns what push12's learned. Here the car answers 0.05 m/s^2 short of the request, or 0.05 past it, so
+    # the learner moves on every steady stretch - before, during and after a request beyond -2.45 - without reaching
+    # its rails: once the release tail is over every count is push12's again, and both learned gains are the same
+    # floats. What the longer release tail itself leaves (it pumped 2 sends longer above 200 counts) is C1b's 6 s
+    # top-up burst 2 sends later in the same application; from the next application every frame is push12's.
+    from opendbc.can import CANPacker
+    from opendbc.car import Bus
+    packer = CANPacker(DBC[ELESYS_CAR][Bus.pt])
+    off_ = packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 0})[1]
+    on_ = packer.make_can_msg("BRAKE_COMMAND", 0, {"BRAKE_PUMP_REQUEST": 1})[1]
+    pump = bytes(a ^ b for a, b in zip(off_[:7], on_[:7], strict=True))
+    phases = [(-1.6, 500), (-3.4, 500), (-1.6, 700), (0.3, 100), (-2.0, 500)]
+    accels = [a for a, n in phases for _ in range(n)]
+    for off in (0.05, -0.05):
+      for kph in (40, 90):
+        new_cc = _elesys_long_controller(tuner=True)
+        old_cc = _elesys_long_controller(tuner=True, brake320=False)
+        new = _run(new_cc, kph, accels, a_ego=lambda a, off=off: a + off)
+        old = _run(old_cc, kph, accels, a_ego=lambda a, off=off: a + off)
+        msg = f"{kph} km/h, the car {off:+} off the request"
+        self.assertGreaterEqual(max(f[2] for f in new), 300, msg)
+        self.assertLessEqual(max(f[2] for f in old), 255, msg)
+        t_new, t_old = new_cc.dynamic_tuner, old_cc.dynamic_tuner
+        self.assertNotEqual(t_old.brake_gain_converged, 0.0, f"{msg}: the learner moved")
+        self.assertEqual((t_new._shadow_brake_gain, t_new.brake_gain_converged), (t_old._shadow_brake_gain, t_old.brake_gain_converged),
+                         msg)
+        end = next(k for k, f in enumerate(new) if f[0] >= 1000)   # the request back inside the old range
+        nxt = next(k for k, f in enumerate(new) if f[0] >= 1800)   # the next application
+        self.assertEqual([f[2] for f in new[end + 25:]], [f[2] for f in old[end + 25:]], msg)
+        for a, b in zip(new[end + 25:nxt], old[end + 25:nxt], strict=True):
+          self.assertTrue(all((x ^ y) & ~m == 0 for x, y, m in zip(a[3][:7], b[3][:7], pump, strict=True)), f"{msg}: frame {a[0]}")
+        self.assertEqual([f[3] for f in new[nxt:]], [f[3] for f in old[nxt:]], msg)
+
+  def test_the_radars_warning_rides_on_openpilots_frame(self):
+    # review 2026-10-24: while openpilot brakes harder than a CMBS brake of 256-319, panda keeps sending openpilot's 0x1FA
+    # (the stronger brake wins, honda.h), so the radar's own frame with its FCW and CHIME reached the car only once
+    # openpilot braked less - and today's stockAeb rule does not fire on these events (the 27 logged CMBS brakes at 256+
+    # carry FCW=2 and none of its four bits), so nothing else warned. With openpilot capped at 255 a CMBS brake of 256+
+    # always won and its warning reached the car. Now, above 255, openpilot's own 0x1FA carries the radar's FCW (2) and
+    # CHIME while the radar warns; up to 255, and without a radar warning, it is push12's frame; the 255 controller and
+    # every other car are untouched. The radar's frame is parsed by the real CANParser, as CarState hands it over.
+    from opendbc.can import CANPacker, CANParser
+    from opendbc.car import Bus
+    dbc = DBC[ELESYS_CAR][Bus.pt]
+    packer = CANPacker(dbc)
+
+    def radar(fcw, chime, cb=280):
+      cp = CANParser(dbc, [("BRAKE_COMMAND", math.nan)], 2)
+      _, dat, _ = _as_tuple(packer.make_can_msg("BRAKE_COMMAND", 2, {"COMPUTER_BRAKE": cb, "FCW": fcw, "CHIME": chime,
+                                                                      "BRAKE_PUMP_REQUEST": 1, "COMPUTER_BRAKE_REQUEST": 1}))
+      cp.update([(int(1e9), [(0x1FA, dat, 2)])])
+      return cp.vl["BRAKE_COMMAND"]
+
+    def drive(cc_obj, stock_brake, visual=None, accel=-4.0):
+      cs = _CS()
+      cs.stock_brake = stock_brake
+      cs.out.vEgo = cs.out.vEgoRaw = 60 / 3.6
+      out = []
+      for i in range(300):
+        cs.out.aEgo = -2.4
+        cc = structs.CarControl.new_message()
+        cc.enabled = cc.longActive = True
+        cc.actuators.accel = accel
+        cc.actuators.longControlState = LCS.pid
+        cc.hudControl.speedVisible = True
+        cc.hudControl.setSpeed = 30.0
+        if visual is not None:
+          cc.hudControl.visualAlert = visual
+        _, sends = cc_obj.update(cc.as_reader(), structs_CC_SP(), cs, i * int(1e7))
+        for addr, dat, _ in map(_as_tuple, sends):
+          if addr == 0x1FA:
+            p = CANParser(dbc, [("BRAKE_COMMAND", math.nan)], 0)
+            p.update([(int(1e9), [(addr, dat, 0)])])
+            v = p.vl["BRAKE_COMMAND"]
+            out.append((int(v["COMPUTER_BRAKE"]), int(v["FCW"]), int(v["CHIME"]), dat))
+      return out
+
+    warn = radar(2, 2)
+    self.assertEqual((warn["FCW"], warn["CHIME"]), (2, 2))
+    for tuner in (False, True):
+      new = drive(_elesys_long_controller(tuner=tuner), warn)
+      self.assertGreater(max(f[0] for f in new), 300)
+      self.assertTrue(all((f[1], f[2]) == ((2, 2) if f[0] > 255 else (0, 0)) for f in new), f"tuner {tuner}")
+      # the 255 controller never carries it; and a request inside the old range sends push12's frames, warning or not
+      self.assertTrue(all(f[1:3] == (0, 0) for f in drive(_elesys_long_controller(tuner=tuner, brake320=False), warn)))
+      inside = drive(_elesys_long_controller(tuner=tuner), warn, accel=-2.3)
+      self.assertEqual([f[3] for f in inside], [f[3] for f in drive(_elesys_long_controller(tuner=tuner, brake320=False), warn, accel=-2.3)])
+      self.assertTrue(all(f[1:3] == (0, 0) for f in inside) and max(f[0] for f in inside) > 200)
+      # no radar warning (FCW 0, or the bare test double without the key): openpilot's own flag only
+      for quiet in (radar(0, 0), radar(1, 0), {"CHIME": 0}):
+        self.assertTrue(all(f[1:3] == (0, 0) for f in drive(_elesys_long_controller(tuner=tuner), quiet)), quiet)
+      # openpilot's own FCW alert: FCW and the radar's CHIME, as upstream, at any count
+      own = drive(_elesys_long_controller(tuner=tuner), radar(0, 3), visual=structs.CarControl.HUDControl.VisualAlert.fcw)
+      self.assertTrue(all(f[1:3] == (2, 3) for f in own))
+    self.assertFalse(ElesysBrakeCeiling.fcw_on_the_wire(False, 300, object()), "unreadable: openpilot's own flag")
+    self.assertTrue(ElesysBrakeCeiling.fcw_on_the_wire(True, 10, None))
 
   def test_release_limiter_from_317(self):
     accels = [-4.0] * 300 + [0.3] * 200

@@ -13,7 +13,8 @@ from opendbc.sunnypilot.car.honda.icbm import IntelligentCruiseButtonManagementI
 from opendbc.sunnypilot.car.honda.dynamic_tuning import HondaDynamicTuner
 from opendbc.sunnypilot.car.honda.elesys_stop import ElesysSoftStop  # FORK(HONDA_ACCORD_9G_AU): soft final stop
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
-from opendbc.sunnypilot.car.honda.brake_ceiling import BRAKE_MAX_320, ElesysBrakeCeiling, panda_max_brake  # FORK: brake320
+from opendbc.sunnypilot.car.honda.brake_ceiling import BRAKE_MAX_320, BRAKE_STEADY_MAX_255, ElesysBrakeCeiling, \
+  panda_max_brake  # FORK: brake320
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -310,7 +311,10 @@ def brake_pump_c1b_elesys(apply_brake, v_ego, level, trig, last_pump_ts, ts):
 # real CMBS request tops out at 320 counts with the pump bit on (256-320 on the CMBS brakes of 1-7 July); the 500-1022
 # on bus 2 that S:/OP/CMBS_AEB_bitmap.md read as "max emergency" are the radar's pump-off release step-downs (1022 ->
 # 682 -> 340 -> 0), never requests. openpilot's own ceiling here is at most that same 320, so a CMBS brake at its
-# ceiling is always >= ours and is forwarded.
+# ceiling is always >= ours and is forwarded. A CMBS brake below openpilot's (6 of the 27 logged CMBS events at 256 or
+# more peaked at 262-318) waits while openpilot brakes harder - the stronger brake reaches the car either way - and with
+# it the radar's own FCW/CHIME bits; so above 255 openpilot's own 0x1FA carries the radar's FCW and CHIME while the radar
+# warns (ElesysBrakeCeiling.fcw_on_the_wire(), review 2026-10-24).
 #
 # brake320 (2026-10-24) leaves this threshold at 0.99 on purpose. It is where the credit goes OUT - the old full brake -
 # not the new one (brake_ceiling.BRAKE_LAST_MAX_320, 1.24). Moved to 1.24, every request between the old and the new
@@ -454,7 +458,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
       accel = actuators.accel
       adjust_accel = accel + hill_accel  # FORK(HONDA_ACCORD_9G_AU): pitch feedforward, also feeds pcm_accel below
       if self.brake320 is not None:
-        brake_frac_max = self.brake320.set_request(adjust_accel)
+        # only the pid state earns: the stopping state holds LongControl's last output at a standstill (brake_ceiling.py)
+        brake_frac_max = self.brake320.set_request(adjust_accel, earns=actuators.longControlState == LongCtrlState.pid)
       gas, brake = compute_gas_brake(adjust_accel, CS.out.vEgo, self.CP, brake_frac_max)
     else:
       accel = 0.0
@@ -486,6 +491,14 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
 
     # *** apply brake hysteresis ***
     pre_limit_brake, self.braking, self.brake_steady = actuator_hysteresis(brake, self.braking, self.brake_steady)
+    # FORK(HONDA_ACCORD_9G_AU): brake320 - on a frame that earns nothing beyond the old ceiling the hysteresis state is
+    # the old ceiling's too: at most 0.99, the most it ever was. Coming down from a brake above 1.0 it would otherwise
+    # settle at 1.01 (the request + brake_hyst_gap) and hold 255 where push12 held 253 - a stop entered from a hard brake
+    # for its whole standstill (review 2026-10-24). With it, once the release limiter has walked down, the controller's
+    # state, and so every count, is push12's again. A no-op whenever brake_steady is at or below 0.99.
+    if self.brake320 is not None and brake_frac_max <= 1.0:
+      self.brake_steady = min(self.brake_steady, BRAKE_STEADY_MAX_255)
+      pre_limit_brake = min(pre_limit_brake, BRAKE_STEADY_MAX_255)
 
     # *** rate limit after the enable check ***
     # NB: MVL runs a 3x faster brake rise here (3 * DT_CTRL). Deliberately NOT ported: combined
@@ -614,7 +627,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           # stopping state, so longcontrol's ramp does not reach the full standstill hold (189) before the wheels
           # have stopped; it rises to the hold 0.55 s after they read zero (elesys_stop.py). It can only LOWER the
           # command, and sits before the release limiter so that still smooths any release. brake320: it is out of
-          # the way once it reaches the highest command this block can send now (320, or 255).
+          # the way once it reaches the highest command this block can send (320, or 255); in the stopping state, the
+          # only place it acts, nothing earns above 255, so between 255 and 320 it never binds.
           if self.soft_stop is not None:
             done_cb = self.brake320.counts if self.brake320 is not None else self.params.NIDEC_BRAKE_MAX - 1
             apply_brake = self.soft_stop.update(CC, CS, apply_brake, self.dynamic_tuner, done_cb=done_cb)
@@ -624,10 +638,11 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           # override so nothing delays getting off the brakes.
           if self.dynamic_tuner.enabled and CC.longActive and not CS.out.gasPressed and not CS.out.brakePressed:
             apply_brake = max(self.apply_brake_last - 32, apply_brake)
-          # FORK(HONDA_ACCORD_9G_AU): brake320 - never above this frame's ceiling on the wire, the limiter included (it
-          # binds only on the frame the VSA fallback latches mid-brake: down to 255 at once). Noted for the telemetry.
+          # FORK(HONDA_ACCORD_9G_AU): brake320 - never above this frame's ceiling on the wire, the limiter included. It
+          # binds only after the VSA fallback latches mid-brake, and then lets the limiter walk down to 255 (32 counts
+          # a send, as any release) instead of cutting to 255 in one send (wire_ceiling()). Noted for the telemetry.
           if self.brake320 is not None:
-            apply_brake = min(apply_brake, self.brake320.counts)
+            apply_brake = min(apply_brake, self.brake320.wire_ceiling(self.apply_brake_last))
             self.brake320.sent(apply_brake)
           if self.CP.carFingerprint in HONDA_ELESYS and self.elesys_pump_c1b:  # FORK(HONDA_ACCORD_9G_AU): pump rule C1b
             pump_on, self.pump_level, self.pump_trig, self.last_pump_ts = brake_pump_c1b_elesys(
@@ -646,8 +661,11 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           # MVL does use it (`pcm_override = CC.longActive or CS.out.stockAeb`, which ran on this car in June-July 2026);
           # the stock Elesys radar sets it on 94.8% of its braking frames. See CAR-HONDA-ACCORD-9G-AU.md 7.7.
           pcm_override = True
+          # FORK(HONDA_ACCORD_9G_AU): brake320 - above 255 the radar's own warning rides on openpilot's frame too, as it
+          # reached the car when a CMBS brake of 256+ always won panda's comparison (brake_ceiling.py); alert_fcw elsewhere
+          fcw_1fa = alert_fcw if self.brake320 is None else self.brake320.fcw_on_the_wire(alert_fcw, apply_brake, CS.stock_brake)
           can_sends.append(hondacan.create_brake_command(self.packer, self.CAN, apply_brake, pump_on,
-                                                         pcm_override, pcm_cancel_cmd, alert_fcw,
+                                                         pcm_override, pcm_cancel_cmd, fcw_1fa,
                                                          CS.stock_brake, self.CP_SP,
                                                          # FORK(HONDA_ACCORD_9G_AU): BRAKE_COMMAND units bit
                                                          is_metric=CS.is_metric, elesys=self.CP.carFingerprint in HONDA_ELESYS))

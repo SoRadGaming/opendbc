@@ -12,8 +12,16 @@ COMPUTER_BRAKE): 100 counts -1.1 m/s^2, 150 -1.76, 200 -2.2, 240-255 -2.45 (95% 
 1.0 m/s^2 per 100 counts from 60 to 200, 0.7 above 180; lag about 0.4 s. The Elesys radar's own request ceiling is 320
 counts with the pump bit on (its CMBS brakes of 1-7 July sit at 256-320); values above 320 on bus 2 are only its pump-off
 release step-downs (1022 -> 682 -> 340 -> 0 and the like, 111 of them), never a request. So 255 -> 320 is about
-+0.5 m/s^2, still inside ISO 15622's -3.5; it would have handled route 143 (a stopped car at night, 5% downhill) without
-the driver. The VSA logged one 32-11 solenoid fault (2026-10-01, S:/OP/incident-2026-10-01); the owner took the risk.
++0.5 m/s^2, still inside ISO 15622's -3.5. The VSA logged one 32-11 solenoid fault (2026-10-01,
+S:/OP/incident-2026-10-01); the owner took the risk.
+
+WHAT IT BUYS: less impact speed, not a guaranteed stop. Route 143 (a stopped car at night, a ~5% downhill, where full
+brake gave -1.65 to -1.92): replayed open loop on its own trajectory, brake320 would have stopped about 1-4 m short of the
+car instead of needing the driver - but only because the plan had already been braking hard since t~170. A plan that
+first reacts at the radar's firm ranges there (64-73 m at 52-57 km/h) still hits at 10-20 km/h with the brake as
+measured on 143 (push12: 25-31); on that slope a 58 km/h stop needs about 80-90 m of warning (the review's closed-loop
+sim, 2026-10-24). On the level the builder's sim turned a 60 km/h stopped car at 70 m from an 18.8 km/h impact into a
+stop 1.4 m short; 80 km/h with 70-90 m of warning still hits either way.
 
 WHAT CHANGES, AND WHAT DOES NOT
   panda      honda.h max_brake is 320 with HondaSafetyFlags.ELESYS_BRAKE_320 (128) AND the stand-down (32), and not in
@@ -34,13 +42,34 @@ WHAT CHANGES, AND WHAT DOES NOT
              a full request (earned_fraction()) and the count's to 320 at BRAKE_LAST_MAX_320 (1.24, what
              actuator_hysteresis() leaves of one; earned_ceiling()). The same clip bounds the learned brake gain (up to
              1.6x), which the 255 clip used to: a runaway gain on an ordinary request still stops at 255, as before.
+             Only the PID state earns (set_request(earns=...)). The stopping state holds LongControl's last output when
+             it is already below stopAccel, with no pitch term, so a stop entered from a hard brake kept "asking" for it
+             at a standstill: 267-317 counts held for the whole stop on the VSA that logged the fault, for nothing (review
+             2026-10-24: 8 of 373 logged stops, 13-34 s each). Stopping begins below 0.8 m/s, where the extra brake is
+             worth about 2 cm of stopping distance, and the soft stop caps a stop entered below 1.2 m/s at 105 anyway. On
+             a frame that earns nothing the CarController also clamps the brake hysteresis state to the old ceiling's
+             0.99 (BRAKE_STEADY_MAX_255): coming down from above 1.0 it would settle at 1.01 and hold 255 where push12
+             held 253, so with it every frame after an episode is push12's once the release limiter has walked down.
+             What earns it is not smoothed above 255 beyond the brake law's own: at a learned gain above 1 the count
+             follows earned_ceiling() of the request (up to the 32-a-send limiter on the way down), so it moves as fast
+             as the plan does - on logged plans at a forced 1.6 gain, +13/-8 counts a send at most (review); none is
+             added. Full brake is int(1.24 x gain x 256) up to the earned ceiling: 317 at a gain of 1.0, 320 from 1.0081,
+             and 269 at the learner's 0.85 floor (push12 215 there) - a latent limit (the car's gains are 0.997-1.018),
+             which the live learner winds out of in a long saturated brake (the review's replay at a forced 0.85: route
+             143 still reached 320).
   fallback   any VSA / ABS / brake fault or warning, seen once, takes the ceiling back to 255 for the rest of the drive
              (Brake320Fallback): carStateSP.vsaFault or vsaStoredFault (vsa_fault.py), or - once the VSA's start-up window
              is over - carState.accFaulted (0x1B0 BRAKE_ERROR) or espDisabled (0x1A4 ESP_DISABLED, the VSA lamp; lit by
              the start-up bulb check for up to 1.7 s on almost every route, never later on 201 logged routes). One
-             error line (errorLogMessage, in the qlog) and customReserved14 record it.
+             error line (errorLogMessage, in the qlog) and customReserved14 record it. Latched mid-brake above 255, the
+             command walks down to the 255 controller's through the release limiter (32 counts a send, wire_ceiling())
+             rather than in one send; the panda allows 320 for the whole drive, so that is never refused.
   telemetry  customReserved14 (card, 1 Hz and on change): the ceiling, the fallback and why, the highest count sent in the
              last second and in the drive; and a `hondabrake` logMessage line for any second that sent above 255.
+  AEB        panda's forwarding is upstream's: the radar's 0x1FA (CMBS) while its FCW is up and its brake is >= openpilot's.
+             A CMBS brake at its 320 ceiling still wins; one of 256-319 below openpilot's command now waits while
+             openpilot brakes harder, and with it the radar's FCW/CHIME. So above 255 openpilot's own frame carries them
+             while the radar warns (fcw_on_the_wire()); up to 255 nothing changes.
 
 NEVER RAISES. All of this runs inside CarState.update() and CarController.update(); an exception there stops card, and
 with it 0x1FA - BRAKE_ERROR a second later. Anything unexpected reads as 255.
@@ -61,8 +90,10 @@ BRAKE_MAX_320 = 320               # panda's max_brake on this car with ELESYS_BR
 BRAKE_FRAC_MAX_320 = BRAKE_MAX_320 / BRAKE_SCALE   # 1.25: compute_gb_honda_elesys()'s brake clip with brake320
 BRAKE_HYST_GAP = 0.01             # actuator_hysteresis()'s brake_hyst_gap: a rising request settles this far below itself
 BRAKE_LAST_MAX_320 = BRAKE_FRAC_MAX_320 - BRAKE_HYST_GAP   # 1.24: brake_last at a full request, 317 counts at gain 1.0
+BRAKE_STEADY_MAX_255 = 1.0 - BRAKE_HYST_GAP   # 0.99: the most brake_steady / brake_last ever were at the old ceiling
 OLD_CEILING_DECEL = 2.45          # m/s^2: the steady deceleration measured at 240-255 counts (95% CI 2.34-2.62)
 EARN_START_FRAC = OLD_CEILING_DECEL / 2.6   # 0.942: the brake fraction of a -2.45 request (2.6 m/s^2 per 1.0)
+RELEASE_STEP = 32                 # counts per send: the CarController's release limiter (and the factory's)
 
 WINDOW_FRAMES = 100               # CarController frames (100 Hz) per telemetry window: 1 s
 LOG_TAG = "hondabrake"
@@ -180,10 +211,14 @@ class ElesysBrakeCeiling:
     self.drive_max = 0
     self.drive_above = 0
 
-  def set_request(self, accel) -> float:
+  def set_request(self, accel, earns: bool = True) -> float:
     """This frame's request (the plan's accel plus the pitch feedforward; 0 when longitudinal is not active). Returns
-    the brake fraction's clip for compute_gb_honda_elesys() and the brake block."""
+    the brake fraction's clip for compute_gb_honda_elesys() and the brake block. `earns` is False outside the PID state
+    (the CarController passes longControlState == pid): there the request earns nothing beyond the old ceiling, so the
+    clips are the old 1.0 and 255 (see EARNED in the module docstring, and the review of 2026-10-24)."""
     self.req_frac = request_fraction(accel)
+    if not earns:
+      self.req_frac = min(self.req_frac, EARN_START_FRAC)
     return self.frac_max
 
   @property
@@ -206,6 +241,32 @@ class ElesysBrakeCeiling:
 
   def earned_counts(self) -> int:
     return earned_ceiling(self.req_frac, self.counts)
+
+  def wire_ceiling(self, last_sent) -> int:
+    """The most this send may put on the wire: this frame's ceiling (320, or 255 once the fallback has latched), but
+    after a fallback latched mid-brake no lower than the last send less RELEASE_STEP, so the CarController's release
+    limiter walks the command down as it walks any release (320 -> 288 -> 256 -> 255) instead of cutting 65
+    counts in one send; never above `allowed`. It only lets the limiter's own output through - the brake law's command
+    is already within earned_counts() - so without the limiter (the tuner off, a pedal, longitudinal off) the command
+    is at 255 at once, as every release there is immediate. Never raises: unreadable is this frame's ceiling."""
+    try:
+      return int(min(self.allowed, max(self.counts, int(last_sent) - RELEASE_STEP)))
+    except Exception:
+      return self.counts
+
+  @staticmethod
+  def fcw_on_the_wire(alert_fcw, apply_brake, stock_brake) -> bool:
+    """The FCW flag for openpilot's own 0x1FA (hondacan.create_brake_command(): FCW = 2 and the radar's CHIME when set).
+    openpilot's own FCW alert as ever; and, while openpilot sends more than 255, the radar's warning too (its 0x1FA's FCW
+    >= 2, the bit panda reads as stock AEB). With openpilot capped at 255 a CMBS brake of 256 or more always won panda's
+    comparison and reached the car with its FCW and CHIME; one below openpilot's brake320 command now waits (honda.h:
+    the stronger brake wins), and today's stockAeb rule does not fire on these events (only FCW=2 and the brake, review
+    2026-10-24), so without this the driver would get no warning from the radar while openpilot brakes harder. Up to 255
+    nothing changes. Never raises: unreadable is openpilot's own flag."""
+    try:
+      return bool(alert_fcw) or (int(apply_brake) > BRAKE_MAX_255 and float(stock_brake.get("FCW", 0) or 0) >= 2)
+    except Exception:
+      return bool(alert_fcw)
 
   def sent(self, counts) -> None:
     """One 0x1FA, as it went on the wire."""

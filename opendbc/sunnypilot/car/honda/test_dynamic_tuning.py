@@ -753,11 +753,16 @@ check("per-mode lists in D, ECON, S order", all(f"{k}=[" in line for k in ("mode
 check("the retired fields are gone", "pedal=" not in line and "wind=" not in line, line)
 
 
-# --- 17. brake320: the learner sees the fraction capped at 1.0 ------------------
+# --- 17. brake320: the learner sees at most push12's highest fraction, 0.99 -----
 
-print("\n[17] brake320: the brake learner's fraction is capped at 1.0, the shadow learners get it whole")
+print("\n[17] brake320: the brake learner's fraction is capped at 0.99 (push12's highest), the shadow learners get it whole")
+# review 2026-10-24: capped at 1.0, the learner was fed 1.0 beyond the old ceiling where push12's never passed 0.99
+# (actuator_hysteresis() leaves a full request at 0.99), and its gain drifted a hair from push12's for the rest of the
+# drive. Capped at 0.99 it learns frame for frame what push12's learned.
+cap = getattr(dt, "BRAKE_LEARN_FRAC_MAX", None)
+check("the cap is push12's highest brake fraction", cap == 1.0 - 0.01 == 0.99, str(cap))
 runs = {}
-for frac in (1.0, 1.1, 1.25):
+for frac in (0.9, 0.99, 0.995, 1.0, 1.1, 1.25):
   t = make_tuner()
   cc, cs = base(15.0, -3.0, -2.2)    # beyond the old ceiling, under-braking: the learner is active
   settle(t, cc, cs)
@@ -766,11 +771,12 @@ for frac in (1.0, 1.1, 1.25):
     t.update_state(cc, cs)
     gains.append(t.brake_gain(cc, cs, frac))
   runs[frac] = (gains, t.brake_pid.i, t.brake_gain_converged, t._shadow_brake_frac)
-check("the learner moved (the run is a real learning run)", runs[1.0][0][-1] > 1.0, f"{runs[1.0][0][-1]}")
-check("a fraction above 1.0 learns exactly as 1.0 does (frame for frame)",
-      runs[1.1][:3] == runs[1.0][:3] and runs[1.25][:3] == runs[1.0][:3])
-check("the shadow learners get the true fraction", [runs[f][3] for f in (1.0, 1.1, 1.25)] == [1.0, 1.1, 1.25],
-      str([runs[f][3] for f in (1.0, 1.1, 1.25)]))
+check("the learner moved (the run is a real learning run)", runs[0.99][0][-1] > 1.0, f"{runs[0.99][0][-1]}")
+check("a fraction above 0.99 learns exactly as 0.99 does (frame for frame)",
+      all(runs[f][:3] == runs[0.99][:3] for f in (0.995, 1.0, 1.1, 1.25)))
+check("below it the fraction is the weight, as ever", runs[0.9][0] != runs[0.99][0])
+check("the shadow learners get the true fraction", [runs[f][3] for f in (0.99, 1.0, 1.1, 1.25)] == [0.99, 1.0, 1.1, 1.25],
+      str([runs[f][3] for f in (0.99, 1.0, 1.1, 1.25)]))
 t = make_tuner(enabled=False)
 check("disabled, still exactly 1.0 above 1.0", t.brake_gain(cc, cs, 1.25) == 1.0 and t._shadow_brake_frac == 1.25)
 

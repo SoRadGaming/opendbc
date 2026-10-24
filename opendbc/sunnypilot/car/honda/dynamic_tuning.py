@@ -343,6 +343,11 @@ BRAKE_POS_LIMIT = 0.6
 # a self-tuner should be able to do without the driver knowing.
 BRAKE_NEG_LIMIT = 0.15        # gain floor 0.85x; ceiling stays 1.60x
 BRAKE_LEARN_MIN_SPEED = 1.0   # m/s below which the brake learner is frozen
+# FORK(HONDA_ACCORD_9G_AU) brake320: the highest brake fraction the learner weights its error by. 0.99 is the most any
+# Honda's brake block ever handed it before brake320 - actuator_hysteresis() leaves a request of 1.0 at 1.0 - its
+# brake_hyst_gap (0.01) - so up to the old ceiling nothing changes, and beyond it (up to 1.24 on this car) it learns
+# exactly what push12's learned (brake_gain()).
+BRAKE_LEARN_FRAC_MAX = 1.0 - 0.01
 
 # --- pitch -------------------------------------------------------------------
 PITCH_RC = 0.5              # s, matches the spirit of toyota's filtered pitch
@@ -1011,13 +1016,13 @@ class HondaDynamicTuner:
     self._shadow_brake_frac = _finite(apply_brake_frac)
     if not self.enabled:
       return 1.0
-    # FORK(HONDA_ACCORD_9G_AU) brake320: the fraction may pass 1.0 on this car now (up to 1.25, brake_ceiling.py). The
-    # learner weights its error by it, so it sees it capped at 1.0: never a heavier weight than it ever had, and above
-    # 1.0 the request is beyond the old ceiling, not something to learn a trim from. Up to the old ceiling its input is
-    # exactly what it was; beyond it, 1.0 where the old one's was at most 0.99, which can leave the learned gain a hair
-    # apart afterwards (the brake320 replay: +1 count on 219 of 673,019 later sends). The shadow learners (logging
-    # only) get the true fraction above.
-    apply_brake_frac = min(apply_brake_frac, 1.0)
+    # FORK(HONDA_ACCORD_9G_AU) brake320: the fraction may pass 1.0 on this car now (up to 1.24, brake_ceiling.py). The
+    # learner weights its error by it, so it sees it capped at BRAKE_LEARN_FRAC_MAX (0.99), the most it was ever handed
+    # before: up to the old ceiling its input is exactly what it was, and beyond it the same 0.99 push12 fed it there.
+    # Capped at 1.0 (brake320 as first built) it was fed 1.0 there, its gain came out a hair apart, and ordinary braking
+    # afterwards differed by a count either way for minutes (review 2026-10-24: 283 sends a count less on 164 replayed
+    # routes, up to 14 min later). The shadow learners (logging only) get the true fraction above.
+    apply_brake_frac = min(apply_brake_frac, BRAKE_LEARN_FRAC_MAX)
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
 
