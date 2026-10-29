@@ -330,7 +330,7 @@ in `brake_switch_mirror.py`; markers `FORK(BRAKE-SWITCH-MIRROR)`.
   copy (engine-off) never goes out. `BRAKE_PRESSED` is a commented-out line in case `BRAKE_SWITCH` alone is not enough.
 * **`opendbc/car/honda/interface.py`**, `values.py` (0): `HondaSafetyFlags.ELESYS_BRAKE_SWITCH_MIRROR = 256`, set beside
   the stand-down and brake320. `opendbc/sunnypilot/car/interfaces.py` (0): stock ACC mode clears it (param 68).
-* **`opendbc/safety/modes/honda.h`** (0): `HONDA_PARAM_ELESYS_BRAKE_SWITCH_MIRROR`, honoured with the stand-down only;
+* **`opendbc/safety/modes/honda.h`** (0): `HONDA_PARAM_ELESYS_BRAKE_SWITCH_MIRROR`, on only with the stand-down;
   `0x17C` on bus 2 in two new TX lists, and the car's `0x17C` blocked in `honda_nidec_fwd_hook`. The four stand-down
   lists share `HONDA_N_ELESYS_STANDDOWN_COMMON_TX_MSGS`.
 * Tests: `test_brake_switch_mirror.py` (new) and `TestHondaElesysBrakeSwitchMirror*` in `safety/tests/test_honda.py`;

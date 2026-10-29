@@ -764,16 +764,6 @@ class HondaElesysBrakeSwitchMirror:
     self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.PARAM)
     self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0x17C))
 
-  def test_fwd_hook(self):
-    # the stand-down's own forwarding, plus the car's 0x17C blocked to the radar
-    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C, 0x1FA], 0: [0x1A6, 0x17C]}
-    self.safety.set_honda_fwd_brake(False)
-    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
-
-    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6, 0x17C]}
-    self.safety.set_honda_fwd_brake(True)
-    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
-
 
 class TestHondaElesysBrakeSwitchMirrorSafety(HondaElesysBrakeSwitchMirror, HondaElesysBrake320,
                                              TestHondaElesysStanddownGasInterceptorSafety):
@@ -789,6 +779,16 @@ class TestHondaElesysBrakeSwitchMirrorSafety(HondaElesysBrakeSwitchMirror, Honda
     self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.PARAM)
     self.safety.init_tests()
 
+  def test_fwd_hook(self):
+    # the stand-down's own forwarding, plus the car's 0x17C blocked to the radar
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C, 0x1FA], 0: [0x1A6, 0x17C]}
+    self.safety.set_honda_fwd_brake(False)
+    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
+
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6, 0x17C]}
+    self.safety.set_honda_fwd_brake(True)
+    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
+
 
 class TestHondaElesysBrakeSwitchMirrorNoInterceptorSafety(HondaElesysBrakeSwitchMirror, TestHondaElesysScmStanddownSafety):
   """The mirror on the bare stand-down, no pedal or brake320 (292): its coverage apart from the brake ceiling."""
@@ -801,6 +801,16 @@ class TestHondaElesysBrakeSwitchMirrorNoInterceptorSafety(HondaElesysBrakeSwitch
     self.safety = libsafety_py.libsafety
     self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, self.PARAM)
     self.safety.init_tests()
+
+  def test_fwd_hook(self):
+    # the stand-down's own forwarding, plus the car's 0x17C blocked to the radar
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C, 0x1FA], 0: [0x1A6, 0x17C]}
+    self.safety.set_honda_fwd_brake(False)
+    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
+
+    self.FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6, 0x17C]}
+    self.safety.set_honda_fwd_brake(True)
+    super(TestHondaNidecSafetyBase, self).test_fwd_hook()
 
 
 class TestHondaNidecBrakeSwitchMirrorBitAloneSafety(TestHondaNidecPcmAltSafety):
