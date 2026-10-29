@@ -312,6 +312,55 @@ ignores it) and reports itself on bus 0 at `0x620`-`0x62F`. Diagnostics only: **
   copies with the firmware's own files: `_sunnypilot_blr.dbc` line for line for the seven frames, the vector byte for
   byte. Elsewhere it skips.
 
+### E. The 0x17C BRAKE_SWITCH mirror, 2026-10-29
+
+openpilot brakes through `0x1FA` and the lamp board of section D lights the brake lamps off that frame's
+`BRAKE_LIGHTS` bit. The driver's foot never moved, so the car's own `POWERTRAIN_DATA` (`0x17C`) still says
+`BRAKE_SWITCH = 0`: the Elesys radar sees lit lamps with no brake switch behind them. openpilot re-sends `0x17C` to
+the radar on bus 2 with every signal copied and that one bit forced on while the lamps really are lit. **On for this
+variant in software, with no toggle**, like the stand-down and brake320 (owner decision 2026-10-29); markers
+`FORK(BRAKE-SWITCH-MIRROR)`. The car's safety param goes from 164 to **420**.
+
+* `opendbc/car/honda/hondacan.py` (0): `create_brake_switch_on(packer, bus, powertrain_data, brake_switch_on)` -
+  `CHECKSUM`/`COUNTER` dropped for the packer to redo, so a stale counter can never go out. With the gate off the
+  frame is the car's own signal for signal. `BRAKE_PRESSED` (bit 53) is a commented-out line on purpose: the bit the
+  radar is thought to want is `BRAKE_SWITCH` alone, and the second one is there if that turns out not to settle it.
+* `opendbc/car/honda/carstate.py` (0): `self.powertrain_data`, beside `self.scm_buttons`, `HONDA_ELESYS` only, plus
+  `self.powertrain_data_seen` from `cp.ts_nanos` - `cp.vl` is zeros until the parser validates a real `0x17C` (its
+  counter needs a predecessor), and an all-zero `POWERTRAIN_DATA` is engine-off to the radar, so the mirror waits for
+  the first decoded frame. `ts_nanos` is per message and never cleared, so it latches on.
+* **`opendbc/car/honda/carcontroller.py`** (0): sent EVERY frame (`0x17C` is 100 Hz), openpilot longitudinal on this
+  car, never in stock ACC mode. Unconditional, not only while the lamps are on, because the panda blocks the car's
+  own copy for the whole drive: a gap here is a `0x17C` gap at the radar, the bargain the `0x1A6` stand-down already
+  makes at 25 Hz.
+* **`opendbc/car/honda/interface.py`** (0): `ELESYS_BRAKE_SWITCH_MIRROR` beside the stand-down and brake320, for
+  `HONDA_ELESYS` with openpilot longitudinal. There is no param: the safety param is the single source of truth and
+  the CarController reads it back, so the two halves can never disagree about who owns the radar's `0x17C`.
+* `opendbc/sunnypilot/car/honda/brake_switch_mirror.py` (new): `brake_switch_mirror_on(CP)`, `honda_nidec_init()`'s
+  rule read off `CarParams` exactly as `brake_ceiling.panda_max_brake()` is; and `brake_lamp_driven(CS)`, the board's
+  `outDrive` with a fresh status and no dark-lamp/open-coil diagnosis. **The one deliberate exception to the lamp
+  board's DESIGN E.7** (owner decision 2026-10-29) and the only bridge from the board into anything openpilot
+  transmits: read-only, fail-safe to "not lit", and it reaches one bit of one frame - never `brakePressed`,
+  `brakeLights`, a `CarState` field, the brake command or panda safety, which still does not know the board's IDs
+  exist. `test_blr.py`'s source guard lists it, and the exception is argued in both files.
+* **`opendbc/safety/modes/honda.h`** (0): `HONDA_PARAM_ELESYS_BRAKE_SWITCH_MIRROR = 256`. Two halves that only make
+  sense together - `0x17C` on bus 2 is allowed to openpilot, and the car's `0x17C` is blocked bus 0 -> 2, so the
+  radar hears one stream with one `COUNTER` sequence. Honoured only with `ELESYS_SCM_STANDDOWN`, the same shape as
+  brake320. The four stand-down TX lists now share
+  `HONDA_N_ELESYS_STANDDOWN_COMMON_TX_MSGS`, so they cannot drift.
+* `opendbc/car/honda/values.py` (0): `HondaSafetyFlags.ELESYS_BRAKE_SWITCH_MIRROR = 256`. No `HondaFlagsSP` bit and no
+  params key: nothing on sunnypilot's side changes, and `HondaFlagsSP` 128 stays free.
+* `opendbc/sunnypilot/car/interfaces.py` (0): `_initialize_honda` clears bit 256 in stock ACC mode with the
+  stand-down and brake320, so that mode's param is 68 exactly as before.
+* Tests: `opendbc/sunnypilot/car/honda/test_brake_switch_mirror.py` (new; the gate's fail-safe inputs, the frame
+  signal for signal through the car's own DBC, 420 against the port's own condition with the reader scanned against
+  `honda.h`'s rule over every param, and the CarController's sends with it on and off) and
+  `safety/tests/test_honda.py` `TestHondaElesysBrakeSwitchMirror*` (the TX allowance, the forward block, neither
+  without the stand-down, and module state cleared by a later init). `test_elesys_brake320.py` and
+  `test_elesys_stock_acc.py` move from 164 to 420, and every CarController double in the Honda tests gains
+  `powertrain_data` / `powertrain_data_seen` - the mirror is unconditional on this car, so a double without them
+  raises rather than silently skipping the send.
+
 ## Merging upstream: the short version
 
 Merge opendbc **before** sunnypilot, push `sp-master`, and only then move sunnypilot's submodule pointer.

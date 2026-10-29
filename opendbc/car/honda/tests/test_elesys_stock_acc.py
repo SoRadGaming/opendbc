@@ -57,10 +57,11 @@ class TestStockAccHookOff(unittest.TestCase):
 
   def test_off_values_are_todays(self):
     # the car's running configuration (route 113): hondaNidec 36, SP 2, openpilot long, interceptor, pcmCruise False;
-    # 164 since brake320 (2026-10-24: 4|32|128, panda's max_brake 320)
+    # 164 since brake320 (2026-10-24: 4|32|128, panda's max_brake 320), 420 since the 0x17C BRAKE_SWITCH mirror
+    # (2026-10-29: |256, openpilot owns the radar's POWERTRAIN_DATA)
     CP, CP_SP = _params(params_list=[{PARAM: False}])
     self.assertEqual(CP.safetyConfigs[-1].safetyModel, structs.CarParams.SafetyModel.hondaNidec)
-    self.assertEqual(CP.safetyConfigs[-1].safetyParam, 164)
+    self.assertEqual(CP.safetyConfigs[-1].safetyParam, 420)
     self.assertEqual(CP_SP.safetyParam, HondaSafetyFlagsSP.GAS_INTERCEPTOR)
     self.assertTrue(CP.openpilotLongitudinalControl)
     self.assertFalse(CP.pcmCruise)
@@ -164,6 +165,9 @@ class _FakeCS:
     self.acc_hud = {"FCM_OFF": 0, "FCM_OFF_2": 0, "FCM_PROBLEM": 0, "ICONS": 0}
     self.lkas_hud = {}
     self.scm_buttons = {"CRUISE_BUTTONS": 0, "CRUISE_SETTING": 0, "MAIN_ON": 1}
+    self.powertrain_data = {"PEDAL_GAS": 0, "ENGINE_RPM": 1500, "GAS_PRESSED": 0, "ACC_STATUS": 1, "BOH_17C": 0,
+                            "BRAKE_SWITCH": 0, "BOH2_17C": 0, "BRAKE_PRESSED": 0, "BOH3_17C": 0}
+    self.powertrain_data_seen = True   # FORK(BRAKE-SWITCH-MIRROR): the 0x17C mirror to the radar
     self.is_metric = True
     self.econ_on = False
     self.out_sp = structs.CarStateSP()
@@ -203,11 +207,12 @@ class TestStockAccCarController(unittest.TestCase):
           self.assertEqual([a for a, _, _ in sends], [0xE4, 0x500] if i % 10 == 0 else [0xE4], msg=f"frame {i}")
 
   def test_toggle_off_still_sends_the_long_frames_and_the_stand_down(self):
-    # the other side of the same gate: the interceptor build keeps every frame it has today
+    # the other side of the same gate: the interceptor build keeps every frame it has today, and since 2026-10-29
+    # the 0x17C BRAKE_SWITCH mirror on the radar's bus with them (FORK(BRAKE-SWITCH-MIRROR))
     CP, CP_SP = _params(pedal=True, params_list=[{PARAM: False}])
     frames = _sends(CP, CP_SP, 200, lambda i: _cc(cancel=True))
     seen = {(a, b) for sends in frames for a, _, b in sends}
-    self.assertEqual(seen, {(0xE4, 0), (0x1FA, 0), (0x200, 0), (0x1A6, 2), (0x30C, 0), (0x500, 0)})
+    self.assertEqual(seen, {(0xE4, 0), (0x1FA, 0), (0x200, 0), (0x1A6, 2), (0x30C, 0), (0x500, 0), (0x17C, 2)})
 
   def test_the_now_flash_never_reaches_stock_acc_mode(self):
     # FORK(SPEED-LIMIT): sla-flash. Speed Limit Assist is unavailable here, so the flash is never set - and if it were,

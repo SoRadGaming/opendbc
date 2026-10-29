@@ -15,6 +15,8 @@ from opendbc.sunnypilot.car.honda.elesys_stop import ElesysSoftStop  # FORK(HOND
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
 from opendbc.sunnypilot.car.honda.brake_ceiling import BRAKE_MAX_320, BRAKE_STEADY_MAX_255, ElesysBrakeCeiling, \
   panda_max_brake  # FORK: brake320
+from opendbc.sunnypilot.car.honda.brake_switch_mirror import brake_lamp_driven, \
+  brake_switch_mirror_on  # FORK(BRAKE-SWITCH-MIRROR)
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -412,6 +414,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # FORK(HONDA_ACCORD_9G_AU): pump rule C1b (HondaElesysPumpC1b), else v5; fixed for the drive by _initialize_honda.
     # Flag 16 (the retired rule C1) selects nothing any more: an old CarParamsSP that carries it runs v5.
     self.elesys_pump_c1b = bool(CP_SP.flags & HondaFlagsSP.ELESYS_PUMP_C1B)
+    # FORK(BRAKE-SWITCH-MIRROR): the 0x17C BRAKE_SWITCH mirror to the radar, on for this car with openpilot
+    # longitudinal (interface.py), where the panda both allows the frame on bus 2 and blocks the car's own. Read off
+    # the same safety param the panda gets, as brake320's ceiling is, so the two can never disagree.
+    self.elesys_brake_switch_mirror = brake_switch_mirror_on(CP)
     # Flag 32 (the retired brake law v2, 2026-10-05 to 2026-10-09) selects nothing either: today's brake law always runs.
     # FORK(HONDA_ACCORD_9G_AU): brake320 (brake_ceiling.py), built only where panda allows 320 counts: this car with
     # openpilot longitudinal. None everywhere else, and every other car runs the old brake lines unchanged.
@@ -683,6 +689,19 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     if self.CP.carFingerprint in HONDA_ELESYS and self.CP.openpilotLongitudinalControl and not self.elesys_stock_acc and \
        self.frame % 4 == 0:
       can_sends.append(hondacan.create_scm_buttons_no_cruise(self.packer, self.CAN.camera, CS.scm_buttons))
+
+    # FORK(BRAKE-SWITCH-MIRROR): POWERTRAIN_DATA to the radar with BRAKE_SWITCH forced on while the BLR-v1 board says
+    # it is driving lit brake lamps. 0x17C is a 100 Hz frame, so this goes out every frame and unconditionally: the
+    # panda blocks the car's own copy to bus 2 for the whole drive, and a gap in this stream is a 0x17C gap at the
+    # radar. The same gate as the 0x1A6 stand-down above (openpilot longitudinal on this car, never in stock ACC mode,
+    # where the radar is the ACC and only the driver's foot lights the lamps anyway) plus the setting's own bit.
+    # Nothing until the car's own 0x17C has been decoded once: before that the copy would be all zeros, which reads
+    # as engine-off at the radar. The panda is already blocking the car's frame by then, so those first frames are a
+    # short 0x17C gap at ignition instead - standing still, and shorter than the gap a openpilot restart gives it.
+    if self.elesys_brake_switch_mirror and self.CP.carFingerprint in HONDA_ELESYS and \
+       self.CP.openpilotLongitudinalControl and not self.elesys_stock_acc and CS.powertrain_data_seen:
+      can_sends.append(hondacan.create_brake_switch_on(self.packer, self.CAN.camera, CS.powertrain_data,
+                                                       brake_lamp_driven(CS)))
 
     # Send dashboard UI commands.
     if self.frame % 10 == 0:

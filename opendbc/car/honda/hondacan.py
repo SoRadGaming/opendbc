@@ -228,6 +228,25 @@ def create_scm_buttons_no_cruise(packer, bus, scm_buttons):
   return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
 
+def create_brake_switch_on(packer, bus, powertrain_data, brake_switch_on):
+  # FORK(BRAKE-SWITCH-MIRROR): re-send POWERTRAIN_DATA (0x17C) to the radar with the BRAKE_SWITCH bit forced ON while
+  # the brake lamps are lit, continuously, so the stock ACC (Elesys radar) does not freak out when the brake lamps go
+  # on: openpilot brakes through 0x1FA and the BLR-v1 board lights the lamps off it, which leaves the car's own
+  # BRAKE_SWITCH at 0 behind lit lamps. brake_switch_on is the board saying it really is driving them
+  # (sunnypilot/car/honda/brake_switch_mirror.py); with it False the car's own bit is copied through untouched, so the
+  # frame is byte-for-byte what the car sent.
+  # This is sent EVERY frame, not only while the lamps are on, and the panda blocks the car's own 0x17C to bus 2 for
+  # the whole drive (safety/modes/honda.h): the radar then hears exactly one 0x17C stream with one COUNTER sequence,
+  # the same arrangement as the 0x1A6 stand-down above. Two interleaved streams would break the counter it checks.
+  # Copy every signal except CHECKSUM/COUNTER (packer redoes).
+  values = {s: powertrain_data[s] for s in powertrain_data if s not in ("CHECKSUM", "COUNTER")}
+  if brake_switch_on:
+    values["BRAKE_SWITCH"] = 1        # force brake switch on
+    # values["BRAKE_PRESSED"] = 1     # force brake pressed on too, if BRAKE_SWITCH alone does not settle the radar
+
+  return packer.make_can_msg("POWERTRAIN_DATA", bus, values)
+
+
 def create_lkas_hud(packer, bus, CP, hud_control, lat_active, steering_available, alert_steer_required, lkas_hud, dashed_lanes):
   commands = []
 
