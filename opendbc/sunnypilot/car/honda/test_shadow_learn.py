@@ -352,6 +352,7 @@ class _CS:
     self.acc_hud = {"FCM_OFF": 0, "FCM_OFF_2": 0, "FCM_PROBLEM": 0, "ICONS": 0}
     self.lkas_hud = {}
     self.scm_buttons = {"CRUISE_BUTTONS": 0, "CRUISE_SETTING": 0}
+    self.powertrain_data = {}  # FORK(BRAKE-SWITCH-MIRROR): the car's 0x17C, for the mirror to the radar
     self.is_metric = True
     self.pcm_pedal_gas = 40.0
 

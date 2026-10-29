@@ -15,6 +15,7 @@ from opendbc.sunnypilot.car.honda.elesys_stop import ElesysSoftStop  # FORK(HOND
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP  # FORK(HONDA_ACCORD_9G_AU): stock ACC mode
 from opendbc.sunnypilot.car.honda.brake_ceiling import BRAKE_MAX_320, BRAKE_STEADY_MAX_255, ElesysBrakeCeiling, \
   panda_max_brake  # FORK: brake320
+from opendbc.sunnypilot.car.honda.brake_switch_mirror import brake_lamps_lit, brake_switch_mirror_on  # FORK(BRAKE-SWITCH-MIRROR)
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -416,6 +417,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # FORK(HONDA_ACCORD_9G_AU): brake320 (brake_ceiling.py), built only where panda allows 320 counts: this car with
     # openpilot longitudinal. None everywhere else, and every other car runs the old brake lines unchanged.
     self.brake320 = ElesysBrakeCeiling(CP) if panda_max_brake(CP) == BRAKE_MAX_320 else None
+    # FORK(BRAKE-SWITCH-MIRROR): read off the panda's safety param the same way (brake_switch_mirror.py)
+    self.brake_switch_mirror = brake_switch_mirror_on(CP)
 
     self.braking = False
     self.brake_steady = 0.
@@ -683,6 +686,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     if self.CP.carFingerprint in HONDA_ELESYS and self.CP.openpilotLongitudinalControl and not self.elesys_stock_acc and \
        self.frame % 4 == 0:
       can_sends.append(hondacan.create_scm_buttons_no_cruise(self.packer, self.CAN.camera, CS.scm_buttons))
+
+    # FORK(BRAKE-SWITCH-MIRROR): 0x17C to the radar every frame (100 Hz, as the car sends it); the panda blocks the car's own
+    if self.brake_switch_mirror and CS.powertrain_data is not None:
+      can_sends.append(hondacan.create_brake_switch_on(self.packer, self.CAN.camera, CS.powertrain_data, brake_lamps_lit(CS)))
 
     # Send dashboard UI commands.
     if self.frame % 10 == 0:

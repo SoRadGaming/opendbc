@@ -228,6 +228,17 @@ def create_scm_buttons_no_cruise(packer, bus, scm_buttons):
   return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
 
+def create_brake_switch_on(packer, bus, powertrain_data, brake_switch_on):
+  # FORK(BRAKE-SWITCH-MIRROR): re-send POWERTRAIN_DATA to the radar with BRAKE_SWITCH forced on while the brake lamps
+  # are lit, so the stock ACC (Elesys radar) does not freak out when they go on (sunnypilot/car/honda/brake_switch_mirror.py).
+  # Copy every signal except CHECKSUM/COUNTER (packer redoes).
+  values = {s: powertrain_data[s] for s in powertrain_data if s not in ("CHECKSUM", "COUNTER")}
+  if brake_switch_on:
+    values["BRAKE_SWITCH"] = 1        # force brake switch on
+    # values["BRAKE_PRESSED"] = 1     # force brake pressed on too, if BRAKE_SWITCH alone does not settle the radar
+  return packer.make_can_msg("POWERTRAIN_DATA", bus, values)
+
+
 def create_lkas_hud(packer, bus, CP, hud_control, lat_active, steering_available, alert_steer_required, lkas_hud, dashed_lanes):
   commands = []
 

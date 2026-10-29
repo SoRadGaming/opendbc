@@ -3,8 +3,8 @@
 opendbc/sunnypilot/car/honda/brake_ceiling.py has the why. What this file pins, through the real CarInterface,
 CarController and (for the panda's side) the real safety code:
 
-  * the safety param: 4|32|128 = 164 on this car with openpilot longitudinal, 68 in stock ACC mode, and no 128 on any
-    other Honda;
+  * the safety param: 4|32|128|256 = 420 on this car with openpilot longitudinal (164 before the 0x17C BRAKE_SWITCH
+    mirror added bit 256 on 2026-10-29), 68 in stock ACC mode, and no 128 on any other Honda;
   * the car side never sends what panda would refuse, on ANY Honda platform and config: every 0x1FA the real
     CarController sends under the hardest demand (accel -10, a learned gain of 1.6, NaN/inf inputs, random traces) goes
     through the real honda.h tx hook with the same safety param and is allowed, and brake_ceiling.panda_max_brake()
@@ -117,11 +117,12 @@ def _params(car, alpha_long=False, pedal=True, stock_acc=False):
 
 
 class TestBrake320Params(unittest.TestCase):
-  def test_this_car_with_openpilot_long_is_164(self):
+  def test_this_car_with_openpilot_long_is_420(self):
     for pedal in (True, False):
       CP, _ = _params(ELESYS_CAR, pedal=pedal)
-      self.assertEqual(CP.safetyConfigs[-1].safetyParam, F.NIDEC_ALT | F.ELESYS_SCM_STANDDOWN | F.ELESYS_BRAKE_320)
-      self.assertEqual(CP.safetyConfigs[-1].safetyParam, 164)
+      self.assertEqual(CP.safetyConfigs[-1].safetyParam,
+                       F.NIDEC_ALT | F.ELESYS_SCM_STANDDOWN | F.ELESYS_BRAKE_320 | F.ELESYS_BRAKE_SWITCH_MIRROR)
+      self.assertEqual(CP.safetyConfigs[-1].safetyParam, 420)
       self.assertEqual(panda_max_brake(CP), 320)
       self.assertIsNotNone(CarController(DBC[ELESYS_CAR], *_params(ELESYS_CAR, pedal=pedal)).brake320)
 

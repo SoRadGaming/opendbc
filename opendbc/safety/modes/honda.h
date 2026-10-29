@@ -27,6 +27,16 @@
   {0x30C, 0, 8, .check_relay = true},   \
   {0x33D, 0, 5, .check_relay = true},   \
 
+// HONDA_ACCORD_9G_AU (Elesys radar) stock-ACC stand-down: the entries every stand-down TX list in honda_nidec_init()
+// shares - HONDA_N_ELESYS_STANDDOWN_TX_MSGS there says what they are
+#define HONDA_N_ELESYS_STANDDOWN_COMMON_TX_MSGS \
+  {0xE4,  0, 5, .check_relay = true},   \
+  {0x194, 0, 4, .check_relay = true},   \
+  {0x1FA, 0, 8, .check_relay = false},  \
+  {0x30C, 0, 8, .check_relay = true},   \
+  {0x1A6, 2, 8, .check_relay = false},  \
+  {0x500, 0, 8, .check_relay = false},  \
+
 // FORK(HONDA_ACCORD_9G_AU): stock ACC mode's relay check. The radar (bus 2) sends only 0x1FA (50 Hz) and 0x30C (10 Hz);
 // either one arriving on bus 0 means the harness relay did not open, and every forward would land back on the same
 // wire. Relay checks only: honda_tx_hook refuses both in this mode, and disable_static_blocking keeps them forwarded.
@@ -54,6 +64,7 @@ static bool honda_elesys_stock_acc = false;  // FORK(HONDA_ACCORD_9G_AU): stock 
 // FORK(HONDA_ACCORD_9G_AU): brake320. The Nidec BRAKE_COMMAND ceiling: 255 on every Honda, 320 on this car with
 // HONDA_PARAM_ELESYS_BRAKE_320 and the stand-down (honda_nidec_init()); 320 is the Elesys radar's own request ceiling
 static int honda_nidec_max_brake = 255;
+static bool honda_elesys_brake_switch_mirror = false;  // FORK(BRAKE-SWITCH-MIRROR): HONDA_PARAM_ELESYS_BRAKE_SWITCH_MIRROR
 static bool honda_nidec_hybrid = false;
 typedef enum {HONDA_NIDEC, HONDA_BOSCH} HondaHw;
 static HondaHw honda_hw = HONDA_NIDEC;
@@ -378,23 +389,26 @@ static safety_config honda_nidec_init(uint16_t param) {
   // there is no relay to check. It goes on bus 0: on this car bus 2 is the radar branch, and the module
   // sits on the camera's bus with everything else.
   static CanMsg HONDA_N_ELESYS_STANDDOWN_TX_MSGS[] = {
-    {0xE4,  0, 5, .check_relay = true},
-    {0x194, 0, 4, .check_relay = true},
-    {0x1FA, 0, 8, .check_relay = false},
-    {0x30C, 0, 8, .check_relay = true},
-    {0x1A6, 2, 8, .check_relay = false},
-    {0x500, 0, 8, .check_relay = false},
+    HONDA_N_ELESYS_STANDDOWN_COMMON_TX_MSGS
   };
 
-  // stand-down + comma pedal: same list plus GAS_COMMAND. Keep in sync with the list above.
+  // stand-down + comma pedal: same list plus GAS_COMMAND
   static CanMsg HONDA_N_ELESYS_STANDDOWN_INTERCEPTOR_TX_MSGS[] = {
-    {0xE4,  0, 5, .check_relay = true},
-    {0x194, 0, 4, .check_relay = true},
-    {0x1FA, 0, 8, .check_relay = false},
-    {0x30C, 0, 8, .check_relay = true},
-    {0x1A6, 2, 8, .check_relay = false},
-    {0x500, 0, 8, .check_relay = false},
+    HONDA_N_ELESYS_STANDDOWN_COMMON_TX_MSGS
     {0x200, 0, 6, .check_relay = false},
+  };
+
+  // FORK(BRAKE-SWITCH-MIRROR): the two above plus POWERTRAIN_DATA on bus 2, so only the mirror's own bit lets
+  // openpilot send it. Not relay checked, like 0x1A6 on bus 2
+  static CanMsg HONDA_N_ELESYS_STANDDOWN_MIRROR_TX_MSGS[] = {
+    HONDA_N_ELESYS_STANDDOWN_COMMON_TX_MSGS
+    {0x17C, 2, 8, .check_relay = false},
+  };
+
+  static CanMsg HONDA_N_ELESYS_STANDDOWN_MIRROR_INTERCEPTOR_TX_MSGS[] = {
+    HONDA_N_ELESYS_STANDDOWN_COMMON_TX_MSGS
+    {0x200, 0, 6, .check_relay = false},
+    {0x17C, 2, 8, .check_relay = false},
   };
 
   static CanMsg HONDA_N_INTERCEPTOR_TX_MSGS[] = {
@@ -422,6 +436,7 @@ static safety_config honda_nidec_init(uint16_t param) {
   const uint16_t HONDA_PARAM_ELESYS_SCM_STANDDOWN = 32;
   const uint16_t HONDA_PARAM_ELESYS_STOCK_ACC = 64;  // FORK(HONDA_ACCORD_9G_AU)
   const uint16_t HONDA_PARAM_ELESYS_BRAKE_320 = 128;  // FORK(HONDA_ACCORD_9G_AU): brake320
+  const uint16_t HONDA_PARAM_ELESYS_BRAKE_SWITCH_MIRROR = 256;  // FORK(BRAKE-SWITCH-MIRROR)
 
   const uint16_t HONDA_PARAM_SP_NIDEC_HYBRID = 1;
   const uint16_t HONDA_PARAM_GAS_INTERCEPTOR = 2;
@@ -450,6 +465,9 @@ static safety_config honda_nidec_init(uint16_t param) {
   // ceiling is the same function of the same param (opendbc/sunnypilot/car/honda/brake_ceiling.py panda_max_brake()),
   // so openpilot never sends a 0x1FA this would refuse; a refused 0x1FA leaves a gap the VSA answers with BRAKE_ERROR.
   honda_nidec_max_brake = (GET_FLAG(param, HONDA_PARAM_ELESYS_BRAKE_320) && honda_elesys_scm_standdown) ? 320 : 255;
+  // FORK(BRAKE-SWITCH-MIRROR): the bit AND the stand-down, like brake320. openpilot may send 0x17C on bus 2 (the TX
+  // lists below) and the car's own is blocked to it (honda_nidec_fwd_hook), so the radar hears one 0x17C stream
+  honda_elesys_brake_switch_mirror = GET_FLAG(param, HONDA_PARAM_ELESYS_BRAKE_SWITCH_MIRROR) && honda_elesys_scm_standdown;
 
   honda_nidec_hybrid = GET_FLAG(current_safety_param_sp, HONDA_PARAM_SP_NIDEC_HYBRID);
   enable_gas_interceptor = GET_FLAG(current_safety_param_sp, HONDA_PARAM_GAS_INTERCEPTOR);
@@ -478,7 +496,9 @@ static safety_config honda_nidec_init(uint16_t param) {
     SET_RX_CHECKS(honda_nidec_common_rx_checks, ret);
   }
 
-  if (honda_elesys_scm_standdown) {
+  if (honda_elesys_brake_switch_mirror) {
+    SET_TX_MSGS(HONDA_N_ELESYS_STANDDOWN_MIRROR_TX_MSGS, ret);
+  } else if (honda_elesys_scm_standdown) {
     SET_TX_MSGS(HONDA_N_ELESYS_STANDDOWN_TX_MSGS, ret);
   } else {
     SET_TX_MSGS(HONDA_N_TX_MSGS, ret);
@@ -504,7 +524,9 @@ static safety_config honda_nidec_init(uint16_t param) {
     }
 
     // HONDA_ACCORD_9G_AU: don't clobber the stand-down TX list when the pedal is also present
-    if (honda_elesys_scm_standdown) {
+    if (honda_elesys_brake_switch_mirror) {
+      SET_TX_MSGS(HONDA_N_ELESYS_STANDDOWN_MIRROR_INTERCEPTOR_TX_MSGS, ret);
+    } else if (honda_elesys_scm_standdown) {
       SET_TX_MSGS(HONDA_N_ELESYS_STANDDOWN_INTERCEPTOR_TX_MSGS, ret);
     } else {
       SET_TX_MSGS(HONDA_N_INTERCEPTOR_TX_MSGS, ret);
@@ -572,6 +594,7 @@ static safety_config honda_bosch_init(uint16_t param) {
   honda_elesys_scm_standdown = false;
   honda_elesys_stock_acc = false;  // FORK(HONDA_ACCORD_9G_AU)
   honda_nidec_max_brake = 255;  // FORK(HONDA_ACCORD_9G_AU): brake320 is Nidec-only; Bosch long's 0x1FA keeps 255
+  honda_elesys_brake_switch_mirror = false;  // FORK(BRAKE-SWITCH-MIRROR)
   honda_bosch_radarless = GET_FLAG(param, HONDA_PARAM_RADARLESS);
   honda_bosch_canfd = GET_FLAG(param, HONDA_PARAM_BOSCH_CANFD);
   // Checking for alternate brake override from safety parameter
@@ -629,6 +652,13 @@ static bool honda_nidec_fwd_hook(int bus_num, int addr) {
   // (master ACC switch off) so the radar stands the stock ACC down (stops the blocked ACC brake that trips
   // TSA). CMBS is independent of MAIN, so collision braking / FCW still work.
   if (honda_elesys_scm_standdown && (bus_num == 0) && (addr == 0x1A6)) {
+    block_msg = true;
+  }
+
+  // FORK(BRAKE-SWITCH-MIRROR): block the car's POWERTRAIN_DATA to the radar; OP re-sends it on bus 2 with BRAKE_SWITCH
+  // forced on while the brake lamps are lit. For the whole drive, not only while they are lit: the radar checks 0x17C's
+  // COUNTER, which two interleaved streams would break
+  if (honda_elesys_brake_switch_mirror && (bus_num == 0) && (addr == 0x17C)) {
     block_msg = true;
   }
 

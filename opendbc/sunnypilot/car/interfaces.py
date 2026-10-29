@@ -189,9 +189,11 @@ def _initialize_honda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_
       CP_SP.enableGasInterceptor = False
       CP_SP.safetyParam &= ~HondaSafetyFlagsSP.GAS_INTERCEPTOR
       # bit 32 (the SCM_BUTTONS stand-down) was set by _get_params; bits 32 and 64 together are never sent. Bit 128
-      # (brake320) goes with it: no 0x1FA is sent in this mode, and the param stays 4|64 = 68 as before brake320
+      # (brake320) goes with it: no 0x1FA is sent in this mode, and the param stays 4|64 = 68 as before brake320.
+      # FORK(BRAKE-SWITCH-MIRROR): so does bit 256 - only the driver's foot lights the lamps here
       safety_param = CP.safetyConfigs[-1].safetyParam & ~(HondaSafetyFlags.ELESYS_SCM_STANDDOWN.value |
-                                                          HondaSafetyFlags.ELESYS_BRAKE_320.value)
+                                                          HondaSafetyFlags.ELESYS_BRAKE_320.value |
+                                                          HondaSafetyFlags.ELESYS_BRAKE_SWITCH_MIRROR.value)
       CP.safetyConfigs[-1].safetyParam = safety_param | HondaSafetyFlags.ELESYS_STOCK_ACC.value
       carlog.warning("Honda ELESYS stock ACC mode: openpilot longitudinal off, all frames forwarded")
     # FORK(HONDA_ACCORD_9G_AU): the brake pump rule, openpilot long only - never in stock ACC mode, where nothing
