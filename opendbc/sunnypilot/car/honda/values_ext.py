@@ -22,9 +22,6 @@ class HondaFlagsSP(IntFlag):
   # it (today's brake law runs). Do not reuse.
   ELESYS_BRAKE_LAW_V2 = 32
   ELESYS_PUMP_C1B = 64  # the brake pump rule C1b (carcontroller.brake_pump_c1b_elesys); clear = v5
-  # FORK(BRAKE-SWITCH-MIRROR): no bit here. The 0x17C mirror is on for this variant in software, with no toggle, and
-  # the CarController reads it off CarParams' safety param - HondaSafetyFlags.ELESYS_BRAKE_SWITCH_MIRROR (256), set
-  # by honda/interface.py - exactly as brake320's ceiling is read. 128 is free.
 
 
 class HondaSafetyFlagsSP:

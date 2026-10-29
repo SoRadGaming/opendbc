@@ -367,12 +367,8 @@ class CarInterface(CarInterfaceBase):
       # panda and in the CarController alike (opendbc/sunnypilot/car/honda/brake_ceiling.py). Stock ACC mode clears it
       # with the stand-down (sunnypilot/car/interfaces.py _initialize_honda())
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.ELESYS_BRAKE_320.value
-      # FORK(BRAKE-SWITCH-MIRROR): the 0x17C BRAKE_SWITCH mirror to the radar (owner decision 2026-10-29). On for this
-      # variant in software, like the stand-down above and brake320: openpilot re-sends POWERTRAIN_DATA on bus 2 with
-      # BRAKE_SWITCH forced on while the lamp board is driving lit brake lamps, and the panda blocks the car's own copy
-      # to the radar. There is no toggle; stock ACC mode clears it with the other two
-      # (sunnypilot/car/interfaces.py _initialize_honda()), and the CarController reads it back off this param
-      # (opendbc/sunnypilot/car/honda/brake_switch_mirror.py brake_switch_mirror_on())
+      # FORK(BRAKE-SWITCH-MIRROR): the 0x17C mirror to the radar (owner decision 2026-10-29,
+      # opendbc/sunnypilot/car/honda/brake_switch_mirror.py). Stock ACC mode clears it with the other two
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.ELESYS_BRAKE_SWITCH_MIRROR.value
 
     # min speed to enable ACC. if car can do stop and go, then set enabling speed

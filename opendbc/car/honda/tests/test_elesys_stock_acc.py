@@ -165,9 +165,7 @@ class _FakeCS:
     self.acc_hud = {"FCM_OFF": 0, "FCM_OFF_2": 0, "FCM_PROBLEM": 0, "ICONS": 0}
     self.lkas_hud = {}
     self.scm_buttons = {"CRUISE_BUTTONS": 0, "CRUISE_SETTING": 0, "MAIN_ON": 1}
-    self.powertrain_data = {"PEDAL_GAS": 0, "ENGINE_RPM": 1500, "GAS_PRESSED": 0, "ACC_STATUS": 1, "BOH_17C": 0,
-                            "BRAKE_SWITCH": 0, "BOH2_17C": 0, "BRAKE_PRESSED": 0, "BOH3_17C": 0}
-    self.powertrain_data_seen = True   # FORK(BRAKE-SWITCH-MIRROR): the 0x17C mirror to the radar
+    self.powertrain_data = {}  # FORK(BRAKE-SWITCH-MIRROR): the car's 0x17C, for the mirror to the radar
     self.is_metric = True
     self.econ_on = False
     self.out_sp = structs.CarStateSP()
@@ -207,8 +205,8 @@ class TestStockAccCarController(unittest.TestCase):
           self.assertEqual([a for a, _, _ in sends], [0xE4, 0x500] if i % 10 == 0 else [0xE4], msg=f"frame {i}")
 
   def test_toggle_off_still_sends_the_long_frames_and_the_stand_down(self):
-    # the other side of the same gate: the interceptor build keeps every frame it has today, and since 2026-10-29
-    # the 0x17C BRAKE_SWITCH mirror on the radar's bus with them (FORK(BRAKE-SWITCH-MIRROR))
+    # the other side of the same gate: the interceptor build keeps every frame it has today, the 0x17C mirror
+    # (FORK(BRAKE-SWITCH-MIRROR)) included
     CP, CP_SP = _params(pedal=True, params_list=[{PARAM: False}])
     frames = _sends(CP, CP_SP, 200, lambda i: _cc(cancel=True))
     seen = {(a, b) for sends in frames for a, _, b in sends}

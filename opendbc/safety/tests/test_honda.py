@@ -719,35 +719,26 @@ class TestHondaNidecBrake320BitAloneSafety(TestHondaNidecPcmAltSafety):
     self.safety.init_tests()
 
 
-# FORK(BRAKE-SWITCH-MIRROR): the 0x17C BRAKE_SWITCH mirror (ELESYS_BRAKE_SWITCH_MIRROR, 256). Two halves that only
-# make sense together: openpilot may transmit POWERTRAIN_DATA on bus 2 (the radar branch) and the car's own 0x17C is
-# blocked bus 0 -> 2, so the radar hears exactly one 0x17C stream with one COUNTER sequence. Both only with the
-# stand-down, i.e. this car with openpilot longitudinal. The payload is not checked here: panda has no opinion on
-# BRAKE_SWITCH, and the frame is the car's own with one bit set (hondacan.create_brake_switch_on).
+# FORK(BRAKE-SWITCH-MIRROR): the 0x17C mirror (ELESYS_BRAKE_SWITCH_MIRROR, 256), only with the stand-down. openpilot may
+# send POWERTRAIN_DATA on bus 2 and the car's own is blocked bus 0 -> 2, so the radar hears one 0x17C stream.
 MIRROR = HondaSafetyFlags.ELESYS_BRAKE_SWITCH_MIRROR
 
 
 class HondaElesysBrakeSwitchMirror:
   """What the mirror bit adds, mixed into both stand-down configurations. self.PARAM carries the bit."""
 
-  def _mirror_msg(self, bus=2, brake_switch=1):
-    return self.packer.make_can_msg_safety("POWERTRAIN_DATA", bus, {"BRAKE_SWITCH": brake_switch})
+  def _mirror_msg(self, bus=2):
+    return self.packer.make_can_msg_safety("POWERTRAIN_DATA", bus, {"BRAKE_SWITCH": 1})
 
   def test_the_mirror_goes_to_the_radar_only(self):
-    # bus 2 is the radar branch. 0x17C on bus 0 is the PCM's own frame and openpilot may never send it there,
-    # whatever the controls state - a mirror on the car's bus would reach the VSA and the cluster
+    # never on bus 0, the PCM's own bus, whatever the controls state
     for controls_allowed in (True, False):
       self.safety.set_controls_allowed(controls_allowed)
       self.assertTrue(self._tx(self._mirror_msg(2)), f"{controls_allowed=}")
       self.assertFalse(self._tx(self._mirror_msg(0)), f"{controls_allowed=}")
 
-  def test_the_cars_own_17c_is_blocked_to_the_radar(self):
-    self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0x17C), "the car's 0x17C must not reach the radar")
-    self.assertEqual(0, self.safety.safety_fwd_hook(2, 0x17C), "bus 2 -> 0 is untouched")
-
   def test_brake_pressed_still_comes_from_the_cars_bus(self):
-    # the mirror is a TX on bus 2 and panda never hears it: brake_pressed still follows the car's own 0x17C, and the
-    # two-frame BRAKE_SWITCH rule with it
+    # panda never hears its own TX: brake_pressed still follows the car's 0x17C
     self._rx(self._user_brake_msg(1))
     self._rx(self._user_brake_msg(1))
     self.assertTrue(self.safety.get_brake_pressed_prev())
@@ -756,22 +747,17 @@ class HondaElesysBrakeSwitchMirror:
     self.assertFalse(self.safety.get_brake_pressed_prev())
 
   def test_nothing_without_the_stand_down(self):
-    # the bit alone, with stock ACC mode, or with both: no mirror, and the car's 0x17C still reaches the radar
+    # the bit alone, with stock ACC mode, or with both - and the stand-down without the bit: no mirror, no block
     F = HondaSafetyFlags
     for param in (F.NIDEC_ALT | MIRROR, MIRROR, F.NIDEC_ALT | F.ELESYS_STOCK_ACC | MIRROR,
-                  F.NIDEC_ALT | F.ELESYS_SCM_STANDDOWN | F.ELESYS_STOCK_ACC | MIRROR):
+                  F.NIDEC_ALT | F.ELESYS_SCM_STANDDOWN | F.ELESYS_STOCK_ACC | MIRROR, F.NIDEC_ALT | F.ELESYS_SCM_STANDDOWN):
       self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, param)
       self.safety.set_controls_allowed(True)
       self.assertFalse(self._tx(self._mirror_msg(2)), f"{param=}")
       self.assertEqual(2, self.safety.safety_fwd_hook(0, 0x17C), f"{param=}")
-    # and the stand-down without the bit is the wire as it was
-    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, F.NIDEC_ALT | F.ELESYS_SCM_STANDDOWN)
-    self.safety.set_controls_allowed(True)
-    self.assertFalse(self._tx(self._mirror_msg(2)))
-    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0x17C))
 
   def test_a_later_init_clears_the_block(self):
-    # the mirror is module state: a Bosch init and a Nidec init without the bit must both put the car's 0x17C back
+    # module state: a Bosch init, then a Nidec init without the bit, put the car's 0x17C back
     self.safety.set_safety_hooks(CarParams.SafetyModel.hondaBosch, HondaSafetyFlags.BOSCH_LONG)
     self.safety.set_safety_hooks(CarParams.SafetyModel.hondaNidec, HondaSafetyFlags.NIDEC_ALT)
     self.assertEqual(2, self.safety.safety_fwd_hook(0, 0x17C))
@@ -791,10 +777,7 @@ class HondaElesysBrakeSwitchMirror:
 
 class TestHondaElesysBrakeSwitchMirrorSafety(HondaElesysBrakeSwitchMirror, HondaElesysBrake320,
                                              TestHondaElesysStanddownGasInterceptorSafety):
-  """
-    HONDA_ACCORD_9G_AU as it drives with the mirror on: NIDEC_ALT | ELESYS_SCM_STANDDOWN | ELESYS_BRAKE_320 |
-    ELESYS_BRAKE_SWITCH_MIRROR (420), with the comma pedal.
-  """
+  """HONDA_ACCORD_9G_AU as it drives: 420 (NIDEC_ALT | stand-down | brake320 | mirror), with the comma pedal."""
   PARAM = HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_SCM_STANDDOWN | HondaSafetyFlags.ELESYS_BRAKE_320 | MIRROR
   TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x200, 0], [0x1A6, 2], [0x500, 0], [0x17C, 2]]
   FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6, 0x17C]}
@@ -808,11 +791,7 @@ class TestHondaElesysBrakeSwitchMirrorSafety(HondaElesysBrakeSwitchMirror, Honda
 
 
 class TestHondaElesysBrakeSwitchMirrorNoInterceptorSafety(HondaElesysBrakeSwitchMirror, TestHondaElesysScmStanddownSafety):
-  """
-    The mirror on the bare stand-down, without the pedal or brake320: NIDEC_ALT | ELESYS_SCM_STANDDOWN |
-    ELESYS_BRAKE_SWITCH_MIRROR (292), no SP param. The car ships 420 (the class above); this one keeps the mirror's
-    own coverage independent of the brake ceiling.
-  """
+  """The mirror on the bare stand-down, no pedal or brake320 (292): its coverage apart from the brake ceiling."""
   PARAM = HondaSafetyFlags.NIDEC_ALT | HondaSafetyFlags.ELESYS_SCM_STANDDOWN | MIRROR
   TX_MSGS = HONDA_N_COMMON_TX_MSGS + [[0x1A6, 2], [0x500, 0], [0x17C, 2]]
   FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x194, 0x30C], 0: [0x1A6, 0x17C]}
@@ -825,10 +804,7 @@ class TestHondaElesysBrakeSwitchMirrorNoInterceptorSafety(HondaElesysBrakeSwitch
 
 
 class TestHondaNidecBrakeSwitchMirrorBitAloneSafety(TestHondaNidecPcmAltSafety):
-  """
-    The mirror bit without the stand-down is not this car: every inherited Nidec test, nothing extra transmitted and
-    nothing extra blocked.
-  """
+  """The mirror bit without the stand-down is not this car: every inherited Nidec test, nothing sent or blocked extra."""
   def setUp(self):
     self.packer = CANPackerSafety("acura_ilx_2016_can_generated")
     self.safety = libsafety_py.libsafety

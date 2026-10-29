@@ -306,12 +306,9 @@ class CarState(CarStateBase, CarStateExt):
       if self.CP.carFingerprint in HONDA_ELESYS:
         # FORK(HONDA_ACCORD_9G_AU): SCM_BUTTONS for the stock-ACC stand-down re-send, and ECON for the tuner
         self.scm_buttons = cp.vl["SCM_BUTTONS"]  # for re-sending on bus 2 with MAIN_ON=0 (stock-ACC stand-down)
-        # FORK(BRAKE-SWITCH-MIRROR): for re-sending on bus 2 with BRAKE_SWITCH forced on while the brake lamps are lit.
-        # cp.vl holds zeros until the parser has validated a real 0x17C (its counter needs a predecessor), and an
-        # all-zero POWERTRAIN_DATA is engine-off to the radar, so say whether one has ever been decoded. ts_nanos is
-        # per message, set for every signal on each decode and never cleared, so this latches on and stays on.
-        self.powertrain_data = cp.vl["POWERTRAIN_DATA"]
-        self.powertrain_data_seen = cp.ts_nanos["POWERTRAIN_DATA"]["BRAKE_SWITCH"] > 0
+        # FORK(BRAKE-SWITCH-MIRROR): for re-sending on bus 2 with BRAKE_SWITCH forced on. None until a real 0x17C has been
+        # decoded - cp.vl is all zeros before that - and set for good after, since ts_nanos is never cleared
+        self.powertrain_data = cp.vl["POWERTRAIN_DATA"] if cp.ts_nanos["POWERTRAIN_DATA"]["BRAKE_SWITCH"] else None
         # ECON remaps the throttle, so the dynamic tuner has to know about it or it
         # learns one pedal map against another. Not a CarState field: it is a
         # sunnypilot-only concept, and HondaDynamicTuner reads it off the CarState

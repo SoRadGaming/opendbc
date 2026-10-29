@@ -61,10 +61,8 @@ class HondaSafetyFlags(IntFlag):
   # FORK(HONDA_ACCORD_9G_AU): brake320, panda's max_brake 320 instead of 255 (with ELESYS_SCM_STANDDOWN only),
   # HONDA_PARAM_ELESYS_BRAKE_320 in safety/modes/honda.h; the CarController's mirror is brake_ceiling.panda_max_brake()
   ELESYS_BRAKE_320 = 128
-  # FORK(BRAKE-SWITCH-MIRROR): openpilot re-sends POWERTRAIN_DATA (0x17C) to the Elesys radar on bus 2 with
-  # BRAKE_SWITCH forced on while the brake lamps are lit. Allows that TX and blocks the car's own 0x17C to bus 2
-  # (with ELESYS_SCM_STANDDOWN only), HONDA_PARAM_ELESYS_BRAKE_SWITCH_MIRROR in safety/modes/honda.h; the
-  # CarController's mirror is HondaFlagsSP.ELESYS_BRAKE_SWITCH_MIRROR (128)
+  # FORK(BRAKE-SWITCH-MIRROR): the 0x17C mirror to the radar (with ELESYS_SCM_STANDDOWN only),
+  # HONDA_PARAM_ELESYS_BRAKE_SWITCH_MIRROR in safety/modes/honda.h; the CarController's is brake_switch_mirror_on()
   ELESYS_BRAKE_SWITCH_MIRROR = 256
 
 

@@ -18,11 +18,6 @@ decode here that agrees with the vector agrees with the board. What this file ho
     and EXT_SINK among them - every CarState field, brakePressed included, is identical frame for frame to a run
     without them; and in source, nothing outside the decoder, the parser registration, the struct and the 0x17C
     BRAKE_SWITCH mirror's gate names the board, and panda safety does not mention its IDs at all (DESIGN E.7).
-
-The gate (sunnypilot/car/honda/brake_switch_mirror.py, FORK(BRAKE-SWITCH-MIRROR), owner decision 2026-10-29) is the
-one deliberate exception to E.7 and the only bridge from the board into anything openpilot transmits: it decides one
-bit of the 0x17C frame openpilot re-sends to the Elesys radar and nothing else. Its scope is pinned by
-test_brake_switch_mirror.py; what this file still holds for it is that it is the ONLY such file.
 """
 import ast
 import contextlib
@@ -326,11 +321,7 @@ class TestBlrNeverFeedsBraking(unittest.TestCase):
     allowed = {
       "car/structs.py", "car/honda/carstate.py", "sunnypilot/car/honda/carstate_ext.py",
       "sunnypilot/car/honda/test_blr.py", "dbc/generator/honda/_sunnypilot_blr.dbc",
-      # FORK(BRAKE-SWITCH-MIRROR), owner decision 2026-10-29: the ONE deliberate exception to E.7. The 0x17C
-      # BRAKE_SWITCH mirror may only claim a brake switch while the lamps really are lit, so it asks the board.
-      # brake_switch_mirror.py is read-only, fail-safe to "not lit", and reaches one bit of one frame openpilot
-      # sends to the radar - never brakePressed, brakeLights, a CarState field, the brake command or panda safety.
-      # Its own test file pins that scope; panda is still checked below for not knowing the board at all.
+      # FORK(BRAKE-SWITCH-MIRROR): the one deliberate exception to E.7 (owner decision 2026-10-29), argued in the file
       "sunnypilot/car/honda/brake_switch_mirror.py", "sunnypilot/car/honda/test_brake_switch_mirror.py",
     }
     pattern = re.compile(r"brakeLampRelay|BrakeLampRelay|_update_blr|\bBLR_[A-Z]")

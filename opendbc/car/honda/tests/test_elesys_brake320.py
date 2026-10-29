@@ -118,7 +118,6 @@ def _params(car, alpha_long=False, pedal=True, stock_acc=False):
 
 class TestBrake320Params(unittest.TestCase):
   def test_this_car_with_openpilot_long_is_420(self):
-    # 164 until the 0x17C BRAKE_SWITCH mirror (2026-10-29) added bit 256; brake320's own bits are unchanged
     for pedal in (True, False):
       CP, _ = _params(ELESYS_CAR, pedal=pedal)
       self.assertEqual(CP.safetyConfigs[-1].safetyParam,
