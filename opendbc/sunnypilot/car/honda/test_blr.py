@@ -1,7 +1,7 @@
 """FORK(BRAKE-LAMP-RELAY): the BLR-v1 brake-lamp board's telemetry, from the wire to carStateSP.brakeLampRelay.
 
 The board's bytes are its own: fixtures/blr_golden_frames.json is the firmware's blr/tools/golden_frames.json, copied
-byte for byte (board repo S:/Software/EPS-LKAS, branch blr-v1, read at 31c138f). blr_logic_test case 22 packs those
+byte for byte (board repo S:/Software/EPS-LKAS, branch blr-v1, read at e8854f9: frame layout 2). blr_logic_test case 22 packs those
 bytes with the SHIPPING blr_pack(), and blr_dbc_test.py decodes them against the firmware's blr/dbc/blr.dbc - so a
 decode here that agrees with the vector agrees with the board. What this file holds:
 
@@ -14,8 +14,8 @@ decode here that agrees with the vector agrees with the board. What this file ho
   * the seven frames are registered liveness-exempt on HONDA_ELESYS only, and no signal is named COUNTER/CHECKSUM;
   * the decoder, through the real CarInterface: status valid for 1 s and then all-zero, identity latched, analog
     gated, a decoder that raises leaves defaults and never raises into CarState.update();
-  * THE BOARD NEVER REACHES CarState: with the BLR's frames on the bus - a status claiming DRIVER_BRAKING, PEDAL_CAN
-    and EXT_SINK among them - every CarState field, brakePressed included, is identical frame for frame to a run
+  * THE BOARD NEVER REACHES CarState: with the BLR's frames on the bus - a status claiming DRIVER_BRAKING and
+    EXT_SINK among them - every CarState field, brakePressed included, is identical frame for frame to a run
     without them; and in source, nothing outside the decoder, the parser registration, the struct and the 0x17C
     BRAKE_SWITCH mirror's gate names the board, and panda safety does not mention its IDs at all (DESIGN E.7).
 """
@@ -49,6 +49,8 @@ DT_NS = 10_000_000   # card runs CarState.update() at 100 Hz
 TELEMETRY = {0x620: "BLR_STATUS", 0x621: "BLR_ANALOG", 0x622: "BLR_HEALTH", 0x623: "BLR_COUNTERS",
              0x624: "BLR_COUNTERS2", 0x627: "BLR_VERSION", 0x62F: "BLR_BUILD"}
 BOOT_CHANNEL = (0x628, 0x629, 0x62A)
+# each frame's DLC in frame layout 2 (the firmware's BLR_DLC_* in blr/inc/blr_proto.h; layout 1 sent all seven at 8)
+DLC = {0x620: 4, 0x621: 6, 0x622: 8, 0x623: 8, 0x624: 8, 0x627: 6, 0x62F: 7}
 COPY_DBC = OPENDBC / "dbc" / "generator" / "honda" / "_sunnypilot_blr.dbc"
 
 # The firmware tree, when it is reachable: the EPS-LKAS repo's blr/ (sunnypilot's test_blr_flasher.py looks in the
@@ -152,7 +154,8 @@ class TestBlrDbc(unittest.TestCase):
       for sig, want in fr["signals"].items():
         self.assertAlmostEqual(got[sig], want, msg=f"{tag} {name}.{sig}: decoded {got[sig]}, the board meant {want}")
         checked += 1
-    self.assertGreater(checked, 80)
+    self.assertGreaterEqual(checked, 70)
+    self.assertEqual(G["version"]["signals"]["FRAME_LAYOUT"], 2, "the fixture is not frame layout 2: copy it again")
 
   def test_the_copies_are_the_firmwares_files(self):
     """Against the firmware's own blr/dbc/blr.dbc and blr/tools/golden_frames.json, when the tree is reachable: the
@@ -165,7 +168,7 @@ class TestBlrDbc(unittest.TestCase):
     ours = dbc_definition(COPY_DBC.read_text(encoding="utf-8"), ids)
     theirs = dbc_definition((fw / "dbc" / "blr.dbc").read_text(encoding="utf-8"), ids)
     assert {int(ln.split()[1]) for ln in theirs if ln.startswith("BO_ ")} == ids, "the firmware's DBC lost a frame"
-    assert len(theirs) > 100, len(theirs)
+    assert len(theirs) > 70, len(theirs)
     assert ours == theirs, (f"_sunnypilot_blr.dbc is not the firmware's blr.dbc: only here {sorted(ours - theirs)}, " +
                             f"only there {sorted(theirs - ours)}")
     # and nothing but those seven is copied: the boot channel and the firmware's header stay out
@@ -185,7 +188,8 @@ class TestBlrDbc(unittest.TestCase):
     cp = CANParser(CAR_DBC, [], 0)
     for addr, name in TELEMETRY.items():
       msg = cp.dbc.addr_to_msg[addr]
-      assert msg.name == name and msg.size == 8
+      assert msg.name == name and msg.size == DLC[addr], (name, msg.size)
+      assert all(s.start_bit + s.size <= msg.size * 8 for s in msg.sigs.values()), f"{name}: a signal past its DLC"
       assert not {"COUNTER", "CHECKSUM"} & set(msg.sigs), name
       assert all(s.is_little_endian for s in msg.sigs.values()), f"{name}: the board packs LSB first"
 

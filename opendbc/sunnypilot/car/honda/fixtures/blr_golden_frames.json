@@ -4,19 +4,17 @@
     {
       "tag": "status_active",
       "id": 1568,
-      "hex": "7AE8A0D203A9170D",
+      "hex": "FA8DA042",
       "signals": {
         "STATE": 2,
         "OUT_DRIVE": 1,
         "WOULD_ON": 1,
         "REQUEST": 1,
         "CMD_FRESH": 1,
-        "EDGE_DEFERRED": 0,
-        "RELAY_SNS_ST": 0,
-        "LAMP_SNS_ST": 2,
+        "ADC_OK": 1,
+        "BLR_SEQ": 13,
         "DRIVER_BRAKING": 0,
-        "PEDAL_CAN": 1,
-        "VSA_COMPUTER_BRAKING": 1,
+        "PIN_MISMATCH": 0,
         "EXT_SINK": 1,
         "F_U4_NOT_SINKING": 0,
         "F_U4_LIMITING": 0,
@@ -27,36 +25,23 @@
         "D_EXT_SINK_HELD": 0,
         "F_FEEDBACK": 1,
         "LATCH_REASON": 2,
-        "LOW_V": 1,
-        "HIGH_V": 0,
-        "CAN_DEGRADED": 1,
-        "TIMEOUT_WHILE_ON": 1,
-        "CMD_AGE": 30,
-        "CB_HI": 676,
-        "VARIANT": 3,
-        "STATIONARY": 1,
-        "PIN_MISMATCH": 0,
-        "ADC_OK": 1,
-        "BENCH_PULSE": 0,
-        "BLR_SEQ": 13
+        "CAN_DEGRADED": 1
       }
     },
     {
       "tag": "status_latched",
       "id": 1568,
-      "hex": "841F5D64FFFF2A0F",
+      "hex": "043F5D44",
       "signals": {
         "STATE": 4,
         "OUT_DRIVE": 0,
         "WOULD_ON": 0,
         "REQUEST": 0,
         "CMD_FRESH": 0,
-        "EDGE_DEFERRED": 1,
-        "RELAY_SNS_ST": 3,
-        "LAMP_SNS_ST": 3,
+        "ADC_OK": 0,
+        "BLR_SEQ": 15,
         "DRIVER_BRAKING": 1,
-        "PEDAL_CAN": 0,
-        "VSA_COMPUTER_BRAKING": 0,
+        "PIN_MISMATCH": 1,
         "EXT_SINK": 0,
         "F_U4_NOT_SINKING": 1,
         "F_U4_LIMITING": 0,
@@ -67,47 +52,29 @@
         "D_EXT_SINK_HELD": 1,
         "F_FEEDBACK": 0,
         "LATCH_REASON": 4,
-        "LOW_V": 0,
-        "HIGH_V": 1,
-        "CAN_DEGRADED": 1,
-        "TIMEOUT_WHILE_ON": 0,
-        "CMD_AGE": 2550,
-        "CB_HI": 1020,
-        "VARIANT": 2,
-        "STATIONARY": 0,
-        "PIN_MISMATCH": 1,
-        "ADC_OK": 0,
-        "BENCH_PULSE": 1,
-        "BLR_SEQ": 15
+        "CAN_DEGRADED": 1
       }
     },
     {
       "tag": "analog",
       "id": 1569,
-      "hex": "28004331CD34E50C",
+      "hex": "28004331CD34",
       "signals": {
         "RELAY_SNS_MV": 40,
         "LAMP_SNS_MV": 12611,
-        "VBAT_SNS_MV": 13517,
-        "VDDA_MV": 3301
+        "VBAT_SNS_MV": 13517
       }
     },
     {
       "tag": "health",
       "id": 1570,
-      "hex": "C8E4DD02FF07037D",
+      "hex": "0000D802FF07007D",
       "signals": {
-        "TEC": 200,
-        "REC": 100,
-        "RP": 1,
-        "BUS_STATE": 1,
-        "HSE_OK": 1,
         "RESET_CAUSE": 3,
         "LAST_EXC": 3,
         "BUSOFF_COUNT": 2,
         "RX_LOST": 255,
         "WARM_RESETS": 7,
-        "TRIP_COUNT": 3,
         "UPTIME_MIN": 125
       }
     },
@@ -141,33 +108,24 @@
     {
       "tag": "version",
       "id": 1575,
-      "hex": "D13C3A880F010102",
+      "hex": "D13C3A880702",
       "signals": {
         "GIT_HASH": 2285518033,
         "VARIANT": 3,
         "DIRTY": 1,
-        "APP_SLOT": 1,
-        "FRAME_LAYOUT": 1,
-        "BOOT_PROTO": 1,
-        "BOARD_CLASS": 2
+        "FRAME_LAYOUT": 2
       }
     },
     {
       "tag": "build",
       "id": 1583,
-      "hex": "FD1381B2E1C3A501",
+      "hex": "0D1381B2E1C3A5",
       "signals": {
         "BOOT_PRESENT": 1,
-        "BOOT_DIRTY": 0,
         "OPT_BOR_EN": 1,
         "OPT_DUAL_BANK": 1,
-        "OPT_NSWAP_BANK": 1,
-        "OPT_IWDG_SW": 1,
-        "HSE_OK": 1,
-        "OPT_NBOOT_SEL": 1,
         "BOOT_GIT_LO24": 11698451,
-        "BOARD_UID24": 10863585,
-        "HW_REV": 1
+        "BOARD_UID24": 10863585
       }
     },
     {
