@@ -71,12 +71,12 @@ FUEL_LEVEL_FULL = 105.0
 
 # FORK(BRAKE-LAMP-RELAY): the BLR-v1 brake-lamp board (_sunnypilot_blr.dbc). BLR_STATUS (0x620) is 10 Hz plus on every
 # change, and its fields are valid while the last one is less than 1 s old: 100 of carstate's 100 Hz frames. BLR_ANALOG
-# (0x621) is 5 Hz and gets the same second.
+# (0x621) is 2.5 Hz since frame layout 2 (5 Hz before) and gets the same second.
 BLR_STATUS_STALE_FRAMES = 100
 BLR_ANALOG_STALE_FRAMES = 100
 
 # 0x620 bits 16-23, in bit order: carStateSP.brakeLampRelay.faults bit i is BLR_FAULT_SIGNALS[i], the same byte the
-# board ORs into 0x623 FAULTS_EVER. F_ are trips, D_ are diagnoses (blr/docs/BLR-CAN.md section 3).
+# board ORs into 0x623 FAULTS_EVER (sent by the bench image only since frame layout 2). F_ are trips, D_ are diagnoses (blr/docs/BLR-CAN.md section 3).
 BLR_FAULT_SIGNALS = ("F_U4_NOT_SINKING", "F_U4_LIMITING", "D_LAMP_DARK", "D_COIL_OPEN", "D_LAMP_WITHOUT_US",
                      "D_SENSE_MID", "D_EXT_SINK_HELD", "F_FEEDBACK")
 
@@ -302,7 +302,7 @@ class CarStateExt:
 
     DIAGNOSTICS ONLY, and the signature is the guarantee: this method is handed ret_sp and never ret, so nothing it
     decodes can reach brakePressed, brakeLights or any other CarState field, and from there a controls decision. The
-    board's DRIVER_BRAKING, PEDAL_CAN and EXT_SINK are its own view of the lamp circuit; the car's 0x17C stays the
+    board's DRIVER_BRAKING and EXT_SINK are its own view of the lamp circuit; the car's 0x17C stays the
     only brake-pedal input (DESIGN E.7). card reads the result for the Settings > gateway params, and nothing else.
 
     Two clocks, the two of _update_linbus_firmware() and _update_linbus_gateway():

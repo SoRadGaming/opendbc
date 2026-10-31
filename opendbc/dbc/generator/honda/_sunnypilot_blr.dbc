@@ -3,8 +3,9 @@ NOT stock Honda messages. The board lights the brake lamps from openpilot's own 
 bit, which the car ignores, and reports what it is doing here.
 
 COPIED, NOT WRITTEN. Every message, signal, comment and value table below is the firmware's own
-blr/dbc/blr.dbc (board repo S:/Software/EPS-LKAS, branch blr-v1, read at 31c138f), cut verbatim for the
-telemetry frames 0x620-0x624, 0x627 and 0x62F. Change the firmware's file first and copy it again;
+blr/dbc/blr.dbc (board repo S:/Software/EPS-LKAS, branch blr-v1, read at e8854f9), cut verbatim for the
+telemetry frames 0x620-0x624, 0x627 and 0x62F (0x623/0x624 are sent by the bench image only since
+frame layout 2). Change the firmware's file first and copy it again;
 test_blr.py decodes the firmware's golden frames (fixtures/blr_golden_frames.json) through this file
 and fails on any difference. The boot channel 0x628-0x62A is not copied: it only exists offroad,
 during an update, when nothing is logging.
@@ -18,21 +19,24 @@ bootloader, or have its transmitter off for the power cycle, and none of that ma
 openpilot its CAN.
 
 DIAGNOSTICS ONLY. Nothing here feeds brakePressed, brakeLights, any controls decision or panda
-safety. DRIVER_BRAKING, PEDAL_CAN and EXT_SINK are the board's own view of the brake-lamp circuit;
-0x17C BRAKE_PRESSED and BRAKE_SWITCH stay the only brake-pedal input openpilot has.";
+safety. DRIVER_BRAKING and EXT_SINK are the board's own view of the brake-lamp circuit;
+0x17C BRAKE_PRESSED and BRAKE_SWITCH stay the only brake-pedal input openpilot has.
 
-BO_ 1568 BLR_STATUS: 8 BLR
+FRAME LAYOUT 2 since 2026-11-01 (0x627 FRAME_LAYOUT, a 4-byte 0x620): every field openpilot decodes
+kept its bit, so either layout decodes right here. Routes recorded before it carry layout 1 (an
+8-byte 0x620), whose other bits this file misreads: read those with the firmware's
+blr/tools/blr_layout1.dbc.";
+
+BO_ 1568 BLR_STATUS: 4 BLR
  SG_ STATE : 0|3@1+ (1,0) [0|7] "" XXX
  SG_ OUT_DRIVE : 3|1@1+ (1,0) [0|1] "" XXX
  SG_ WOULD_ON : 4|1@1+ (1,0) [0|1] "" XXX
  SG_ REQUEST : 5|1@1+ (1,0) [0|1] "" XXX
  SG_ CMD_FRESH : 6|1@1+ (1,0) [0|1] "" XXX
- SG_ EDGE_DEFERRED : 7|1@1+ (1,0) [0|1] "" XXX
- SG_ RELAY_SNS_ST : 8|2@1+ (1,0) [0|3] "" XXX
- SG_ LAMP_SNS_ST : 10|2@1+ (1,0) [0|3] "" XXX
+ SG_ ADC_OK : 7|1@1+ (1,0) [0|1] "" XXX
+ SG_ BLR_SEQ : 8|4@1+ (1,0) [0|15] "" XXX
  SG_ DRIVER_BRAKING : 12|1@1+ (1,0) [0|1] "" XXX
- SG_ PEDAL_CAN : 13|1@1+ (1,0) [0|1] "" XXX
- SG_ VSA_COMPUTER_BRAKING : 14|1@1+ (1,0) [0|1] "" XXX
+ SG_ PIN_MISMATCH : 13|1@1+ (1,0) [0|1] "" XXX
  SG_ EXT_SINK : 15|1@1+ (1,0) [0|1] "" XXX
  SG_ F_U4_NOT_SINKING : 16|1@1+ (1,0) [0|1] "" XXX
  SG_ F_U4_LIMITING : 17|1@1+ (1,0) [0|1] "" XXX
@@ -43,37 +47,19 @@ BO_ 1568 BLR_STATUS: 8 BLR
  SG_ D_EXT_SINK_HELD : 22|1@1+ (1,0) [0|1] "" XXX
  SG_ F_FEEDBACK : 23|1@1+ (1,0) [0|1] "" XXX
  SG_ LATCH_REASON : 24|4@1+ (1,0) [0|15] "" XXX
- SG_ LOW_V : 28|1@1+ (1,0) [0|1] "" XXX
- SG_ HIGH_V : 29|1@1+ (1,0) [0|1] "" XXX
  SG_ CAN_DEGRADED : 30|1@1+ (1,0) [0|1] "" XXX
- SG_ TIMEOUT_WHILE_ON : 31|1@1+ (1,0) [0|1] "" XXX
- SG_ CMD_AGE : 32|8@1+ (10,0) [0|2550] "ms" XXX
- SG_ CB_HI : 40|8@1+ (4,0) [0|1020] "" XXX
- SG_ VARIANT : 48|2@1+ (1,0) [0|3] "" XXX
- SG_ STATIONARY : 50|1@1+ (1,0) [0|1] "" XXX
- SG_ PIN_MISMATCH : 51|1@1+ (1,0) [0|1] "" XXX
- SG_ ADC_OK : 52|1@1+ (1,0) [0|1] "" XXX
- SG_ BENCH_PULSE : 53|1@1+ (1,0) [0|1] "" XXX
- SG_ BLR_SEQ : 56|4@1+ (1,0) [0|15] "" XXX
 
-BO_ 1569 BLR_ANALOG: 8 BLR
+BO_ 1569 BLR_ANALOG: 6 BLR
  SG_ RELAY_SNS_MV : 0|16@1+ (1,0) [0|36300] "mV" XXX
  SG_ LAMP_SNS_MV : 16|16@1+ (1,0) [0|36300] "mV" XXX
  SG_ VBAT_SNS_MV : 32|16@1+ (1,0) [0|36300] "mV" XXX
- SG_ VDDA_MV : 48|16@1+ (1,0) [0|3600] "mV" XXX
 
 BO_ 1570 BLR_HEALTH: 8 BLR
- SG_ TEC : 0|8@1+ (1,0) [0|255] "" XXX
- SG_ REC : 8|7@1+ (1,0) [0|127] "" XXX
- SG_ RP : 15|1@1+ (1,0) [0|1] "" XXX
- SG_ BUS_STATE : 16|2@1+ (1,0) [0|3] "" XXX
- SG_ HSE_OK : 18|1@1+ (1,0) [0|1] "" XXX
  SG_ RESET_CAUSE : 19|3@1+ (1,0) [0|7] "" XXX
  SG_ LAST_EXC : 22|2@1+ (1,0) [0|3] "" XXX
  SG_ BUSOFF_COUNT : 24|8@1+ (1,0) [0|255] "" XXX
  SG_ RX_LOST : 32|8@1+ (1,0) [0|255] "" XXX
  SG_ WARM_RESETS : 40|8@1+ (1,0) [0|255] "" XXX
- SG_ TRIP_COUNT : 48|8@1+ (1,0) [0|255] "" XXX
  SG_ UPTIME_MIN : 56|8@1+ (1,0) [0|255] "min" XXX
 
 BO_ 1571 BLR_COUNTERS: 8 BLR
@@ -93,50 +79,37 @@ BO_ 1572 BLR_COUNTERS2: 8 BLR
  SG_ FB_PAIRS : 40|8@1+ (1,0) [0|255] "" XXX
  SG_ VSA_DISAGREE_S : 48|8@1+ (1,0) [0|255] "s" XXX
 
-BO_ 1575 BLR_VERSION: 8 BLR
+BO_ 1575 BLR_VERSION: 6 BLR
  SG_ GIT_HASH : 0|32@1+ (1,0) [0|4294967295] "" XXX
  SG_ VARIANT : 32|2@1+ (1,0) [0|3] "" XXX
  SG_ DIRTY : 34|1@1+ (1,0) [0|1] "" XXX
- SG_ APP_SLOT : 35|1@1+ (1,0) [0|1] "" XXX
  SG_ FRAME_LAYOUT : 40|8@1+ (1,0) [0|255] "" XXX
- SG_ BOOT_PROTO : 48|8@1+ (1,0) [0|255] "" XXX
- SG_ BOARD_CLASS : 56|8@1+ (1,0) [0|255] "" XXX
 
-BO_ 1583 BLR_BUILD: 8 BLR
+BO_ 1583 BLR_BUILD: 7 BLR
  SG_ BOOT_PRESENT : 0|1@1+ (1,0) [0|1] "" XXX
- SG_ BOOT_DIRTY : 1|1@1+ (1,0) [0|1] "" XXX
  SG_ OPT_BOR_EN : 2|1@1+ (1,0) [0|1] "" XXX
  SG_ OPT_DUAL_BANK : 3|1@1+ (1,0) [0|1] "" XXX
- SG_ OPT_NSWAP_BANK : 4|1@1+ (1,0) [0|1] "" XXX
- SG_ OPT_IWDG_SW : 5|1@1+ (1,0) [0|1] "" XXX
- SG_ HSE_OK : 6|1@1+ (1,0) [0|1] "" XXX
- SG_ OPT_NBOOT_SEL : 7|1@1+ (1,0) [0|1] "" XXX
  SG_ BOOT_GIT_LO24 : 8|24@1+ (1,0) [0|16777215] "" XXX
  SG_ BOARD_UID24 : 32|24@1+ (1,0) [0|16777215] "" XXX
- SG_ HW_REV : 56|8@1+ (1,0) [0|255] "" XXX
 
-CM_ BO_ 1568 "10 Hz + on change (>= 20 ms apart). In shadow, ACTIVE / WOULD_ON = would light; OUT_DRIVE is always 0.";
+CM_ BO_ 1568 "10 Hz + on change (>= 20 ms apart; a freshness-forced OFF at once). DLC 4 = frame layout 2. In shadow, ACTIVE / WOULD_ON = would light; OUT_DRIVE is always 0. A DLC-8 0x620 is frame layout 1 (routes before 2026-11-01): read it with blr/tools/blr_layout1.dbc.";
 CM_ SG_ 1568 OUT_DRIVE "PB10 as applied (RELAY_CMD).";
 CM_ SG_ 1568 WOULD_ON "The decided output (virt).";
 CM_ SG_ 1568 REQUEST "BRAKE_LIGHTS && COMPUTER_BRAKE_REQUEST && COMPUTER_BRAKE > 0 of the last valid 0x1FA; 0 if stale.";
 CM_ SG_ 1568 CMD_FRESH "A valid 0x1FA within 150 ms.";
 CM_ SG_ 1568 EXT_SINK "Coil line LOW and lamp feed HIGH with the 0x17C pedal bit fresh and 0: something other than the pedal sinks the coil.";
-CM_ SG_ 1568 TIMEOUT_WHILE_ON "Event: set in the first 0x620 after a freshness-forced OFF.";
-CM_ SG_ 1568 CMD_AGE "Age of the last valid 0x1FA; 2550 = 2.55 s or more, or never.";
-CM_ SG_ 1568 CB_HI "COMPUTER_BRAKE of the last valid 0x1FA, in counts (low 2 bits dropped).";
-CM_ SG_ 1568 BLR_SEQ "0-15 rolling, one per 0x620 sent: loss detection. Not a Honda COUNTER on purpose.";
+CM_ SG_ 1568 BLR_SEQ "0-15 rolling, one per 0x620 sent: loss detection. Not a Honda COUNTER on purpose. Layout 2 only (layout 1: bits 56-59). A DLC-8 0x620 is frame layout 1 (routes before 2026-11-01): read it with blr/tools/blr_layout1.dbc, where bits 8-11 are the sense zones.";
+CM_ SG_ 1568 ADC_OK "The sense ADC is delivering sets with VDDA in range; 0 forces the output off. Layout 2 only (layout 1: bit 52). A DLC-8 0x620 is frame layout 1 (routes before 2026-11-01): read it with blr/tools/blr_layout1.dbc, where bit 7 is EDGE_DEFERRED (nearly always 0).";
+CM_ SG_ 1568 PIN_MISMATCH "PB10 reads back other than it was driven. Layout 2 only (layout 1: bit 51). A DLC-8 0x620 is frame layout 1 (routes before 2026-11-01): read it with blr/tools/blr_layout1.dbc, where bit 13 is PEDAL_CAN.";
+CM_ SG_ 1568 CAN_DEGRADED "Error-passive now, or a received frame lost in the last 500 ms: the output is forced off.";
 CM_ SG_ 1569 VBAT_SNS_MV "After the reverse-polarity diode D2, uncorrected (about 0.2-0.35 V below J1-3).";
-CM_ SG_ 1570 BUS_STATE "0 error-active, 1 error-passive, 2 bus-off, 3 bus-monitoring (TX not allowed).";
 CM_ SG_ 1571 FAULTS_EVER "OR of 0x620 bits 16-23 seen this power cycle.";
 CM_ SG_ 1571 ON_EDGES "Counts WOULD_ON edges (also in shadow).";
 CM_ SG_ 1575 GIT_HASH "Path-scoped BLR commit, little-endian (the 0x707 convention).";
+CM_ SG_ 1575 FRAME_LAYOUT "2 since 2026-11-01; 1 before (blr/tools/blr_layout1.dbc).";
 
 VAL_ 1568 STATE 0 "INIT" 1 "IDLE" 2 "ACTIVE" 3 "FAULT" 4 "LATCHED" 7 "KNOCK" ;
-VAL_ 1568 RELAY_SNS_ST 0 "LOW" 1 "MID" 2 "HIGH" 3 "SETTLING" ;
-VAL_ 1568 LAMP_SNS_ST 0 "LOW" 1 "MID" 2 "HIGH" 3 "SETTLING" ;
 VAL_ 1568 LATCH_REASON 0 "NONE" 1 "U4" 2 "FEEDBACK" 3 "CLOCK" 4 "PIN_STUCK_HIGH" ;
-VAL_ 1568 VARIANT 1 "BENCH" 2 "SHADOW" 3 "LIVE" ;
-VAL_ 1570 BUS_STATE 0 "ACTIVE" 1 "PASSIVE" 2 "BUS_OFF" 3 "MONITOR" ;
 VAL_ 1570 RESET_CAUSE 0 "POWER" 1 "PIN" 2 "SOFTWARE" 3 "IWDG" 4 "WWDG" 5 "OBL" 6 "LPWR" 7 "NONE" ;
 VAL_ 1570 LAST_EXC 0 "NONE" 1 "HARDFAULT" 2 "CSS" 3 "BENCH_KILL" ;
 VAL_ 1575 VARIANT 1 "BENCH" 2 "SHADOW" 3 "LIVE" ;
