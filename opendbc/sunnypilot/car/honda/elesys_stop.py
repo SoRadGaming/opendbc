@@ -103,6 +103,22 @@ state and vEgo > 1 m/s, the per-mode pedal counter needs the PID state (_learn_o
 the command BEFORE this ceiling. Panda forwards stock AEB whenever its brake is >= ours, so a
 lower command can only start that forwarding earlier, never later.
 
+ROUND 10 (2026-11, the red-light stops): the planner now asks to stop at 0.8 m/s at a red light too (openpilot
+e2e_stop.py), so a stop that used to enter here at 0.28 m/s, 0.01-0.08 s before wheel-zero, enters at ~0.78 m/s and
+1.5-2 s of it is rolling at this ceiling. Two changes for that, both measured on the four hands-off red-light stops
+(12b 470.7, 142 263.7, 161 147.6, 170 233.0) and the 50 clean queue stops, closed loop through this file:
+
+  FIRM-UP      while the wheels turn, once the command has sat AT the ceiling for 0.3 s, aEgo above -0.5 m/s^2 raises
+               the ceiling by 150 counts/s per m/s^2 of shortfall (at most 75/s): it only ever rises, never past the
+               command, and freezes at wheel-zero (aEgo means nothing there). It replaces the guess that 105 counts is
+               0.5-0.6 m/s^2 on every road: on 142 105 gave ~0.43, on 161's -2.2 deg 162 counts gave 0.31 (measured).
+  MAX_ROLL     1.9 s up to 0.6 m/s at entry, +2.5 s per m/s above it (2.4 s at 0.8 m/s). At 1.9 s the backstop fired
+               in 17 of 24 replays of a 0.8 m/s red-light entry, inside the last 0.3 m/s; at 2.4 s, none.
+
+Replayed (brake gain 1.5-2.9 m/s^2 per 256 counts, lag 0.3-0.5 s): decel at wheel-zero 0.36-0.59 m/s^2 (median 0.49),
+at rest at most 0.64; on the queue stops the change moves the rest point a median 0.00 m (at most 0.22 m shorter) and
+the decel at wheel-zero not at all (median 0.57 both), and MAX_ROLL never fires (48 of 300 replays today).
+
 One line per stop goes to carlog (`hondastop ...`, which reaches the route as a logMessage): why
 and when the ceiling started to rise, that the stop ended before it did, or (`skip=speed v=`)
 that it was entered faster than 1.2 m/s and got no ceiling.
@@ -125,6 +141,17 @@ SOFT_STOP_WEAK_DECEL = 0.25      # m/s^2: aEgo above -this is "not slowing"
 SOFT_STOP_WEAK_TIME = 0.4        # s of not slowing, at the ceiling, before the rise
 SOFT_STOP_MAX_ROLL = 1.9         # s since entry, absolute: the rise starts by then whatever the wheels do
 SOFT_STOP_MAX_ENTRY_V = 1.2      # m/s (vEgo): stopping entered faster gets no ceiling; measured entries max 1.08
+# FIRM-UP (round 10): while rolling AT the ceiling, a car slowing less than SOFT_STOP_FIRM_DECEL lets the ceiling climb in
+# proportion to the shortfall, so the brake firms toward the stop instead of holding a count that is too light for this
+# road (a downhill, a weak plant at a crawl). Only up, only while the wheels turn, only once the command has sat at the
+# ceiling for SOFT_STOP_AT_CEILING (the brake's lag), never after the rise has started. 0.5 is round 8's softer stop.
+SOFT_STOP_FIRM_DECEL = 0.5       # m/s^2: the deceleration the ceiling holds the car to while rolling, at least
+SOFT_STOP_FIRM_GAIN = 150.       # counts/s per m/s^2 of shortfall: a 0.6-1.1 s time constant at 1.5-2.9 m/s^2 per 256 counts
+SOFT_STOP_FIRM_MAX_ERR = 0.5     # m/s^2: the most shortfall counted, so the firm-up is at most 75 counts/s (the rise is 250)
+# MAX_ROLL grows with the entry speed: a red-light stop enters at ~0.8 m/s (the planner's e2e stop entry) and at 0.5 m/s^2
+# needs ~1.6 s plus the ramp-in; at 1.9 s the backstop would fire inside the last 0.3 m/s. 1.9 s up to 0.6 m/s, as before.
+SOFT_STOP_MAX_ROLL_FROM_V = 0.6  # m/s
+SOFT_STOP_MAX_ROLL_PER_MS = 2.5  # s per m/s of entry speed above SOFT_STOP_MAX_ROLL_FROM_V (0.8 m/s: 2.4 s; 1.2: 3.4 s)
 # the highest command the brake block can send: the ceiling is gone. The default; brake320's CarController passes its
 # own (320, or 255 after the VSA fallback) as done_cb
 SOFT_STOP_DONE_CB = 255.
@@ -158,6 +185,8 @@ class SoftStopState:
   still_t: float = 0.            # s with the wheels at zero, since they first read zero
   at_ceiling_t: float = 0.       # s the command has been at (or above) the ceiling, continuously
   weak_t: float = 0.             # s of weak deceleration counted at the ceiling, continuously
+  firm_cb: float = 0.            # counts the firm-up has added to the ceiling
+  max_roll: float = SOFT_STOP_MAX_ROLL   # this stop's MAX_ROLL (soft_stop_max_roll of the entry speed)
 
 
 def soft_stop_cap(pitch) -> float:
@@ -167,6 +196,12 @@ def soft_stop_cap(pitch) -> float:
   if not (math.isfinite(p) and abs(p) < math.pi / 2):
     return SOFT_STOP_ROLL_CB
   return SOFT_STOP_ROLL_CB + max(0., -math.sin(p)) * SOFT_STOP_GRADE_CB
+
+
+def soft_stop_max_roll(v_entry) -> float:
+  """MAX_ROLL for a stop entered at v_entry (m/s): 1.9 s up to 0.6 m/s, +2.5 s per m/s above it."""
+  v = _finite(v_entry, 0.0)
+  return SOFT_STOP_MAX_ROLL + SOFT_STOP_MAX_ROLL_PER_MS * max(min(v, SOFT_STOP_MAX_ENTRY_V) - SOFT_STOP_MAX_ROLL_FROM_V, 0.)
 
 
 def soft_stop_ceiling(stopping: bool, wheels_zero: bool, v_ego: float, a_ego: float, pitch, apply_brake: int,
@@ -189,7 +224,8 @@ def soft_stop_ceiling(stopping: bool, wheels_zero: bool, v_ego: float, a_ego: fl
     v0 = _finite(v_ego, math.nan)
     too_fast = not (v0 <= SOFT_STOP_MAX_ENTRY_V)
     st = SoftStopState(ceiling=max(cap, cmd), armed=not wheels_zero and not too_fast, entry_brake=int(cmd),
-                       entry_cap=cap, entry_v=v0, skip="speed" if (too_fast and not wheels_zero) else "")
+                       entry_cap=cap, entry_v=v0, skip="speed" if (too_fast and not wheels_zero) else "",
+                       max_roll=soft_stop_max_roll(v0))
   if not st.armed:
     return apply_brake, st
 
@@ -211,12 +247,18 @@ def soft_stop_ceiling(stopping: bool, wheels_zero: bool, v_ego: float, a_ego: fl
     # pressure: before that the car is slow to decelerate because the brake is still coming on
     settled = at_ceiling and st.at_ceiling_t >= SOFT_STOP_AT_CEILING - _EPS
     st.at_ceiling_t = st.at_ceiling_t + dt if at_ceiling else 0.
+    if settled and not st.rising:
+      # FIRM-UP: slowing less than SOFT_STOP_FIRM_DECEL at the ceiling raises it in proportion; unknown aEgo is the most
+      a = _finite(a_ego, math.nan)
+      short = SOFT_STOP_FIRM_MAX_ERR if not math.isfinite(a) else min(max(a + SOFT_STOP_FIRM_DECEL, 0.), SOFT_STOP_FIRM_MAX_ERR)
+      st.ceiling += SOFT_STOP_FIRM_GAIN * short * dt
+      st.firm_cb += SOFT_STOP_FIRM_GAIN * short * dt
     # an unknown aEgo counts as not slowing: the fallback is today's ramp, not a longer cap
     weak = settled and not (_finite(a_ego, math.nan) <= -SOFT_STOP_WEAK_DECEL)
     st.weak_t = st.weak_t + dt if weak else 0.
     if st.weak_t >= SOFT_STOP_WEAK_TIME - _EPS:
       _rise(st, "weak")
-  if st.t >= SOFT_STOP_MAX_ROLL - _EPS:
+  if st.t >= st.max_roll - _EPS:
     _rise(st, "max_roll")                 # absolute: counted from entry, rolling or settling
 
   if st.rising:
@@ -281,7 +323,7 @@ class ElesysSoftStop:
     try:
       if st is not None and st.rising and not prev_rising:
         carlog.info(f"{LOG_TAG} rise={st.reason} t={st.t:.2f} roll={st.roll_t:.2f} still={st.still_t:.2f} " +
-                    f"entry={st.entry_brake} cap={st.entry_cap:.0f} ceil={st.ceiling:.0f}")
+                    f"entry={st.entry_brake} cap={st.entry_cap:.0f} ceil={st.ceiling:.0f} firm={st.firm_cb:.0f} v={st.entry_v:.2f}")
       elif st is None and prev is not None and prev.armed and not prev_rising:
         carlog.info(f"{LOG_TAG} end=left t={prev.t:.2f} roll={prev.roll_t:.2f} still={prev.still_t:.2f} " +
                     f"entry={prev.entry_brake} cap={prev.entry_cap:.0f} ceil={prev.ceiling:.0f}")

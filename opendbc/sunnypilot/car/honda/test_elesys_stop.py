@@ -97,8 +97,14 @@ class TestSoftStop(unittest.TestCase):
     out = ep.run(frames(0.9), lambda i: min(30 + 5 * i, 189), a_ego=-0.1)
     at_cap = out.index(CAP)                                # the ramp reaches the cap at 0.30 s (105; 0.38 s at 125)
     self.assertEqual(at_cap, (CAP - 30) // 5)
-    self.assertEqual(max(out), CAP)                        # no rise while it builds, nor for 0.6 s at the cap
-    self.assertIsNone(ep.first_rise())
+    self.assertIsNone(ep.first_rise())                     # no rise while it builds, nor for 0.6 s at the cap
+    # round 10: only the firm-up moves it, and only after 0.3 s AT the ceiling (the brake's lag): 150 * 0.4 counts/s
+    lag = frames(es.SOFT_STOP_AT_CEILING)
+    self.assertEqual(set(out[at_cap:at_cap + lag]), {CAP})
+    firm = (len(out) - at_cap - lag) * es.SOFT_STOP_FIRM_GAIN * 0.4 * DT
+    self.assertAlmostEqual(ep.st.firm_cb, firm, delta=1e-6)
+    self.assertEqual(max(out), int(ep.st.ceiling))
+    self.assertAlmostEqual(ep.st.ceiling, CAP + firm, delta=1e-6)
     # it does escape, but only 0.3 s + 0.4 s after reaching the cap
     ep.run(frames(0.3), 189, a_ego=-0.1)
     self.assertEqual(ep.st.reason, "weak")
@@ -111,13 +117,73 @@ class TestSoftStop(unittest.TestCase):
     self.assertIsNotNone(first)
     self.assertEqual(ep.st.reason, "weak")
     self.assertAlmostEqual((first - at_cap + 1) * DT, 0.3 + 0.4, delta=1e-9)
-    self.assertEqual(ep.out[first], CAP + 5)
-    self.assertEqual(set(ep.out[at_cap:first]), {CAP})
+    # round 10: the firm-up had raised the ceiling 150 * 0.4 counts/s for the 0.4 s before the rise; the rise adds 5 a frame
+    self.assertEqual(ep.out[first], int(ep.ceilings[first]))
+    self.assertAlmostEqual(ep.ceilings[first], CAP + ep.st.firm_cb + es.SOFT_STOP_RISE * DT, delta=1e-6)
+    self.assertEqual(set(ep.out[at_cap:at_cap + frames(es.SOFT_STOP_AT_CEILING)]), {CAP})
 
   def test_real_deceleration_at_the_ceiling_does_not_escape(self):
     ep = Episode()
     ep.run(frames(1.8), 180, a_ego=-0.3)
     self.assertIsNone(ep.first_rise())
+
+  # --- round 10: the firm-up while rolling, and MAX_ROLL by entry speed ---------------------------------------------
+
+  def test_firm_up_raises_the_ceiling_in_proportion_to_the_shortfall(self):
+    for a_ego, short in ((-0.5, 0.0), (-0.8, 0.0), (-0.4, 0.1), (-0.3, 0.2), (-0.26, 0.24)):
+      with self.subTest(a_ego=a_ego):
+        ep = Episode()
+        out = ep.run(frames(1.2), 180, a_ego=a_ego)
+        self.assertIsNone(ep.first_rise())                 # no 250/s rise: aEgo is beyond -0.25
+        counted = len(out) - frames(es.SOFT_STOP_AT_CEILING)    # frames after 0.3 s at the ceiling
+        self.assertAlmostEqual(ep.st.firm_cb, counted * es.SOFT_STOP_FIRM_GAIN * short * DT, delta=1e-6)
+        self.assertEqual(out[-1], int(ep.ceilings[-1]))
+        self.assertAlmostEqual(ep.ceilings[-1], CAP + ep.st.firm_cb, delta=1e-6)
+        self.assertTrue(all(b >= a for a, b in zip(ep.ceilings, ep.ceilings[1:], strict=False)))
+
+  def test_firm_up_is_bounded_and_unknown_counts_as_the_most(self):
+    for a_ego in (0.5, 3.0, float("nan"), None):
+      with self.subTest(a_ego=a_ego):
+        ep = Episode()
+        ep.run(frames(0.3), 180, a_ego=-0.6)               # 0.3 s at the ceiling, decelerating
+        before = ep.st.ceiling
+        ep.step(180, a_ego=a_ego)
+        self.assertAlmostEqual(ep.st.ceiling - before, es.SOFT_STOP_FIRM_GAIN * es.SOFT_STOP_FIRM_MAX_ERR * DT, delta=1e-9)
+
+  def test_firm_up_only_while_the_ceiling_is_what_holds_the_brake(self):
+    ep = Episode()
+    ep.run(frames(1.0), 90, a_ego=0.0)                     # the command is under the ceiling: nothing to firm
+    self.assertEqual(ep.st.firm_cb, 0.0)
+    self.assertEqual(set(ep.out[1:]), {90})
+    ep = Episode()
+    ep.run(frames(0.2), 180, a_ego=-0.6)
+    ep.run(frames(0.5), 180, wheels_zero=True, a_ego=0.0)  # wheels at zero: aEgo means nothing, the ceiling is frozen
+    self.assertEqual(ep.st.firm_cb, 0.0)
+    self.assertEqual(ep.st.ceiling, float(CAP))
+
+  def test_firm_up_never_raises_the_command_and_stops_once_rising(self):
+    ep = Episode()
+    cmds = [120] * 40 + [200] * (frames(1.9) - 40)
+    out = ep.run(len(cmds), lambda i: cmds[i], a_ego=-0.1)
+    self.assertTrue(all(o <= c for o, c in zip(out, cmds, strict=False)))
+    self.assertEqual(ep.st.reason, "weak")
+    firm = ep.st.firm_cb
+    ep.run(frames(0.3), 200, a_ego=-0.1)
+    self.assertEqual(ep.st.firm_cb, firm)                  # once the rise has started the firm-up adds nothing
+
+  def test_max_roll_grows_with_the_entry_speed(self):
+    self.assertEqual(es.soft_stop_max_roll(0.3), es.SOFT_STOP_MAX_ROLL)
+    self.assertEqual(es.soft_stop_max_roll(0.6), es.SOFT_STOP_MAX_ROLL)
+    self.assertAlmostEqual(es.soft_stop_max_roll(0.8), 2.4, delta=1e-9)
+    self.assertAlmostEqual(es.soft_stop_max_roll(1.2), 3.4, delta=1e-9)
+    self.assertAlmostEqual(es.soft_stop_max_roll(5.0), 3.4, delta=1e-9)      # bounded by the entry-speed bound
+    self.assertEqual(es.soft_stop_max_roll(float("nan")), es.SOFT_STOP_MAX_ROLL)
+    for v, expect in ((0.6, 1.9), (0.8, 2.4), (1.0, 2.9)):
+      with self.subTest(v=v):
+        ep = Episode(v_ego=v)
+        ep.run(frames(4.0), 189, a_ego=-0.6)               # decelerating, never reaching wheel-zero
+        self.assertEqual(ep.st.reason, "max_roll")
+        self.assertAlmostEqual((ep.first_rise() + 1) * DT, expect, delta=DT / 2)
 
   def test_one_real_deceleration_frame_restarts_the_weak_count(self):
     ep = Episode()
