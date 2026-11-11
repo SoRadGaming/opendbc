@@ -171,6 +171,31 @@ class TestSoftStop(unittest.TestCase):
     ep.run(frames(0.3), 200, a_ego=-0.1)
     self.assertEqual(ep.st.firm_cb, firm)                  # once the rise has started the firm-up adds nothing
 
+  def test_firm_up_constants_and_its_rate(self):
+    # round 10's numbers pinned, not read back: 150 counts/s per m/s^2 short of 0.5 m/s^2, the shortfall capped at 0.5, so
+    # the firm-up never climbs faster than 75 counts/s (the rise is 250)
+    self.assertEqual((es.SOFT_STOP_FIRM_DECEL, es.SOFT_STOP_FIRM_GAIN, es.SOFT_STOP_FIRM_MAX_ERR), (0.5, 150., 0.5))
+    self.assertEqual((es.SOFT_STOP_MAX_ROLL, es.SOFT_STOP_MAX_ROLL_FROM_V, es.SOFT_STOP_MAX_ROLL_PER_MS), (1.9, 0.6, 2.5))
+    for a_ego in (-0.4, 0.0, 2.0, float("nan")):
+      with self.subTest(a_ego=a_ego):
+        ep = Episode()
+        ep.run(frames(1.5), 230, a_ego=a_ego)
+        self.assertGreater(ep.st.firm_cb, 0.0)
+        steps = [ep.ceilings[i + 1] - ep.ceilings[i] for i in range(len(ep.ceilings) - 1) if not ep.rising[i + 1]]   # before the rise
+        self.assertLessEqual(max(steps), 75. * DT + 1e-9)
+        if a_ego != -0.4:                                     # at the most shortfall it is exactly 75 counts/s
+          self.assertAlmostEqual(max(steps), 75. * DT, delta=1e-9)
+
+  def test_firm_up_stops_when_the_command_drops_under_the_firmed_ceiling(self):
+    ep = Episode()
+    ep.run(frames(0.8), 180, a_ego=-0.3)                     # firmed up for 0.5 s at 30 counts/s
+    firm, ceiling = ep.st.firm_cb, ep.st.ceiling
+    self.assertGreater(firm, 0.0)
+    out = ep.run(frames(0.6), 90, a_ego=-0.3)                # the command falls under it: it no longer holds the brake
+    self.assertEqual(set(out), {90})
+    self.assertEqual((ep.st.firm_cb, ep.st.ceiling), (firm, ceiling))
+    self.assertIsNone(ep.first_rise())
+
   def test_max_roll_grows_with_the_entry_speed(self):
     self.assertEqual(es.soft_stop_max_roll(0.3), es.SOFT_STOP_MAX_ROLL)
     self.assertEqual(es.soft_stop_max_roll(0.6), es.SOFT_STOP_MAX_ROLL)
@@ -465,6 +490,19 @@ class TestElesysSoftStop(unittest.TestCase):
     ss = es.ElesysSoftStop()
     ss.update(cc(), cs(), ENTRY, None)
     self.assertEqual(ss.update(cc(), cs(), 200, None), CAP)   # no tuner at all: the flat cap
+
+  def test_the_rise_line_carries_the_firm_up_and_the_entry_speed(self):
+    # round 10: the next-drive check reads `firm=` and `v=` off the rise line
+    with mock.patch.object(es.carlog, "info") as info:
+      h = Harness(c_s=cs(v_raw=0.8))
+      h.run(frames(1.0), cs(v_raw=0.5, a_ego=-0.3))           # at the ceiling, slowing 0.2 short of 0.5: it firms up
+      h.run(frames(1.0), cs(v_raw=0.0, a_ego=-0.3))           # the wheels at zero: the settle rise
+      lines = [c.args[0] for c in info.call_args_list]
+    self.assertEqual(len(lines), 1, lines)
+    firm = h.ss.state.firm_cb
+    self.assertGreater(firm, 0.0)
+    self.assertTrue(lines[0].startswith("hondastop rise=settle "), lines[0])
+    self.assertTrue(lines[0].endswith(f" firm={firm:.0f} v=0.80"), lines[0])
 
   def test_never_raises_and_never_raises_the_command(self):
     odd = [(None, cs()), (cc(), None), (cc(), SimpleNamespace()), (SimpleNamespace(), cs()),

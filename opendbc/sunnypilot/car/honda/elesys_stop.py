@@ -29,7 +29,8 @@ WHAT: a brake CEILING while the car is still rolling in the stopping state.
                  MOVING   the wheels turn again after reading zero
                  WEAK     aEgo > -0.25 m/s^2 for 0.4 s, counted only once the command has sat AT
                           the ceiling for 0.3 s
-                 MAX_ROLL 1.9 s since entry, absolute: rolling or settling, whatever the wheels do
+                 MAX_ROLL since entry, absolute: rolling or settling, whatever the wheels do. 1.9 s up to a
+                          0.6 m/s entry, +2.5 s per m/s above it (round 10): 2.4 s at 0.8, 3.4 s at most (1.2)
   done         at the highest command the brake block can send (255; 320 with brake320, 255 again
                after its VSA fallback) the ceiling is out of the way, so the standstill hold is
                today's (189), byte for byte
@@ -37,9 +38,12 @@ WHAT: a brake CEILING while the car is still rolling in the stopping state.
                unknown counts as faster); outside the stopping state; longActive false; gas or
                brake pressed. The last three reset the state.
 
-The bound: the rise starts 1.9 s after entry at the latest and the ceiling is gone 0.60 s after
-that (105 -> 255 at 250 counts/s), so nothing of it is left 2.50 s after the stopping state began.
-With brake320 (brake_ceiling.py) the ceiling rises on to 320, 0.86 s, 2.76 s after entry; between 255
+The bound: the rise starts at MAX_ROLL after entry at the latest - 1.9 s up to a 0.6 m/s entry, at
+most 3.4 s at the 1.2 m/s entry bound (round 10) - and the ceiling is gone at most 0.60 s after that
+(105 -> 255 at 250 counts/s; a firmed-up ceiling starts higher and is gone sooner), so nothing of it
+is left 2.50 s after the stopping state began for an entry up to 0.6 m/s, 3.0 s at 0.8 m/s and
+4.0 s at 1.2 m/s (measured: still lowering the command 3.70 s after a 1.2 m/s entry at aEgo -0.5).
+With brake320 (brake_ceiling.py) the ceiling rises on to 320, 0.86 s, so 2.76 s / 4.26 s after entry; between 255
 and 320 it can only bind on a command above 255, which the brake block cannot send in the stopping
 state: only the pid state earns beyond 255 (review 2026-10-24, which found stops entered from a
 hard brake holding LongControl's -2.6 to -3.0 at 267-317 counts for the whole standstill before
@@ -72,6 +76,7 @@ The four changes the skeptic review made to the audit's version, and why:
      of net deceleration. -2.5 deg adds 42 counts.
   4. MOVING AGAIN AFTER WHEEL-ZERO RISES AT ONCE, and MAX_ROLL is 1.9 s (the audit's 2.5 s was
      wider than the ~1.4 s a 0.8 m/s stop takes at ~0.6 m/s^2; 4.1 m median to a stopped lead).
+     Round 10 (below) keeps 1.9 s up to a 0.6 m/s entry and lets it grow above that.
 
 Expected (inferred; the audit's simulator was never validated, so measure it): decel at the stop
 ~0.5-0.6 m/s^2 instead of 0.92, about +0.1-0.2 m and +0.3-0.4 s per stop. Measure decel at the
